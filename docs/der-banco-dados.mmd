@@ -1,0 +1,292 @@
+erDiagram
+    %% ==========================================================
+    %% Solicitacao OS -- DER revisado (revisao 3)
+    %% Fonte: /src/tipos, /src/servicos e as regras ja implementadas nas telas.
+    %% ---
+    %% Revisao 3: PKs/FKs de entidade de negocio trocaram de uuid para bigint
+    %% (identity/serial), para bater com os tipos reais do front (id: number
+    %% em todo /src/tipos -- nenhuma tela trata id como string). O ganho de
+    %% uuid (nao enumeravel numa API publica) foi julgado nao decisivo aqui:
+    %% o tenant_id ja isola os dados entre clientes, e o front inteiro foi
+    %% escrito assumindo id numerico (valueAsNumber nos formularios, Number()
+    %% nos filtros de query). Ver secao 3.12 de modelagem-banco-dados.md.
+    %% ---
+    %% Tipos ENUM nativos usados abaixo (listas que so mudam com deploy):
+    %%   perfil_usuario     solicitante | tecnico | gestor | administrador
+    %%   tipo_os            maquinario | terceiros | reparo
+    %%   origem_solicitacao solicitante | preventiva
+    %%   status_solicitacao Pendente | Convertida | Rejeitada
+    %%   status_os          Aberta | Em Andamento | Pausada | Concluida
+    %%   marcador_impacto   Afeta Producao | Parada Parcial | Retrabalho
+    %%   tipo_anexo         foto | video
+    %% ---
+    %% Continuam como tabela de dominio (vocabulario do cliente, cadastravel):
+    %%   tipo_defeito, area_tecnico, nivel_criticidade, nivel_urgencia
+    %% ==========================================================
+
+    %% ==========================================================
+    %% Raiz multi-tenant
+    %% empresa E o tenant: 1 cliente SaaS = 1 empresa = 1 subdominio.
+    %% As demais tabelas referenciam empresa.id pela coluna tenant_id.
+    %% ==========================================================
+    empresa ||--o{ loja : "possui"
+    empresa ||--o{ usuario : "possui"
+    empresa ||--o{ empresa_terceirizada : "contrata"
+    loja ||--o{ setor : "possui"
+
+    empresa {
+        bigint id PK
+        text subdominio UK "extraido de window.location.hostname"
+        text nome
+        boolean ativa
+        timestamptz criado_em
+    }
+
+    loja {
+        bigint id PK
+        bigint tenant_id FK "empresa.id"
+        text nome "unico por tenant"
+        boolean ativa
+        timestamptz criado_em
+    }
+
+    setor {
+        bigint id PK
+        bigint tenant_id FK "empresa.id"
+        bigint loja_id FK
+        text nome "unico por loja"
+        boolean ativo
+        timestamptz criado_em
+    }
+
+    %% Cadastro do Administrador, sem vinculo de loja: o mesmo fornecedor
+    %% atende quantas lojas do tenant forem necessarias.
+    empresa_terceirizada {
+        bigint id PK
+        bigint tenant_id FK "empresa.id"
+        text nome "unico por tenant"
+        text especialidade
+        text telefone
+        boolean ativa
+        timestamptz criado_em
+    }
+
+    %% ==========================================================
+    %% Usuarios e escopo de acesso
+    %% Um unico modelo de escopo serve aos quatro perfis:
+    %%   solicitante  -> 1 escopo, 1 setor
+    %%   tecnico      -> N escopos (lojas), sem setor
+    %%   gestor       -> N escopos, cada um com setores ou acesso total
+    %%   administrador-> NENHUM escopo (a ausencia significa o tenant inteiro)
+    %% ==========================================================
+    area_tecnico ||--o{ usuario : "atua em"
+    usuario ||--o{ usuario_escopo : "tem"
+    loja ||--o{ usuario_escopo : "delimita"
+    usuario_escopo ||--o{ usuario_escopo_setor : "detalha"
+    setor ||--o{ usuario_escopo_setor : "restringe"
+
+    area_tecnico {
+        smallint id PK
+        bigint tenant_id FK "empresa.id"
+        text nome "Refrigeracao Eletrica Mecanica Hidraulica"
+    }
+
+    usuario {
+        bigint id PK
+        bigint tenant_id FK "empresa.id"
+        perfil_usuario perfil "ENUM 4 perfis"
+        smallint area_tecnico_id FK "NULL exceto tecnico"
+        text nome
+        citext email "unico por tenant"
+        text senha_hash "bcrypt ou argon2, nunca texto puro"
+        text telefone
+        boolean ativo
+        timestamptz ultimo_acesso
+        timestamptz criado_em
+    }
+
+    usuario_escopo {
+        bigint id PK
+        bigint usuario_id FK
+        bigint loja_id FK
+        boolean acesso_total_setores "equivale a setores todos"
+        timestamptz criado_em
+    }
+
+    usuario_escopo_setor {
+        bigint escopo_id PK "FK usuario_escopo"
+        bigint setor_id PK "FK setor"
+    }
+
+    %% ==========================================================
+    %% Maquinas e manutencao preventiva
+    %% A maquina referencia apenas setor_id: a loja vem por join,
+    %% evitando um par (loja, setor) que possa se contradizer.
+    %% ==========================================================
+    setor ||--o{ maquina : "abriga"
+    nivel_criticidade ||--o{ maquina : "classifica"
+    maquina ||--o{ preventiva : "possui"
+
+    nivel_criticidade {
+        smallint id PK
+        bigint tenant_id FK "empresa.id"
+        text nome "Baixa Media Alta"
+        smallint ordem
+    }
+
+    maquina {
+        bigint id PK
+        bigint tenant_id FK "empresa.id"
+        bigint setor_id FK "loja derivada via setor"
+        smallint criticidade_id FK
+        text numero_patrimonio "unico por tenant"
+        text numero_serie "unico por tenant quando informado"
+        text nome
+        text descricao
+        text marca
+        text modelo
+        text foto_url
+        boolean ativa
+        timestamptz criado_em
+    }
+
+    preventiva {
+        bigint id PK
+        bigint tenant_id FK "empresa.id"
+        bigint maquina_id FK
+        text descricao
+        integer intervalo_dias "CHECK maior que zero"
+        date proxima_data
+        boolean ativa
+        timestamptz criado_em
+    }
+
+    %% ==========================================================
+    %% Solicitacao de OS -- serve os tres tipos
+    %% maquinario e terceiros: exigem maquina_id e tipo_defeito_id
+    %% reparo:                 exige item_descricao (texto livre), sem maquina
+    %% ==========================================================
+    maquina ||--o{ solicitacao_os : "origina"
+    usuario ||--o{ solicitacao_os : "solicita"
+    tipo_defeito ||--o{ solicitacao_os : "categoriza"
+    preventiva ||--o{ solicitacao_os : "dispara"
+    solicitacao_os ||--o{ solicitacao_impacto : "informa"
+    solicitacao_os ||--o{ solicitacao_anexo : "evidencia"
+
+    tipo_defeito {
+        smallint id PK
+        bigint tenant_id FK "empresa.id"
+        text nome "Mecanico Eletrico Hidraulico Pneumatico"
+    }
+
+    solicitacao_os {
+        bigint id PK
+        bigint tenant_id FK "empresa.id"
+        tipo_os tipo "ENUM maquinario terceiros reparo"
+        bigint maquina_id FK "NULL somente se tipo reparo"
+        text item_descricao "obrigatorio somente se tipo reparo"
+        bigint solicitante_id FK "NULL se origem preventiva"
+        bigint preventiva_id FK "NULL se origem solicitante"
+        smallint tipo_defeito_id FK "NULL no reparo"
+        status_solicitacao status "ENUM Pendente Convertida Rejeitada"
+        origem_solicitacao origem "ENUM solicitante preventiva"
+        text descricao
+        timestamptz criado_em
+    }
+
+    solicitacao_impacto {
+        bigint solicitacao_id PK "FK solicitacao_os"
+        marcador_impacto marcador PK "ENUM 3 marcadores"
+    }
+
+    %% Foto do defeito obrigatoria e video opcional. Tabela em vez de duas
+    %% colunas: aguenta N arquivos e ja tem onde guardar o que o storage exige.
+    solicitacao_anexo {
+        bigint id PK
+        bigint solicitacao_id FK
+        tipo_anexo tipo "ENUM foto video"
+        text url "chave no storage, nao link assinado"
+        text mime_type
+        bigint tamanho_bytes
+        timestamptz criado_em
+    }
+
+    %% ==========================================================
+    %% Ordem de Servico e seu ciclo de vida
+    %% maquinario/reparo: tecnico interno + urgencia, passa por os_encerramento
+    %% terceiros:         empresa terceirizada, nasce Concluida, sem encerramento
+    %% ---
+    %% O par (id, tipo) e propagado por FK composta em toda a cadeia,
+    %% para que cada CHECK local enxergue o tipo sem consultar a tabela pai.
+    %% ==========================================================
+    solicitacao_os ||--o| ordem_servico : "convertida em"
+    nivel_urgencia ||--o{ ordem_servico : "prioriza"
+    usuario ||--o{ ordem_servico : "tecnico responsavel"
+    usuario ||--o{ ordem_servico : "aberta pelo gestor"
+    empresa_terceirizada ||--o{ ordem_servico : "atende"
+    ordem_servico ||--o{ os_pausa : "historico de pausas"
+    ordem_servico ||--o| os_encerramento : "encerrada por"
+    ordem_servico ||--o| os_custo : "custo lancado em"
+    usuario ||--o{ os_encerramento : "registrado por"
+    usuario ||--o{ os_custo : "lancado por"
+
+    nivel_urgencia {
+        smallint id PK
+        bigint tenant_id FK "empresa.id"
+        text nome "Baixa Media Alta"
+        smallint ordem
+    }
+
+    ordem_servico {
+        bigint id PK
+        bigint tenant_id FK "empresa.id"
+        bigint solicitacao_id FK "UNIQUE um para um"
+        tipo_os tipo "herdado da solicitacao via FK composta"
+        bigint tecnico_id FK "NULL se tipo terceiros"
+        bigint empresa_terceirizada_id FK "preenchido so no tipo terceiros"
+        bigint aberta_por_id FK "usuario perfil gestor"
+        smallint urgencia_id FK "NULL se tipo terceiros"
+        status_os status "ENUM Aberta EmAndamento Pausada Concluida"
+        timestamptz aberta_em
+        timestamptz iniciada_em "NULL ate iniciar atendimento"
+        timestamptz criado_em
+    }
+
+    %% Historico, nao campo sobrescrito: tres pausas seguidas precisam das tres
+    %% linhas. E dele que sai o calculo de horas trabalhadas.
+    os_pausa {
+        bigint id PK
+        bigint ordem_servico_id FK
+        status_os status_anterior "para onde retomar"
+        text motivo
+        timestamptz pausada_em
+        timestamptz retomada_em "NULL enquanto pausada"
+    }
+
+    %% Registro de execucao do Tecnico. Nunca existe para tipo terceiros.
+    os_encerramento {
+        bigint id PK
+        bigint tenant_id FK "empresa.id"
+        bigint ordem_servico_id FK "UNIQUE um para um"
+        tipo_os tipo FK "CHECK nunca terceiros"
+        bigint encerrado_por_id FK "usuario perfil tecnico"
+        timestamptz data_fim
+        text defeito_constatado
+        text causa_raiz
+        text solucao
+        timestamptz criado_em
+    }
+
+    %% Lancamento financeiro, separado da execucao: serve os tres tipos e
+    %% registra quem mexeu no valor. Sua existencia e o que torna a OS "finalizada".
+    os_custo {
+        bigint id PK
+        bigint tenant_id FK "empresa.id"
+        bigint ordem_servico_id FK "UNIQUE um para um"
+        tipo_os tipo FK "par com ordem_servico"
+        numeric custo_hora_tecnico "NULL se tipo terceiros"
+        numeric custo_manutencao "CHECK nao negativo"
+        text descricao_servico "obrigatorio so no tipo terceiros"
+        bigint lancado_por_id FK
+        timestamptz lancado_em
+    }
