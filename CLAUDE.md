@@ -58,8 +58,19 @@ que o front espera (camelCase, datas `dd/mm/yyyy HH:MM:SS`, ver `config/dataBr.g
 - `internal/helper/Errors.go` — `TraduzErroPostgres`: converte código de erro do
   Postgres (`23505`, `23503`, `23502`, ...) em erro de negócio (`ErrDadoDuplicado`,
   `ErrConflitoIntegridade`, ...) pros controllers não fazerem `switch` em `pgErr.Code`
-  espalhado pelo código.
-- `internal/service/` — regras de negócio (ex: `provisionamento.go`).
+  espalhado pelo código. `ErrCredenciaisInvalidas` é o erro único do login — ver
+  "Autenticação" abaixo.
+- `internal/service/` — regras de negócio. `UsuarioService` guarda o `*pgxpool.Pool`
+  (não um `Querier`): as escritas precisam de transação e `Querier` não expõe `WithTx`,
+  então cada método monta o seu `repository.New(tx)`.
+  - `loginService.go` — `CadastrarUsuario` (usuário + escopo numa transação só) e
+    `Login`.
+  - `EscopoPerfilService.go` — o que é por perfil e não por endpoint: `validarEscopo`
+    (cardinalidade de 3.8, que as tags de `binding` não alcançam), `escopoDoPerfil`
+    (normaliza o payload plano do front), `setoresPorLoja` (distribui cada setor no
+    escopo da loja certa — ver "Queries e repository") e `montarSessao` (o corpo de
+    `SessaoUsuario`, compartilhado entre `POST /autenticacao/login` e
+    `GET /autenticacao/sessao`).
 - `internal/router/`, `controller/` — criados mas ainda vazios.
 - `database/migrate/` — migrations SQL puro (`golang-migrate`), numeradas e sequenciais.
 - `database/queries/` + `database/repository/` — ver "Queries e repository (sqlc)"
@@ -86,9 +97,10 @@ Não existe `POST /empresas` nem forma de criar o primeiro `administrador` via A
 make provisionar-admin ARGS="-subdominio=cooprata -empresa='Cooprata' -nome='Davi' -email=admin@cooprata.com -senha=SENHA_FORTE"
 ```
 
-Implementado em `internal/service/provisionamento.go` (`ProvisionarAdministrador`) +
-`cli_provisionar_admin.go`. Idempotente por tenant: rodar de novo com o mesmo
-`--subdominio` não recria a empresa, só adiciona outro administrador a ela.
+Implementado em `provisionamento.go` na raiz (`package main`, `ProvisionarAdministrador`,
+SQL cru — não passa pelo `repository`) + `cli_provisionar_admin.go`. Idempotente por
+tenant: rodar de novo com o mesmo `--subdominio` não recria a empresa, só adiciona outro
+administrador a ela.
 
 ## Autenticação (JWT)
 - `auth.GerarJwt(id, tenantId int64, perfil string)` assina um HS256 com `JWT_SECRET`
@@ -107,11 +119,24 @@ Implementado em `internal/service/provisionamento.go` (`ProvisionarAdministrador
   `userId`, `user_perfil`, `user_TenantId` (todos `int64`/`string`). Aborta com 401 se
   qualquer claim obrigatória faltar — não deixa o handler seguir com contexto
   incompleto.
-- **Ainda faltam:** o handler de login (que assina o JWT e faz `ctx.SetCookie` com
-  `HttpOnly` + `Secure` + `SameSite`, nome do cookie precisa bater com o que o
-  middleware lê — `"token"`), o RBAC por perfil (401 vs 403 — ver regra abaixo) e uma
-  forma de revogar sessão antes do `exp` (desativar usuário/trocar senha/logout hoje não
-  matam um token já emitido).
+- `service.UsuarioService.Login(ctx, model.Login, tenantId)` devolve `(token, sessão,
+  erro)` — o service já assina o JWT, o controller só precisa pôr no cookie. Sem
+  transação de propósito: são leituras + o `UPDATE` de `ultimo_acesso`.
+- **E-mail inexistente, senha errada, usuário inativo e perfil trocado devolvem todos
+  `helper.ErrCredenciaisInvalidas`**, a mesma mensagem — senão o login vira um oráculo
+  de quais e-mails existem no tenant. O `perfil` vem do formulário, então é palpite do
+  cliente: quando não bate com o do banco é credencial inválida, **nunca** promoção.
+  (`ObterUsuarioPorEmail` já filtra `AND ativo`, então usuário desativado cai sozinho no
+  mesmo `ErrNoRows`.)
+- `SessaoUsuario` é montada por perfil em `montarSessao`: administrador não tem nada
+  (a ausência de escopo É o acesso total), técnico leva `tecnicoId` = o próprio
+  `usuario.id` (`fk_os_tecnico` aponta pra `usuario`; não existe tabela `tecnico`),
+  gestor leva `escoposGestor`, solicitante leva `lojaId`/`setorId`/`setorNome`.
+- **Ainda faltam:** o handler de login (que faz `ctx.SetCookie` com `HttpOnly` +
+  `Secure` + `SameSite`, nome do cookie precisa bater com o que o middleware lê —
+  `"token"`, e mapeia `ErrCredenciaisInvalidas` → 401), o RBAC por perfil (401 vs 403 —
+  ver regra abaixo) e uma forma de revogar sessão antes do `exp` (desativar
+  usuário/trocar senha/logout hoje não matam um token já emitido).
 
 ## Queries e repository (sqlc)
 - `database/queries/*.sql` — queries anotadas (`-- name: NomeQuery :one/:many/:exec`),
@@ -128,9 +153,31 @@ Implementado em `internal/service/provisionamento.go` (`ProvisionarAdministrador
   (`DeletarSetoresDosEscoposPorUsuario` **antes de** `DeletarEscoposPorUsuario` — não há
   `ON DELETE CASCADE` entre as duas) e recria numa transação. Não existe
   `AtualizarEscopo` de propósito.
+- **`NovoUsuarioPayload` é plano (um `setoresIds` só para N `lojasIds`), mas isso NÃO
+  significa o mesmo conjunto de setores em toda loja**: o id do setor já identifica a
+  loja (`setor.loja_id`), então a lista plana expressa escopo por loja — é só
+  distribuir. `setoresPorLoja` (`EscopoPerfilService.go`) faz isso e recusa setor de
+  loja não selecionada e loja que ficou sem setor nenhum. **Jogar `setoresIds` inteiro
+  em cada `CriarEscopo` grava "acessa a Padaria da Loja A dentro da Loja B"** —
+  `usuario_escopo_setor` só tem FK para `setor (id)`, não checa se o setor é da loja do
+  escopo, então o banco aceita calado. Já foi bug uma vez.
+- ⚠️ O que o payload plano **realmente** não expressa: acesso total numa loja e parcial
+  noutra — `acessoTotalSetores` é um flag só, global. Um Gestor assim exige mudar o
+  contrato para `escopos: [{lojaId, setoresIds}]` (front junto; `front-end/CLAUDE.md`
+  item 7 registra a mesma lacuna, mas atribui a ela mais do que ela é).
 - `ObterEscopoSessaoPorUsuario` já devolve no formato que o front consome
   (`EscopoAcessoGestor[]`, um `array_agg` de `setor_id` por loja) — é a query certa pra
   montar `SessaoUsuario.escoposGestor` no login/sessão.
+- Onde o front fala **nome** e o banco guarda **id**, a tradução é do service, com query
+  própria: `area_tecnico.sql` (`ObterAreaTecnicoPorNome` — `NovoUsuarioPayload.area` vem
+  como o texto de `AreaTecnico` no front, `usuario.area_tecnico_id` é `smallint`) e
+  `setor.sql` (`ObterSetorPorID` — `SessaoUsuario.setorNome`, já que `usuario_escopo`
+  só guarda o `setor_id`; e `ObterSetoresPorIDs`, que devolve `loja_id` de cada setor
+  para o service distribuir o escopo).
+
+⚠️ **`area_tecnico` não é populada por nada hoje** — nem migration de seed, nem
+`ProvisionarAdministrador`, nem CRUD. Cadastrar técnico falha com "área técnica não
+cadastrada neste tenant" até existir uma dessas.
 
 ## Ambiente local
 - `.env` na raiz: `DB_SERVER`, `DB_USER`, `DB_PORT`, `DATABASE`, `DB_PASSWORD`
@@ -140,6 +187,25 @@ Implementado em `internal/service/provisionamento.go` (`ProvisionarAdministrador
   mal mapeada** (o Postgres dentro do container escuta em 5432, não 5431) — isso é do
   `docker-compose`, não conserte sem avisar; para testar comandos Go pontualmente,
   rode dentro do container já ativo: `docker exec api_sistema-OS go run . ...`.
+
+## Testes
+- `go test ./...`. Dois níveis em `internal/service/`:
+  - `loginService_test.go` — unitário, sem banco: tabela cobrindo `validarEscopo` +
+    `escopoDoPerfil` nos 4 perfis.
+  - `loginIntegracao_test.go` — integração de verdade contra Postgres. `bancoDeTeste`
+    cria um banco descartável (`teste_login_<pid>`), aplica as migrations nele e dropa
+    no fim; os usuários do seed são criados via `CadastrarUsuario`, então o caminho de
+    escrita entra junto. **Sem Postgres alcançável ele dá `t.Skip`**, não falha.
+- O DSN vem de `TEST_DB_DSN`; o default aponta pro **IP do container** na rede do compose
+  (`172.20.0.3:5432`) porque a porta publicada no host está mal mapeada (ver "Ambiente
+  local"). Se o IP mudar: `TEST_DB_DSN=... go test ./internal/service/`.
+- **A ordem dos dois `t.Cleanup` em `bancoDeTeste` é proposital** (`t.Cleanup` roda em
+  LIFO: o `migrate` fecha antes do `pool`). Invertida, `pool.Close()` espera para sempre
+  pela conexão que o `migrate` ainda segura e o teste **pendura em vez de falhar** — o
+  banco descartável também fica órfão. Se um teste travar em ~nada de saída, é isso.
+- Não há mock do `repository`: o service guarda `*pgxpool.Pool` concreto. Regra de
+  negócio pura vai em função livre (como `validarEscopo`) justamente pra ser testável
+  sem banco.
 
 ## Regras herdadas do contrato com o front (não reinvente)
 - **401 é só "sem sessão"**; fora de escopo/perfil errado é sempre **403** — 401 fora de
