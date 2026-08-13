@@ -45,7 +45,7 @@ func (p *ConnPostgresql) Conn(configEnv *VariaveisDeAmbiente) (*pgxpool.Pool, er
 
 	err = pool.Ping(context.Background())
 	if err != nil {
-		return nil, fmt.Errorf("erro ao verificar se o banco de dados esta ativo", err)
+		return nil, fmt.Errorf("erro ao verificar se o banco de dados esta ativo: %v", err)
 	}
 
 	s := pool.Stat()
