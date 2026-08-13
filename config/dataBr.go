@@ -30,7 +30,7 @@ func (d *DataBr) MarshalJSON() ([]byte, error) {
 	if t.IsZero() {
 		return []byte("null"), nil
 	}
-	return []byte(fmt.Sprintf("\"%s\"", t.Format("02/01/2006 15:04:05"))), nil
+	return fmt.Appendf(nil, "\"%s\"", t.Format("02/01/2006 15:04:05")), nil
 }
 
 func NewDataBrPtr(t time.Time) *DataBr {
