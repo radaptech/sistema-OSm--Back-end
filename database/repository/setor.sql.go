@@ -33,3 +33,41 @@ func (q *Queries) ObterSetorPorID(ctx context.Context, arg ObterSetorPorIDParams
 	err := row.Scan(&i.ID, &i.Nome, &i.LojaID)
 	return i, err
 }
+
+const obterSetoresPorIDs = `-- name: ObterSetoresPorIDs :many
+SELECT id, loja_id FROM setor
+WHERE id = ANY($1::bigint[]) AND tenant_id = $2
+`
+
+type ObterSetoresPorIDsParams struct {
+	Ids      []int64
+	TenantID int64
+}
+
+type ObterSetoresPorIDsRow struct {
+	ID     int64
+	LojaID int64
+}
+
+// Usado no cadastro de usuário: NovoUsuarioPayload manda uma lista plana de
+// setores para N lojas, e setor pertence a uma loja só -- é daqui que sai a
+// distribuição de cada setor no escopo da loja certa.
+func (q *Queries) ObterSetoresPorIDs(ctx context.Context, arg ObterSetoresPorIDsParams) ([]ObterSetoresPorIDsRow, error) {
+	rows, err := q.db.Query(ctx, obterSetoresPorIDs, arg.Ids, arg.TenantID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ObterSetoresPorIDsRow
+	for rows.Next() {
+		var i ObterSetoresPorIDsRow
+		if err := rows.Scan(&i.ID, &i.LojaID); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}

@@ -51,6 +51,10 @@ type Querier interface {
 	// (usuario_escopo guarda só o setor_id).
 	ObterSetorPorID(ctx context.Context, arg ObterSetorPorIDParams) (ObterSetorPorIDRow, error)
 	ObterSetoresPorEscopos(ctx context.Context, escopoIds []int64) ([]UsuarioEscopoSetor, error)
+	// Usado no cadastro de usuário: NovoUsuarioPayload manda uma lista plana de
+	// setores para N lojas, e setor pertence a uma loja só -- é daqui que sai a
+	// distribuição de cada setor no escopo da loja certa.
+	ObterSetoresPorIDs(ctx context.Context, arg ObterSetoresPorIDsParams) ([]ObterSetoresPorIDsRow, error)
 	// Usado no login: email é citext (case-insensitive) e único por tenant.
 	ObterUsuarioPorEmail(ctx context.Context, arg ObterUsuarioPorEmailParams) (Usuario, error)
 	ObterUsuarioPorID(ctx context.Context, arg ObterUsuarioPorIDParams) (Usuario, error)
