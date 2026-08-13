@@ -17,6 +17,10 @@ var (
 	ErrConflitoIntegridade = errors.New("ID nao existe no sistema")
 	ErrCampoObrigatorio    = errors.New("campo obrigatório não preenchido")
 	ErrSessaoExpirada      = errors.New("sua sessão expirou, faça login novamente")
+	// Mensagem única de propósito: e-mail inexistente, senha errada, usuário
+	// inativo e perfil trocado devolvem todos isto, senão o login vira um
+	// oráculo de quais e-mails existem no tenant.
+	ErrCredenciaisInvalidas = errors.New("e-mail ou senha inválidos")
 	ErrNomeCurto           = errors.New("deve ter ao minimo 2 caracteres")
 
 )
