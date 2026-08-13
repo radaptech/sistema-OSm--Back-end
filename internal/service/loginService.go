@@ -78,6 +78,15 @@ func (s *UsuarioService) CadastrarUsuario(ctx context.Context, modelUser model.N
 
 	lojasIds, setoresIds, acessoTotal := escopoDoPerfil(modelUser)
 
+	// Cada setor entra só no escopo da própria loja -- ver setoresPorLoja.
+	var porLoja map[int64][]int64
+	if len(setoresIds) > 0 {
+		porLoja, err = setoresPorLoja(ctx, repo, TenantID, lojasIds, setoresIds)
+		if err != nil {
+			return model.Usuario{}, err
+		}
+	}
+
 	for _, idLoja := range lojasIds {
 
 		escopo, err := repo.CriarEscopo(ctx, repository.CriarEscopoParams{
@@ -91,7 +100,7 @@ func (s *UsuarioService) CadastrarUsuario(ctx context.Context, modelUser model.N
 
 		// acesso_total_setores = true não tem linha de setor: a ausência é o
 		// acesso total à loja (docs/modelagem-banco-dados.md 3.8).
-		for _, idSetor := range setoresIds {
+		for _, idSetor := range porLoja[idLoja] {
 			err := repo.CriarEscopoSetor(ctx, repository.CriarEscopoSetorParams{
 				EscopoID: escopo.ID,
 				SetorID:  idSetor,
@@ -173,5 +182,3 @@ func (s *UsuarioService) Login(ctx context.Context, loginModel model.Login, tena
 
 	return token, sessao, nil
 }
-
-

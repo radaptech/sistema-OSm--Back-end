@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 
 	"github.com/radaptech/sistema-OSm--Back-end/database/repository"
 	"github.com/radaptech/sistema-OSm--Back-end/internal/helper"
@@ -33,6 +34,50 @@ func escopoDoPerfil(p model.NovoUsuarioPayload) (lojasIds, setoresIds []int64, a
 		}
 		return p.LojasIds, p.SetoresIds, false
 	}
+}
+
+// setoresPorLoja distribui a lista plana de setoresIds entre as lojas a que
+// eles de fato pertencem (`setor.loja_id`).
+//
+// O payload do front é plano -- um `setoresIds` só para N `lojasIds` --, mas
+// setor pertence a uma loja: jogar a lista inteira em toda loja gravaria
+// escopo dizendo que o usuário acessa "Padaria da Loja A" dentro da Loja B.
+// Como o id do setor já identifica a loja, a lista plana **expressa** o escopo
+// por loja; é só distribuir. (O que ela ainda não expressa é acesso total numa
+// loja e parcial noutra -- `acessoTotalSetores` é um flag só, global.)
+//
+// Valida de quebra o que o banco não pega: `usuario_escopo_setor` só tem FK
+// para `setor (id)`, sem checar se esse setor é da loja do escopo.
+func setoresPorLoja(ctx context.Context, repo *repository.Queries, tenantID int64, lojasIds, setoresIds []int64) (map[int64][]int64, error) {
+
+	setores, err := repo.ObterSetoresPorIDs(ctx, repository.ObterSetoresPorIDsParams{
+		Ids:      setoresIds,
+		TenantID: tenantID,
+	})
+	if err != nil {
+		return nil, helper.TraduzErroPostgres(err)
+	}
+	if len(setores) != len(setoresIds) {
+		return nil, fmt.Errorf("setor inexistente neste tenant: %w", helper.ErrNaoEncontrado)
+	}
+
+	porLoja := make(map[int64][]int64, len(lojasIds))
+	for _, s := range setores {
+		if !slices.Contains(lojasIds, s.LojaID) {
+			return nil, fmt.Errorf("setor %d não pertence a nenhuma das lojas selecionadas", s.ID)
+		}
+		porLoja[s.LojaID] = append(porLoja[s.LojaID], s.ID)
+	}
+
+	// Loja sem setor nenhum vira escopo que não enxerga nada -- é erro de
+	// preenchimento, não acesso total (esse é o acessoTotalSetores).
+	for _, idLoja := range lojasIds {
+		if len(porLoja[idLoja]) == 0 {
+			return nil, fmt.Errorf("loja %d ficou sem nenhum setor selecionado", idLoja)
+		}
+	}
+
+	return porLoja, nil
 }
 
 // validarEscopo cobre a cardinalidade por perfil, que as tags de binding do

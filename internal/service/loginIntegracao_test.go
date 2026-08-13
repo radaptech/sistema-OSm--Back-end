@@ -1,9 +1,11 @@
 package service
+
 import (
 	"context"
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 
@@ -44,7 +46,9 @@ func bancoDeTeste(t *testing.T) *pgxpool.Pool {
 	}
 	defer admin.Close()
 
-	nome := fmt.Sprintf("teste_login_%d", os.Getpid())
+	// t.Name() no nome: dois testes no mesmo binário compartilham o pid e um
+	// dropava o banco do outro.
+	nome := strings.ToLower(fmt.Sprintf("teste_%s_%d", t.Name(), os.Getpid()))
 	if _, err := admin.Exec(ctx, "DROP DATABASE IF EXISTS "+nome); err != nil {
 		t.Fatalf("erro ao limpar banco de teste: %v", err)
 	}
@@ -95,8 +99,9 @@ func TestLogin(t *testing.T) {
 	pool := bancoDeTeste(t)
 	svc := NewRepoUsuario(pool)
 
-	// Tenant de teste: 1 empresa, 2 lojas, 2 setores na primeira, 1 área.
-	var tenantID, lojaA, lojaB, setorA, setorB int64
+	// Tenant de teste: 1 empresa, 2 lojas, 2 setores na Loja A + 1 na Loja B
+	// (o setor da outra loja é o que prova a distribuição por loja), 1 área.
+	var tenantID, lojaA, lojaB, setorA, setorB, setorC int64
 	linha := pool.QueryRow(ctx, `INSERT INTO empresa (subdominio, nome) VALUES ('teste', 'Empresa Teste') RETURNING id`)
 	if err := linha.Scan(&tenantID); err != nil {
 		t.Fatalf("erro ao criar empresa: %v", err)
@@ -111,9 +116,10 @@ func TestLogin(t *testing.T) {
 	}
 	for _, s := range []struct {
 		nome string
+		loja int64
 		dest *int64
-	}{{"Padaria", &setorA}, {"Açougue", &setorB}} {
-		if err := pool.QueryRow(ctx, `INSERT INTO setor (tenant_id, loja_id, nome) VALUES ($1, $2, $3) RETURNING id`, tenantID, lojaA, s.nome).Scan(s.dest); err != nil {
+	}{{"Padaria", lojaA, &setorA}, {"Açougue", lojaA, &setorB}, {"Hortifruti", lojaB, &setorC}} {
+		if err := pool.QueryRow(ctx, `INSERT INTO setor (tenant_id, loja_id, nome) VALUES ($1, $2, $3) RETURNING id`, tenantID, s.loja, s.nome).Scan(s.dest); err != nil {
 			t.Fatalf("erro ao criar setor: %v", err)
 		}
 	}
@@ -137,8 +143,10 @@ func TestLogin(t *testing.T) {
 	solicitante := cadastrar("Bruno", "bruno@teste.com", "solicitante", model.NovoUsuarioPayload{
 		LojasIds: []int64{lojaA}, SetoresIds: []int64{setorA},
 	})
+	// Setores das duas lojas na mesma lista plana: cada um tem que cair no
+	// escopo da sua própria loja.
 	gestor := cadastrar("Carla", "carla@teste.com", "gestor", model.NovoUsuarioPayload{
-		LojasIds: []int64{lojaA, lojaB}, SetoresIds: []int64{setorA, setorB},
+		LojasIds: []int64{lojaA, lojaB}, SetoresIds: []int64{setorA, setorB, setorC},
 	})
 	gestorTotal := cadastrar("Dora", "dora@teste.com", "gestor", model.NovoUsuarioPayload{
 		LojasIds: []int64{lojaA}, AcessoTotalSetores: true,
@@ -189,7 +197,7 @@ func TestLogin(t *testing.T) {
 		}
 	})
 
-	t.Run("gestor traz um escopo por loja", func(t *testing.T) {
+	t.Run("gestor recebe cada setor no escopo da propria loja", func(t *testing.T) {
 		_, sessao, err := login("carla@teste.com", "gestor", senha)
 		if err != nil {
 			t.Fatalf("login falhou: %v", err)
@@ -200,13 +208,43 @@ func TestLogin(t *testing.T) {
 		if len(sessao.EscoposGestor) != 2 {
 			t.Fatalf("esperava 2 escopos, veio %d: %+v", len(sessao.EscoposGestor), sessao.EscoposGestor)
 		}
+
+		esperado := map[int64][]int64{lojaA: {setorA, setorB}, lojaB: {setorC}}
 		for _, e := range sessao.EscoposGestor {
-			if e.SetoresIds.AcessoTotal || len(e.SetoresIds.Ids) != 2 {
-				t.Fatalf("escopo da loja %d devia ter 2 setores: %+v", e.LojaId, e.SetoresIds)
+			if e.SetoresIds.AcessoTotal {
+				t.Fatalf("loja %d não é acesso total", e.LojaId)
+			}
+			ids := slices.Clone(e.SetoresIds.Ids)
+			slices.Sort(ids)
+			if !slices.Equal(ids, esperado[e.LojaId]) {
+				t.Fatalf("loja %d: setores %v, esperava %v — setor vazou para a loja errada",
+					e.LojaId, ids, esperado[e.LojaId])
 			}
 		}
 		if sessao.LojaId != nil {
 			t.Fatal("gestor não usa lojaId")
+		}
+	})
+
+	t.Run("cadastro recusa setor fora das lojas selecionadas", func(t *testing.T) {
+		// setorC é da Loja B; o payload só marca a Loja A.
+		_, err := svc.CadastrarUsuario(ctx, model.NovoUsuarioPayload{
+			Nome: "Fabio", Email: "fabio@teste.com", Perfil: "gestor", Senha: senha,
+			LojasIds: []int64{lojaA}, SetoresIds: []int64{setorC},
+		}, tenantID)
+		if err == nil {
+			t.Fatal("esperava recusa do setor de outra loja")
+		}
+	})
+
+	t.Run("cadastro recusa loja sem nenhum setor", func(t *testing.T) {
+		// Loja B marcada, mas só setores da Loja A na lista.
+		_, err := svc.CadastrarUsuario(ctx, model.NovoUsuarioPayload{
+			Nome: "Gina", Email: "gina@teste.com", Perfil: "gestor", Senha: senha,
+			LojasIds: []int64{lojaA, lojaB}, SetoresIds: []int64{setorA},
+		}, tenantID)
+		if err == nil {
+			t.Fatal("esperava recusa: Loja B ficaria com escopo sem setor nenhum")
 		}
 	})
 
