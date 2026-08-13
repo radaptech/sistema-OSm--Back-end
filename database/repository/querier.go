@@ -40,10 +40,16 @@ type Querier interface {
 	// NULL para não filtrar por eles. Paginação por LIMIT/OFFSET, contagem total
 	// em ContarUsuarios (RespostaPaginada exige os dois).
 	ListarUsuarios(ctx context.Context, arg ListarUsuariosParams) ([]Usuario, error)
+	// Usado no cadastro de técnico: o front manda o nome da área (AreaTecnico em
+	// front-end/src/tipos/tecnico.ts), o banco guarda o id em usuario.area_tecnico_id.
+	ObterAreaTecnicoPorNome(ctx context.Context, arg ObterAreaTecnicoPorNomeParams) (int16, error)
 	// Formato que o front consome direto em EscopoAcessoGestor[] (login/sessão):
 	// um escopo por loja, com a lista de setor_id (vazia quando acesso_total_setores).
 	ObterEscopoSessaoPorUsuario(ctx context.Context, usuarioID int64) ([]ObterEscopoSessaoPorUsuarioRow, error)
 	ObterEscoposPorUsuario(ctx context.Context, usuarioID int64) ([]UsuarioEscopo, error)
+	// Usado no login/sessão do solicitante: SessaoUsuario.setorNome vem daqui
+	// (usuario_escopo guarda só o setor_id).
+	ObterSetorPorID(ctx context.Context, arg ObterSetorPorIDParams) (ObterSetorPorIDRow, error)
 	ObterSetoresPorEscopos(ctx context.Context, escopoIds []int64) ([]UsuarioEscopoSetor, error)
 	// Usado no login: email é citext (case-insensitive) e único por tenant.
 	ObterUsuarioPorEmail(ctx context.Context, arg ObterUsuarioPorEmailParams) (Usuario, error)
