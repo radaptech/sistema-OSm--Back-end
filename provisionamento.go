@@ -8,7 +8,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"golang.org/x/crypto/bcrypt"
+	"github.com/radaptech/sistema-OSm--Back-end/auth"
+	
 )
 
 // DadosProvisionamento reune o que o operador informa na CLI para criar um
@@ -36,7 +37,7 @@ func ProvisionarAdministrador(ctx context.Context, pool *pgxpool.Pool, dados Dad
 		return 0, 0, errors.New("senha deve ter ao menos 6 caracteres")
 	}
 
-	senhaHash, err := bcrypt.GenerateFromPassword([]byte(dados.SenhaAdmin), bcrypt.DefaultCost)
+	senhaHash, err := auth.HashPassword(dados.SenhaAdmin)
 	if err != nil {
 		return 0, 0, fmt.Errorf("erro ao gerar hash da senha: %w", err)
 	}
