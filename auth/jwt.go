@@ -22,11 +22,11 @@ func GerarJwt(id, tenantId int64, perfil string) (string, error) {
 		"sub":      id,
 		"tenantId": tenantId,
 		"perfil":   perfil,
-		"exp":      time.Now().Add(time.Hour * 24).Unix(),
+		"exp":      time.Now().Add(time.Hour * 8).Unix(),
 		"iat":      time.Now().Unix(),
 	}
 
-	token:= jwt.NewWithClaims(jwt.SigningMethodHS256, claim)
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claim)
 
 	return token.SignedString([]byte(secrets))
 }
