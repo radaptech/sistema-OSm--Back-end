@@ -40,16 +40,21 @@ que o front espera (camelCase, datas `dd/mm/yyyy HH:MM:SS`, ver `config/dataBr.g
 - `main.go` — entrypoint. Roda migrations automaticamente no boot
   (`RunMigrationPostgress`) e sobe o Gin na porta 8081. Também despacha subcomandos de
   CLI antes de subir o servidor (ver abaixo). **Ainda não registra nenhuma rota** —
-  `router/`, `controller/` seguem vazios; `middleware/` e `auth/` já têm conteúdo mas
-  nada os importa em `main.go` ainda.
+  `internal/router/` segue vazio; `controller/`, `middleware/` e `auth/` já têm
+  conteúdo mas nada os importa em `main.go` ainda.
 - `config/` — `VariaveisDeAmbiente` (lê `.env`), `ConnPostgresql` (pool + migrations),
   `DataBr` (tipo de data custom, layout `02/01/2006 15:04:05`, nunca RFC3339).
 - `auth/` — `jwt.go` (`GerarJwt`, claims `sub`/`tenantId`/`perfil`/`exp`/`iat`,
   HS256), `passHash.go` (`HashPassword`/`HashCompare`, argon2id).
 - `middleware/` — `middJwt.go` (`AutenticacaoJwt`, lê cookie `token` ou
   `Authorization: Bearer`, valida e injeta `userId`/`user_perfil`/`user_TenantId` no
-  contexto do Gin — falha fechada: claim ausente/malformada aborta com 401), `cors.go`
-  (`CorsConfig`, libera `localhost`/`*.localhost` e `radaptech.com.br`/subdomínios,
+  contexto do Gin — falha fechada: claim ausente/malformada aborta com 401; as chaves
+  são as consts `UserId`/`UserPerfil`/`UserTenantId`, e `GetUserID`/`GetTenantIDToken`
+  leem tipado), `tenantId.go` (`TenantMiddleware` resolve o header `X-tenant-ID` em
+  `empresa.id` via `ObterEmpresaPorSubdominio` e guarda na chave `TenantId`;
+  `GetTenantID` lê — **só o login usa**, ver "Autenticação"), `perfil.go`
+  (`Permitir(perfis ...string)`, o RBAC — 403, nunca 401), `cors.go` (`CorsConfig`,
+  libera `localhost`/`*.localhost` e `radaptech.com.br`/subdomínios,
   `AllowCredentials: true` pro cookie ir junto).
 - `internal/model/` — structs de request/response, com `json` (camelCase, espelhando os
   tipos do front) e `binding` (validação do `go-playground/validator` via Gin) nas tags.
@@ -59,19 +64,30 @@ que o front espera (camelCase, datas `dd/mm/yyyy HH:MM:SS`, ver `config/dataBr.g
   Postgres (`23505`, `23503`, `23502`, ...) em erro de negócio (`ErrDadoDuplicado`,
   `ErrConflitoIntegridade`, ...) pros controllers não fazerem `switch` em `pgErr.Code`
   espalhado pelo código. `ErrCredenciaisInvalidas` é o erro único do login — ver
-  "Autenticação" abaixo.
+  "Autenticação" abaixo. `ErrValidacao` é o sentinela que os erros de regra de negócio
+  do service embrulham com `%w` (`validarEscopo`, `setoresPorLoja`) pro controller
+  responder 400 sem olhar o texto do erro.
 - `internal/service/` — regras de negócio. `UsuarioService` guarda o `*pgxpool.Pool`
   (não um `Querier`): as escritas precisam de transação e `Querier` não expõe `WithTx`,
   então cada método monta o seu `repository.New(tx)`.
-  - `loginService.go` — `CadastrarUsuario` (usuário + escopo numa transação só) e
-    `Login`.
+  - `loginService.go` — `CadastrarUsuario` (usuário + escopo numa transação só),
+    `Login` e `ObterSessao` (o `GET /autenticacao/sessao`: `ObterUsuarioPorID` **não**
+    filtra `ativo` como o `ObterUsuarioPorEmail`, então o `!user.Ativo` está explícito
+    ali; usuário sumido ou desativado devolve `ErrSessaoExpirada`).
   - `EscopoPerfilService.go` — o que é por perfil e não por endpoint: `validarEscopo`
     (cardinalidade de 3.8, que as tags de `binding` não alcançam), `escopoDoPerfil`
     (normaliza o payload plano do front), `setoresPorLoja` (distribui cada setor no
     escopo da loja certa — ver "Queries e repository") e `montarSessao` (o corpo de
     `SessaoUsuario`, compartilhado entre `POST /autenticacao/login` e
     `GET /autenticacao/sessao`).
-- `internal/router/`, `controller/` — criados mas ainda vazios.
+- `controller/` — `loginController.go`: `LoginController` recebe um
+  `LoginServiceInterface` (a interface existe pro teste do handler poder trocar o
+  service — `UsuarioService` guarda `*pgxpool.Pool` concreto, não dá pra mockar de
+  outro jeito). Handlers: `Registrar` (`POST /usuarios`), `Login`, `Logout`, `Sessao`.
+  O cookie de sessão sai só de `cookieSessao(ctx, token, maxAge)` — login e logout
+  passam pela mesma função porque o `Set-Cookie` de remoção só apaga se casar com o de
+  criação (nome, path, `Secure`, `SameSite`).
+- `internal/router/` — criado mas ainda vazio.
 - `database/migrate/` — migrations SQL puro (`golang-migrate`), numeradas e sequenciais.
 - `database/queries/` + `database/repository/` — ver "Queries e repository (sqlc)"
   abaixo.
@@ -105,15 +121,19 @@ administrador a ela.
 ## Autenticação (JWT)
 - `auth.GerarJwt(id, tenantId int64, perfil string)` assina um HS256 com `JWT_SECRET`
   (`.env` — gere com `openssl rand -base64 64`, mínimo 256 bits, nunca commitado) e
-  claims mínimas: `sub` (usuario.id), `tenantId` (empresa.id), `perfil`, `exp` (24h),
+  claims mínimas: `sub` (usuario.id), `tenantId` (empresa.id), `perfil`, `exp` (8h),
   `iat`. **De propósito sem** `nome`/`escoposGestor`/`lojaId`/`setorId`/`tecnicoId`/
-  `ativo` — isso é resolvido fresco no banco a cada request (`GET /autenticacao/sessao`
-  e o próprio middleware de RBAC, ainda não escritos), senão editar o escopo de um
-  Gestor ou desativar um usuário só valeria depois do token expirar.
+  `ativo` — isso é resolvido fresco no banco a cada request (`ObterSessao`), senão
+  editar o escopo de um Gestor ou desativar um usuário só valeria depois do token
+  expirar.
 - **Depois do login, `tenant_id` autoritativo é o do token, não o header
   `X-tenant-ID`** — o header só importa em `POST /autenticacao/login`, antes de existir
   token, pra saber contra qual `empresa` autenticar. Trocar o header depois de logado
-  não pode mudar de tenant.
+  não pode mudar de tenant. Na prática: **`Login` é o único handler que chama
+  `middleware.GetTenantID` (header); todo o resto chama `GetTenantIDToken`.** Usar o do
+  header numa rota autenticada deixa um administrador do tenant A escrever no tenant B
+  só trocando o `X-tenant-ID` — o banco aceita calado, é só um `int64`. Já foi bug uma
+  vez.
 - `middleware.AutenticacaoJwt()` lê o token do cookie `token` (produção) ou do header
   `Authorization: Bearer <token>` (Postman/Insomnia, sem cookie) e injeta no contexto:
   `userId`, `user_perfil`, `user_TenantId` (todos `int64`/`string`). Aborta com 401 se
@@ -132,11 +152,23 @@ administrador a ela.
   (a ausência de escopo É o acesso total), técnico leva `tecnicoId` = o próprio
   `usuario.id` (`fk_os_tecnico` aponta pra `usuario`; não existe tabela `tecnico`),
   gestor leva `escoposGestor`, solicitante leva `lojaId`/`setorId`/`setorNome`.
-- **Ainda faltam:** o handler de login (que faz `ctx.SetCookie` com `HttpOnly` +
-  `Secure` + `SameSite`, nome do cookie precisa bater com o que o middleware lê —
-  `"token"`, e mapeia `ErrCredenciaisInvalidas` → 401), o RBAC por perfil (401 vs 403 —
-  ver regra abaixo) e uma forma de revogar sessão antes do `exp` (desativar
-  usuário/trocar senha/logout hoje não matam um token já emitido).
+- Cookie de sessão: `HttpOnly` + `Secure` + `SameSite=Lax`, `maxAge` 86400, nome
+  `token` (tem que bater com o que o middleware lê). Sai só de `cookieSessao` em
+  `controller/loginController.go`. `Lax` basta porque front e API ficam sob o mesmo
+  domínio registrável (`*.radaptech.com.br`, `localhost` em dev); só vira `None` (que
+  obriga `Secure`) se o front sair pra outro domínio.
+- Mapa de erro → status nos handlers de auth: `ErrValidacao` → 400,
+  `ErrCredenciaisInvalidas` → 401, `ErrSessaoExpirada` → 401 **+ cookie apagado** (o
+  front desloga no 401; sem limpar o cookie ele reenvia a mesma sessão morta em loop),
+  `ErrDadoDuplicado` → 409, `ErrNaoEncontrado`/`ErrConflitoIntegridade` → 422, resto →
+  500 **com o erro só no `log`**: o erro cru do pgx carrega nome de constraint/coluna e
+  às vezes o SQL, não pode ir no corpo da resposta.
+- **Ainda falta revogar sessão antes do `exp`** — desativar usuário, trocar senha e
+  logout não matam um token já emitido, e `HttpOnly` não impede o dono do navegador de
+  copiar o cookie no DevTools (ele protege contra XSS, não contra o usuário). O `exp`
+  de 8h limita a janela a um turno. Conserto barato quando for mexer: `token_version`
+  na `usuario`, o JWT carrega o valor e o middleware compara — dá pra juntar na mesma
+  query que o RBAC de escopo vai precisar fazer.
 
 ## Queries e repository (sqlc)
 - `database/queries/*.sql` — queries anotadas (`-- name: NomeQuery :one/:many/:exec`),
@@ -189,7 +221,17 @@ cadastrada neste tenant" até existir uma dessas.
   rode dentro do container já ativo: `docker exec api_sistema-OS go run . ...`.
 
 ## Testes
-- `go test ./...`. Dois níveis em `internal/service/`:
+- `go test ./...`. Em `controller/` e `middleware/`, handlers e middlewares são testados
+  direto com `gin.CreateTestContext` + `httptest` — sem servidor, sem banco:
+  - `controller/loginController_test.go` — `serviceFake` implementa
+    `LoginServiceInterface` variando só o erro; as tabelas cobrem erro → status, o
+    cookie de sessão (nome, `HttpOnly`/`Secure`/`Max-Age`) e o corpo. O caso "erro não
+    emite cookie" existe porque o sucesso do login já esteve dentro do `if err != nil`:
+    respondia 200 vazio, sem cookie, e o erro escrevia dois corpos.
+  - `middleware/perfil_test.go` — `Permitir` com um perfil, vários, nenhum, e o caso de
+    falha fechada (contexto sem perfil **nega**, protege contra montar o middleware na
+    ordem errada).
+- Dois níveis em `internal/service/`:
   - `loginService_test.go` — unitário, sem banco: tabela cobrindo `validarEscopo` +
     `escopoDoPerfil` nos 4 perfis.
   - `loginIntegracao_test.go` — integração de verdade contra Postgres. `bancoDeTeste`
@@ -207,9 +249,21 @@ cadastrada neste tenant" até existir uma dessas.
   negócio pura vai em função livre (como `validarEscopo`) justamente pra ser testável
   sem banco.
 
+## CI
+- `.github/workflows/ci.yml` — push em `master`/`dev` e todo PR: `gofmt` (falha se algum
+  arquivo estiver fora de formato), `go vet`, `go test -race ./...`.
+- **O job sobe um service container de Postgres 16 e exporta `TEST_DB_DSN`** apontando
+  pra `localhost:5432`. Sem ele o `loginIntegracao_test.go` daria `t.Skip` e o CI
+  passaria verde tendo rodado só os unitários — pior que não ter CI. `JWT_SECRET`
+  também vai no env do job: `AutenticacaoJwt` dá `panic` sem ela.
+- **Não há job de deploy de propósito**: o Railway redeploya sozinho no push do repo
+  conectado. Um job aqui seria uma segunda fonte da verdade + um `RAILWAY_TOKEN` pra
+  guardar. Migrations rodam no boot (`main.go`), então também não precisam de passo.
+
 ## Regras herdadas do contrato com o front (não reinvente)
 - **401 é só "sem sessão"**; fora de escopo/perfil errado é sempre **403** — 401 fora de
-  `/login` desloga o usuário no front.
+  `/login` desloga o usuário no front. O RBAC por perfil é `middleware.Permitir(...)`;
+  o escopo (loja/setor) **não** é middleware, é o `WHERE` da query.
 - **Datas** trafegam como texto `dd/mm/yyyy HH:MM:SS` (ou `dd/mm/yyyy` sem hora) — use
   `config.DataBr` em todo campo de data de resposta, nunca `time.Time` cru.
 - **Multi-tenant por subdomínio**: header `X-tenant-ID`, tenant nunca vem por rota nem
