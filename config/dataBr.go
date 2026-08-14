@@ -1,6 +1,5 @@
 package config
 
-
 import (
 	"database/sql/driver"
 	"fmt"
