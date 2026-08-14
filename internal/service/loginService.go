@@ -128,6 +128,36 @@ func (s *UsuarioService) CadastrarUsuario(ctx context.Context, modelUser model.N
 	}, nil
 }
 
+// ObterSessao remonta a sessão do dono do token a cada request de
+// GET /autenticacao/sessao. É aqui que mora tudo que o JWT não carrega de
+// propósito (escopo, área, ativo): editar o escopo de um gestor ou desativar
+// um usuário vale na próxima chamada, não só quando o token expirar.
+//
+// Usuário sumido ou desativado devolve ErrSessaoExpirada -- token válido para
+// alguém que não existe mais é sessão morta, não erro de servidor
+// (ObterUsuarioPorID não filtra `ativo`, diferente de ObterUsuarioPorEmail).
+func (s *UsuarioService) ObterSessao(ctx context.Context, userId, tenantId int64) (model.SessaoUsuario, error) {
+
+	repo := repository.New(s.Pool)
+
+	user, err := repo.ObterUsuarioPorID(ctx, repository.ObterUsuarioPorIDParams{
+		ID:       userId,
+		TenantID: tenantId,
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return model.SessaoUsuario{}, helper.ErrSessaoExpirada
+		}
+		return model.SessaoUsuario{}, helper.TraduzErroPostgres(err)
+	}
+
+	if !user.Ativo {
+		return model.SessaoUsuario{}, helper.ErrSessaoExpirada
+	}
+
+	return s.montarSessao(ctx, repo, user, tenantId)
+}
+
 // Login autentica no tenant vindo do header X-tenant-ID (o único momento em
 // que ele manda -- depois disso o tenant autoritativo é o do token) e devolve
 // o JWT já assinado + a sessão que o front consome.

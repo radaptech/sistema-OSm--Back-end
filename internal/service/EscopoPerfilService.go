@@ -2,7 +2,6 @@ package service
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"slices"
 
@@ -64,7 +63,7 @@ func setoresPorLoja(ctx context.Context, repo *repository.Queries, tenantID int6
 	porLoja := make(map[int64][]int64, len(lojasIds))
 	for _, s := range setores {
 		if !slices.Contains(lojasIds, s.LojaID) {
-			return nil, fmt.Errorf("setor %d não pertence a nenhuma das lojas selecionadas", s.ID)
+			return nil, fmt.Errorf("setor %d não pertence a nenhuma das lojas selecionadas: %w", s.ID, helper.ErrValidacao)
 		}
 		porLoja[s.LojaID] = append(porLoja[s.LojaID], s.ID)
 	}
@@ -73,7 +72,7 @@ func setoresPorLoja(ctx context.Context, repo *repository.Queries, tenantID int6
 	// preenchimento, não acesso total (esse é o acessoTotalSetores).
 	for _, idLoja := range lojasIds {
 		if len(porLoja[idLoja]) == 0 {
-			return nil, fmt.Errorf("loja %d ficou sem nenhum setor selecionado", idLoja)
+			return nil, fmt.Errorf("loja %d ficou sem nenhum setor selecionado: %w", idLoja, helper.ErrValidacao)
 		}
 	}
 
@@ -89,21 +88,21 @@ func validarEscopo(p model.NovoUsuarioPayload) error {
 		return nil
 	case "solicitante":
 		if len(p.LojasIds) != 1 || len(p.SetoresIds) != 1 {
-			return errors.New("solicitante precisa de exatamente 1 loja e 1 setor")
+			return fmt.Errorf("solicitante precisa de exatamente 1 loja e 1 setor: %w", helper.ErrValidacao)
 		}
 	case "tecnico":
 		if len(p.LojasIds) == 0 {
-			return errors.New("técnico precisa de ao menos 1 loja")
+			return fmt.Errorf("técnico precisa de ao menos 1 loja: %w", helper.ErrValidacao)
 		}
 		if p.Area == nil || *p.Area == "" {
-			return errors.New("técnico precisa de uma área")
+			return fmt.Errorf("técnico precisa de uma área: %w", helper.ErrValidacao)
 		}
 	case "gestor":
 		if len(p.LojasIds) == 0 {
-			return errors.New("gestor precisa de ao menos 1 loja")
+			return fmt.Errorf("gestor precisa de ao menos 1 loja: %w", helper.ErrValidacao)
 		}
 		if !p.AcessoTotalSetores && len(p.SetoresIds) == 0 {
-			return errors.New("gestor precisa de ao menos 1 setor ou acesso total aos setores")
+			return fmt.Errorf("gestor precisa de ao menos 1 setor ou acesso total aos setores: %w", helper.ErrValidacao)
 		}
 	}
 
