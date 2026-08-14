@@ -10,6 +10,15 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 )
 
+// Chaves que AutenticacaoJwt injeta no contexto do Gin. Vêm do token, então
+// são as autoritativas depois do login -- TenantId (header X-tenant-ID) só
+// vale em POST /autenticacao/login, antes de existir token.
+const (
+	UserId       = "userId"
+	UserPerfil   = "user_perfil"
+	UserTenantId = "user_TenantId"
+)
+
 func AutenticacaoJwt() gin.HandlerFunc {
 
 	jwtsecret := []byte(os.Getenv("JWT_SECRET"))
@@ -28,7 +37,7 @@ func AutenticacaoJwt() gin.HandlerFunc {
 			TokenString = cookieToken
 		} else {
 
-			const portador = "Bearer " 
+			const portador = "Bearer "
 			header := ctx.GetHeader("Authorization")
 
 			if header != "" && strings.HasPrefix(header, portador) {
@@ -82,10 +91,32 @@ func AutenticacaoJwt() gin.HandlerFunc {
 			return
 		}
 
-		ctx.Set("userId", int64(userId))
-		ctx.Set("user_perfil", perfil)
-		ctx.Set("user_TenantId", int64(tenantId))
+		ctx.Set(UserId, int64(userId))
+		ctx.Set(UserPerfil, perfil)
+		ctx.Set(UserTenantId, int64(tenantId))
 
 		ctx.Next()
 	}
+}
+
+// GetTenantIDToken devolve o tenant do JWT -- o autoritativo em qualquer rota
+// autenticada. Usar GetTenantID (header) aqui deixaria um administrador do
+// tenant A escrever no tenant B só trocando o X-tenant-ID.
+func GetTenantIDToken(c *gin.Context) (int64, bool) {
+	val, exists := c.Get(UserTenantId)
+	if !exists {
+		return 0, false
+	}
+	id, ok := val.(int64)
+	return id, ok
+}
+
+// GetUserID devolve o usuario.id do claim `sub`.
+func GetUserID(c *gin.Context) (int64, bool) {
+	val, exists := c.Get(UserId)
+	if !exists {
+		return 0, false
+	}
+	id, ok := val.(int64)
+	return id, ok
 }
