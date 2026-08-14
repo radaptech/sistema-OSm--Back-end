@@ -19,11 +19,11 @@ completo e os contratos já fechados com o front.
   `pgadmin_container-sistema-OS`).
 
 ## Documentos de referência (leia antes de implementar endpoint novo)
-- `docs/modelagem-banco-dados.md` — modelo de dados completo, revisão 4, com todo o
+- `docs/modelagem-banco-dados.md` — modelo de dados completo, revisão 4.1, com todo o
   raciocínio de cada constraint/trigger/view.
 - `docs/der-banco-dados.mmd` (+ `.svg`/`.png` gerados) — diagrama ER.
 - Artefatos publicados (fonte de verdade do contrato HTTP — pedir link se precisar):
-  DER revisado, Contrato de API v1.1 (53 endpoints), RBAC, PRD, Roteiro do Back-end
+  DER revisado, Contrato de API v1.2 (53 endpoints), RBAC, PRD, Roteiro do Back-end
   (16 fases). Ver `../front-end/CLAUDE.md` para a lógica de negócio do ponto de vista
   do front (é o documento mais detalhado de regras de negócio do projeto).
 
@@ -31,7 +31,8 @@ completo e os contratos já fechados com o front.
 Toda constraint, ENUM, trigger e view documentados em `modelagem-banco-dados.md` existem
 por um motivo explicado ali — não simplifique/pule sem entender o porquê (normalmente é
 uma regra de negócio que já mordeu alguém, ex: "terceirizar é decisão do Técnico, não do
-Solicitante", "horas_parada só existe se afeta_producao", "tipo da OS só promove pra
+Solicitante", "horas_parada só existe se afeta_producao e corre desde
+`solicitacao_os.criado_em`, não desde `aberta_em`", "tipo da OS só promove pra
 terceiros, nunca volta"). Peça o artefato do Contrato de API antes de implementar um
 endpoint pra bater o JSON de envio/resposta campo a campo — os nomes já são exatamente o
 que o front espera (camelCase, datas `dd/mm/yyyy HH:MM:SS`, ver `config/dataBr.go`).

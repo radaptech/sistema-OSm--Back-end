@@ -209,7 +209,7 @@ erDiagram
         text motivo_rejeicao "obrigatorio se status Rejeitada"
         bigint rejeitado_por_id FK "usuario perfil gestor"
         timestamptz rejeitada_em
-        timestamptz criado_em
+        timestamptz criado_em "inicio do relogio de horas parada, a maquina parou aqui"
     }
 
     %% Marcador unico hoje (Afeta Producao), mas associativa e nao boolean: o
@@ -274,8 +274,8 @@ erDiagram
         bigint aberta_por_id FK "usuario perfil gestor"
         boolean afeta_producao "copiado do marcador da solicitacao"
         status_os status "ENUM Aberta EmAndamento Pausada Concluida"
-        timestamptz aberta_em
-        timestamptz iniciada_em "NULL ate iniciar atendimento"
+        timestamptz aberta_em "quando o Gestor abriu, NAO e o inicio de horas parada"
+        timestamptz iniciada_em "NULL ate iniciar atendimento, inicio de horas trabalhadas"
         timestamptz criado_em
     }
 

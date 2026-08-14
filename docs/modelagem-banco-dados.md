@@ -19,6 +19,10 @@ Documento gerado a partir da revisão do código do front-end (`/src/tipos`, `/s
   OS), e o encerramento passa a existir para todos os tipos. Junto vieram a classificação
   **Predial/Corretiva** no encerramento, a flag **`afeta_producao`** governando o relógio de
   máquina parada, e a rejeição do Gestor com motivo — **19 tabelas + 9 tipos ENUM** (seção 1.4).
+- **Revisão 4.1** (14/08/2026): correção de **fórmula**, sem mudança de forma — o relógio de
+  máquina parada passa a começar em `solicitacao_os.criado_em`, e não em `ordem_servico.aberta_em`
+  (seção 4). Continuam **19 tabelas + 9 tipos ENUM**: nenhuma coluna nasce ou muda, só a view
+  `vw_os_horas` ganha um join e o contrato passa a devolver `dataSolicitacao` na OS.
 
 O diagrama em si está em [`der-banco-dados.mmd`](./der-banco-dados.mmd) (Mermaid, pronto para colar
 em <https://mermaid.live>), com [`.svg`](./der-banco-dados.svg) e [`.png`](./der-banco-dados.png)
@@ -137,7 +141,14 @@ quando a flag é verdadeira** (seção 4) — nas demais a API omite o campo e a
 se aplica", nunca `0h`, que sugeriria uma parada instantânea.
 
 A cópia é deliberada: a OS não deve mudar de comportamento se alguém editar a solicitação
-depois, e o cálculo de horas não deveria precisar de join com a origem.
+depois.
+
+> **Ajuste da revisão 4.1:** a segunda justificativa que estava aqui — "e o cálculo de horas não
+> deveria precisar de join com a origem" — caiu junto com a mudança da seção 4: o relógio de parada
+> agora **começa** em `solicitacao_os.criado_em`, então o join com a origem passou a ser necessário
+> de qualquer jeito. A flag continua copiada, mas por outro motivo: `afeta_producao` é uma **decisão
+> editável** (alguém pode corrigir o marcador da solicitação depois), enquanto `criado_em` é um
+> **instante imutável** — copiar o primeiro congela a regra, ler o segundo por join é sempre seguro.
 
 #### 1.4.6 Rejeição com motivo, autor e instante
 
@@ -377,7 +388,7 @@ Três números aparecem em tela e nenhum deles é coluna.
 
 | Grandeza | Fórmula | Onde aparece |
 |---|---|---|
-| `horas_parada` | `data_fim − ordem_servico.aberta_em`, **só se `afeta_producao`** | Indicadores, encerramento |
+| `horas_parada` | `data_fim − solicitacao_os.criado_em`, **só se `afeta_producao`** | Indicadores, encerramento |
 | `horas_trabalhadas` | `(data_fim − iniciada_em) − Σ pausas posteriores a iniciada_em` | Card do Gestor, encerramento |
 | `custo_total` | `COALESCE(custo_hora_tecnico, 0) + custo_manutencao` | Detalhes da OS, indicadores |
 
@@ -394,12 +405,25 @@ de trabalho.
 **Por que `horas_parada` não desconta pausas:** a máquina continua parada mesmo enquanto o técnico
 espera uma peça. São dois relógios independentes (CLAUDE.md item 9).
 
+**Por que o relógio começa na solicitação, e não na abertura da OS (revisão 4.1):** a máquina parou
+quando o Solicitante relatou o problema, não quando o Gestor achou tempo de aprovar. Medindo a
+partir de `aberta_em`, toda a espera na fila do Gestor sumia do indicador — justamente o pedaço que
+o cliente pode encurtar, e o único que a operação controla. Pior: quanto mais devagar o Gestor
+aprovasse, melhor ficaria o número. O contrato passa a devolver esse instante na OS
+(`dataSolicitacao`, denormalizado do join), para que a tela consiga explicar de onde vem o total.
+
+> **Migração:** OS encerradas antes da mudança não guardam nada de errado — `horas_parada` nunca
+> foi coluna, então o novo valor sai da view no próximo SELECT, retroativo por construção. O que
+> muda são os indicadores históricos, que sobem. Se a comparação com números já divulgados
+> importar, a saída é a de sempre: recortar o gráfico por data, não congelar a fórmula.
+
 ```sql
 -- Horas de uma OS encerrada: nenhuma das duas é coluna.
 CREATE VIEW vw_os_horas AS
 SELECT os.id AS ordem_servico_id,
+       -- Parada conta desde o pedido do Solicitante: a espera na fila do Gestor é parada real.
        CASE WHEN os.afeta_producao
-            THEN EXTRACT(EPOCH FROM (e.data_fim - os.aberta_em)) / 3600
+            THEN EXTRACT(EPOCH FROM (e.data_fim - s.criado_em)) / 3600
        END AS horas_parada,
        EXTRACT(EPOCH FROM (e.data_fim - os.iniciada_em)) / 3600
          - COALESCE((SELECT SUM(EXTRACT(EPOCH FROM (p.retomada_em - p.pausada_em))) / 3600
@@ -407,7 +431,8 @@ SELECT os.id AS ordem_servico_id,
                       WHERE p.ordem_servico_id = os.id
                         AND p.pausada_em >= os.iniciada_em), 0) AS horas_trabalhadas
   FROM ordem_servico os
-  JOIN os_encerramento e ON e.ordem_servico_id = os.id;
+  JOIN os_encerramento e ON e.ordem_servico_id = os.id
+  JOIN solicitacao_os s ON s.id = os.solicitacao_id;
 
 -- "OS Finalizada" do Gestor, do Técnico e do Administrador: estado derivado, não um status.
 CREATE VIEW vw_os_finalizada AS
