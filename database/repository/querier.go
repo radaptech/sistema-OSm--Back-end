@@ -43,6 +43,7 @@ type Querier interface {
 	// Usado no cadastro de técnico: o front manda o nome da área (AreaTecnico em
 	// front-end/src/tipos/tecnico.ts), o banco guarda o id em usuario.area_tecnico_id.
 	ObterAreaTecnicoPorNome(ctx context.Context, arg ObterAreaTecnicoPorNomeParams) (int16, error)
+	ObterEmpresaPorSubdominio(ctx context.Context, subdominio string) (ObterEmpresaPorSubdominioRow, error)
 	// Formato que o front consome direto em EscopoAcessoGestor[] (login/sessão):
 	// um escopo por loja, com a lista de setor_id (vazia quando acesso_total_setores).
 	ObterEscopoSessaoPorUsuario(ctx context.Context, usuarioID int64) ([]ObterEscopoSessaoPorUsuarioRow, error)
