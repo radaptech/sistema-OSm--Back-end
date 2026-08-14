@@ -1,6 +1,5 @@
 package helper
 
-
 import (
 	"errors"
 	"fmt"
@@ -21,8 +20,13 @@ var (
 	// inativo e perfil trocado devolvem todos isto, senão o login vira um
 	// oráculo de quais e-mails existem no tenant.
 	ErrCredenciaisInvalidas = errors.New("e-mail ou senha inválidos")
-	ErrNomeCurto           = errors.New("deve ter ao minimo 2 caracteres")
-
+	ErrNomeCurto            = errors.New("deve ter ao minimo 2 caracteres")
+	// Regra de negócio que as tags de binding não alcançam (cardinalidade de
+	// escopo, setor de loja não selecionada, ...). Existe para o controller
+	// distinguir "cliente mandou errado" (400) de falha de infra (500) sem
+	// olhar o texto do erro.
+	ErrValidacao = errors.New("dados inválidos")
+	ErrToken     = errors.New("")
 )
 
 // Códigos de Erro Oficiais do PostgreSQL
