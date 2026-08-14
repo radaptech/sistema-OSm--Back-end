@@ -7,7 +7,6 @@ import (
 	"log"
 
 	"github.com/radaptech/sistema-OSm--Back-end/config"
-	
 )
 
 // executarProvisionarAdmin cria o primeiro administrador de um tenant (e o

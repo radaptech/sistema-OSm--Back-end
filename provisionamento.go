@@ -9,7 +9,6 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/radaptech/sistema-OSm--Back-end/auth"
-	
 )
 
 // DadosProvisionamento reune o que o operador informa na CLI para criar um
