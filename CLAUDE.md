@@ -10,6 +10,8 @@ completo e os contratos já fechados com o front.
   **sqlc** (`sqlc.yaml` → gera `database/repository/` a partir de `database/queries/`).
 - **JWT** (`golang-jwt/jwt/v5`, HMAC HS256) para sessão, cookie HttpOnly — ver
   "Autenticação" abaixo e front-end `CLAUDE.md`.
+- **`golang.org/x/time/rate`** (token bucket) para o rate limit por IP — ver
+  "Rotas e rate limit" abaixo.
 - **Hash de senha: argon2id** (`alexedwards/argon2id`, `auth/passHash.go` —
   `HashPassword`/`HashCompare`, `argon2id.DefaultParams`). `bcrypt` foi removido —
   `provisionamento.go` também passou a usar `auth.HashPassword`; não reintroduza bcrypt
@@ -39,10 +41,11 @@ que o front espera (camelCase, datas `dd/mm/yyyy HH:MM:SS`, ver `config/dataBr.g
 
 ## Estrutura atual
 - `main.go` — entrypoint. Roda migrations automaticamente no boot
-  (`RunMigrationPostgress`) e sobe o Gin na porta 8081. Também despacha subcomandos de
-  CLI antes de subir o servidor (ver abaixo). **Ainda não registra nenhuma rota** —
-  `internal/router/` segue vazio; `controller/`, `middleware/` e `auth/` já têm
-  conteúdo mas nada os importa em `main.go` ainda.
+  (`RunMigrationPostgress`), aplica `middleware.CorsConfig()` global, monta o
+  `router.Container` e registra as rotas (`router.ConfigurarRotas`), e sobe o Gin na
+  porta 8081. Também despacha subcomandos de CLI antes de subir o servidor (ver abaixo).
+  `proxiesConfiaveis()` (mesmo arquivo) alimenta o `SetTrustedProxies` — ver "Rotas e
+  rate limit".
 - `config/` — `VariaveisDeAmbiente` (lê `.env`), `ConnPostgresql` (pool + migrations),
   `DataBr` (tipo de data custom, layout `02/01/2006 15:04:05`, nunca RFC3339).
 - `auth/` — `jwt.go` (`GerarJwt`, claims `sub`/`tenantId`/`perfil`/`exp`/`iat`,
@@ -56,7 +59,8 @@ que o front espera (camelCase, datas `dd/mm/yyyy HH:MM:SS`, ver `config/dataBr.g
   `GetTenantID` lê — **só o login usa**, ver "Autenticação"), `perfil.go`
   (`Permitir(perfis ...string)`, o RBAC — 403, nunca 401), `cors.go` (`CorsConfig`,
   libera `localhost`/`*.localhost` e `radaptech.com.br`/subdomínios,
-  `AllowCredentials: true` pro cookie ir junto).
+  `AllowCredentials: true` pro cookie ir junto), `rateLimit.go` (`LimitarPorIP` —
+  ver "Rotas e rate limit").
 - `internal/model/` — structs de request/response, com `json` (camelCase, espelhando os
   tipos do front) e `binding` (validação do `go-playground/validator` via Gin) nas tags.
   `login.go` (`Login`, `SessaoUsuario`, `EscopoAcessoGestor`), `usuarios.go`
@@ -88,7 +92,9 @@ que o front espera (camelCase, datas `dd/mm/yyyy HH:MM:SS`, ver `config/dataBr.g
   O cookie de sessão sai só de `cookieSessao(ctx, token, maxAge)` — login e logout
   passam pela mesma função porque o `Set-Cookie` de remoção só apaga se casar com o de
   criação (nome, path, `Secure`, `SameSite`).
-- `internal/router/` — criado mas ainda vazio.
+- `internal/router/router.go` — `Container` (injeção: guarda os controllers montados +
+  o `*repository.Queries` que o `TenantMiddleware` precisa) e `ConfigurarRotas`. Ver
+  "Rotas e rate limit".
 - `database/migrate/` — migrations SQL puro (`golang-migrate`), numeradas e sequenciais.
 - `database/queries/` + `database/repository/` — ver "Queries e repository (sqlc)"
   abaixo.
@@ -153,8 +159,12 @@ administrador a ela.
   (a ausência de escopo É o acesso total), técnico leva `tecnicoId` = o próprio
   `usuario.id` (`fk_os_tecnico` aponta pra `usuario`; não existe tabela `tecnico`),
   gestor leva `escoposGestor`, solicitante leva `lojaId`/`setorId`/`setorNome`.
-- Cookie de sessão: `HttpOnly` + `Secure` + `SameSite=Lax`, `maxAge` 86400, nome
-  `token` (tem que bater com o que o middleware lê). Sai só de `cookieSessao` em
+- Cookie de sessão: `HttpOnly` + `Secure` + `SameSite=Lax`, `maxAge` 86400 (24h), nome
+  `token` (tem que bater com o que o middleware lê). **O `maxAge` do cookie (24h) é
+  maior que o `exp` do JWT (8h) — não é intencional, é só sobra**: passadas as 8h o
+  browser ainda manda o cookie, o middleware rejeita e o front desloga no 401 do
+  `/sessao` (que apaga o cookie). Se for igualar, mexa nos dois: `auth/jwt.go` e
+  `cookieSessao`. Sai só de `cookieSessao` em
   `controller/loginController.go`. `Lax` basta porque front e API ficam sob o mesmo
   domínio registrável (`*.radaptech.com.br`, `localhost` em dev); só vira `None` (que
   obriga `Secure`) se o front sair pra outro domínio.
@@ -170,6 +180,43 @@ administrador a ela.
   de 8h limita a janela a um turno. Conserto barato quando for mexer: `token_version`
   na `usuario`, o JWT carrega o valor e o middleware compara — dá pra juntar na mesma
   query que o RBAC de escopo vai precisar fazer.
+
+## Rotas e rate limit
+- Tudo em `internal/router/router.go`, sob o grupo `/api`. Registradas hoje:
+  `GET /api` (healthcheck), `POST /autenticacao/login`, `POST /autenticacao/logout`,
+  `GET /autenticacao/sessao`, `POST /usuarios`.
+- **`TenantMiddleware` entra só em `/autenticacao/login`** — é o único endpoint que lê o
+  header `X-tenant-ID`; ver "Autenticação". Rota autenticada que precise de tenant usa
+  `GetTenantIDToken`, não o middleware.
+- **`Logout` é de propósito a única rota de sessão sem `AutenticacaoJwt`**: logout tem
+  que apagar o cookie mesmo com token expirado/inválido. Exigir JWT ali devolveria 401 e
+  deixaria o cookie morto no browser em loop.
+- `LimitarPorIP(taxa, burst)` (`middleware/rateLimit.go`) é token bucket por IP com
+  `x/time/rate`: mapa `IP → *rate.Limiter` sob mutex + goroutine que varre inativos a
+  cada 5min (senão o mapa cresce sem fim). No login: `rate.Every(12*time.Second), 5`.
+  Responde **429**, nunca 401/403.
+- **Ordem no login: o limiter vem antes do `TenantMiddleware`.** Invertido, cada
+  tentativa de força bruta gasta um `ObterEmpresaPorSubdominio` (ida ao banco) antes de
+  o limite recusar — o ataque paga em CPU nossa. O limiter é em memória e não toca o
+  banco, então é ele que fica na frente.
+- **`ClientIP` só é confiável porque `main.go` chama `SetTrustedProxies`** com o que
+  vier em `TRUSTED_PROXIES` (IPs/CIDRs separados por vírgula; vazio = não confia em
+  ninguém e o `X-Forwarded-For` é ignorado). O padrão do Gin é confiar em **todo mundo**
+  — aí o `X-Forwarded-For` vira campo livre do cliente, um header diferente a cada
+  request ganha um bucket novo e o rate limit não limita nada. Já foi assim: 10 POSTs
+  com `-H 'X-Forwarded-For: 10.0.0.$i'` passavam os 10; hoje passam 5 e o resto é 429.
+- **Liste o endereço do proxy, nunca a faixa em volta dele.** O Gin caminha o
+  `X-Forwarded-For` da direita pra esquerda e para no primeiro IP não-confiável — mas se
+  a lista acabar, ele devolve o valor **mais à esquerda**, que é o que o cliente
+  escreveu. Uma faixa larga que também contenha o cliente (ex: `172.16.0.0/12` numa rede
+  Docker) faz a busca passar direto por ele e cair justamente no valor forjado. Por isso
+  o compose dá IP fixo ao traefik e a api confia só em `172.29.0.2/32`. Em produção o
+  valor é o endereço do proxy do Railway.
+- ⚠️ Duas limitações conhecidas do limiter, aceitas por ora: (1) o estado é **em memória,
+  por instância** — escalar o Railway pra 2 réplicas dobra o limite efetivo; (2) a chave
+  é **só o IP** — escritório atrás de NAT compartilha as 5 tentativas, e ataque
+  distribuído contra uma conta só não é limitado por nada. Se doer, a chave vira
+  `IP+email` e o estado vai pro Redis.
 
 ## Queries e repository (sqlc)
 - `database/queries/*.sql` — queries anotadas (`-- name: NomeQuery :one/:many/:exec`),
@@ -214,11 +261,39 @@ cadastrada neste tenant" até existir uma dessas.
 
 ## Ambiente local
 - `.env` na raiz: `DB_SERVER`, `DB_USER`, `DB_PORT`, `DATABASE`, `DB_PASSWORD`
-  (`DB_SSLMODE` opcional, default `disable`).
+  (`DB_SSLMODE` opcional, default `disable`) e `JWT_SECRET`. `TRUSTED_PROXIES` **não**
+  fica no `.env`: vem do `environment` do compose em dev (é endereço de infra, muda com
+  a topologia) e do ambiente do Railway em produção.
 - Dentro da rede Docker do projeto, o Postgres resolve por `DB_SERVER=postgres`,
   `DB_PORT=5432` — é o que `api_sistema-OS` usa. No host, o compose publica em
   `localhost:5431`. Para testar comandos Go pontualmente, rode dentro do container já
   ativo: `docker exec api_sistema-OS go run . ...`.
+- O compose (`../docker-compose.yml`, um nível acima deste repo) sobe **front + api atrás
+  de um traefik**: `http://<tenant>.localhost:8090` serve o Vite, e `/api` cai na api.
+  Dashboard do traefik em `:8091`, pgadmin em `:5051`. **`api` e `front` não publicam
+  porta** — quem publica é o traefik.
+- **Front e API na mesma origem é requisito, não arrumação.** O front tira o tenant de
+  `window.location.hostname.split('.')[0]`, então precisa ser servido de
+  `<tenant>.localhost`; e o cookie de sessão é `SameSite=Lax`, mas pro browser
+  `a.localhost` e `b.localhost` são **sites diferentes** (`localhost` se comporta como
+  TLD) — front e API em subdomínios distintos não trocariam cookie em dev. Em produção
+  o problema some porque `radaptech.com.br` é o domínio registrável comum, e aí a API
+  pode viver em `api.radaptech.com.br`.
+- Por isso o compose passa `REACT_APP_URL_API=/api` pro front (o `environment` do
+  compose vence o `.env` no `loadEnv` do Vite). `front-end/src/servicos/api.ts` deixa
+  valor começado por `/` passar como mesma origem — sem isso ele forçaria `https://` e
+  montaria `https:///api`.
+- ⚠️ **Há um segundo traefik na máquina** (projeto `sgeepi-infra`, portas 80/8080) e os
+  dois leem o mesmo socket do Docker. A separação é dos dois lados, e quebra se alguém
+  mexer nela: o traefik daqui só aceita containers com o label de projeto `sistema-os`
+  (`--providers.docker.constraints`), e os routers daqui usam o entrypoint `websos`,
+  que não existe lá — o traefik vizinho até descobre os containers, mas marca os
+  routers como `disabled` ("entryPoint websos doesn't exist"). Renomear o entrypoint ou
+  tirar a constraint faz os dois brigarem por `*.localhost`.
+- A sub-rede do compose é declarada (`172.29.0.0/16`) só pra o traefik ter IP fixo
+  (`172.29.0.2`) e a api poder confiar exatamente nele — ver `TRUSTED_PROXIES` em
+  "Rotas e rate limit". Mudar a sub-rede sem mudar o `TRUSTED_PROXIES` deixa o
+  `ClientIP` preso no IP do proxy (um bucket de rate limit pro mundo inteiro).
 
 ## Testes
 - `go test ./...`. Em `controller/` e `middleware/`, handlers e middlewares são testados
@@ -231,6 +306,10 @@ cadastrada neste tenant" até existir uma dessas.
   - `middleware/perfil_test.go` — `Permitir` com um perfil, vários, nenhum, e o caso de
     falha fechada (contexto sem perfil **nega**, protege contra montar o middleware na
     ordem errada).
+  - `middleware/tenantId_test.go` — só os ramos que abortam antes de tocar no banco
+    (header ausente/em branco → 400, `www`/`api` → 403), por isso passa `nil` como
+    `*repository.Queries`. O `TestGetTenantID` existe porque o cast já esteve em `int32`
+    e nunca casava com o `bigint` de `empresa.id` — falhava calado devolvendo `false`.
 - Dois níveis em `internal/service/`:
   - `loginService_test.go` — unitário, sem banco: tabela cobrindo `validarEscopo` +
     `escopoDoPerfil` nos 4 perfis.
