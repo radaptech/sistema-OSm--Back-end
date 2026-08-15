@@ -18,13 +18,10 @@ import (
 	"github.com/radaptech/sistema-OSm--Back-end/internal/model"
 )
 
-// A porta publicada no host (5431) está mal mapeada no docker-compose -- o
-// Postgres escuta em 5432 dentro do container --, então o default aqui é o IP
-// do container na rede do compose. Sobrescreva com TEST_DB_DSN quando o IP
-// mudar ou for rodar de dentro da rede docker (host `postgres`).
-//
-// ponytail: IP fixo; se rodar em CI, exporte TEST_DB_DSN.
-const dsnPadraoTeste = "postgres://postgres:postgres@172.20.0.3:5432/postgres?sslmode=disable"
+// Default: a porta publicada no host pelo docker-compose (5431 -> 5432 do
+// container). Sobrescreva com TEST_DB_DSN pra rodar de dentro da rede docker
+// (host `postgres`) ou em CI.
+const dsnPadraoTeste = "postgres://postgres:postgres@localhost:5431/postgres?sslmode=disable"
 
 // bancoDeTeste cria um banco descartável, aplica as migrations nele e devolve
 // o pool. Pula o teste inteiro se não houver Postgres alcançável.
