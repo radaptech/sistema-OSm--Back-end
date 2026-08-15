@@ -166,7 +166,8 @@ func (l *LoginController) Sessao() gin.HandlerFunc {
 // SameSite Lax: front e API ficam sob o mesmo domínio registrável
 // (*.radaptech.com.br, localhost em dev), então o cookie viaja. Só vira
 // SameSiteNone (que obriga Secure) se o front sair pra outro domínio.
-// maxAge 86400 casa com o exp de 24h do JWT (auth.GerarJwt); -1 apaga.
+// maxAge 86400 (24h) é maior que o exp do JWT (8h, auth.GerarJwt): passado o
+// exp o middleware rejeita e o 401 do /sessao apaga o cookie. -1 apaga.
 func cookieSessao(ctx *gin.Context, token string, maxAge int) {
 	ctx.SetSameSite(http.SameSiteLaxMode)
 	ctx.SetCookie("token", token, maxAge, "/", "", true, true)
