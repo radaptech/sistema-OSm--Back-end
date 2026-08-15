@@ -6,6 +6,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/radaptech/sistema-OSm--Back-end/config"
+	r "github.com/radaptech/sistema-OSm--Back-end/internal/router"
+	"github.com/radaptech/sistema-OSm--Back-end/middleware"
 )
 
 func main() {
@@ -30,6 +32,10 @@ func main() {
 
 		log.Fatal(err)
 	}
+
+	router.Use(middleware.CorsConfig())
+	c := r.NewContainer(db)
+	r.ConfigurarRotas(router, c)
 
 	router.Run(":8081")
 }

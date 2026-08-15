@@ -216,10 +216,9 @@ cadastrada neste tenant" até existir uma dessas.
 - `.env` na raiz: `DB_SERVER`, `DB_USER`, `DB_PORT`, `DATABASE`, `DB_PASSWORD`
   (`DB_SSLMODE` opcional, default `disable`).
 - Dentro da rede Docker do projeto, o Postgres resolve por `DB_SERVER=postgres`,
-  `DB_PORT=5432` — é o que `api_sistema-OS` usa. **A porta publicada no host (5431) está
-  mal mapeada** (o Postgres dentro do container escuta em 5432, não 5431) — isso é do
-  `docker-compose`, não conserte sem avisar; para testar comandos Go pontualmente,
-  rode dentro do container já ativo: `docker exec api_sistema-OS go run . ...`.
+  `DB_PORT=5432` — é o que `api_sistema-OS` usa. No host, o compose publica em
+  `localhost:5431`. Para testar comandos Go pontualmente, rode dentro do container já
+  ativo: `docker exec api_sistema-OS go run . ...`.
 
 ## Testes
 - `go test ./...`. Em `controller/` e `middleware/`, handlers e middlewares são testados
@@ -239,9 +238,9 @@ cadastrada neste tenant" até existir uma dessas.
     cria um banco descartável (`teste_login_<pid>`), aplica as migrations nele e dropa
     no fim; os usuários do seed são criados via `CadastrarUsuario`, então o caminho de
     escrita entra junto. **Sem Postgres alcançável ele dá `t.Skip`**, não falha.
-- O DSN vem de `TEST_DB_DSN`; o default aponta pro **IP do container** na rede do compose
-  (`172.20.0.3:5432`) porque a porta publicada no host está mal mapeada (ver "Ambiente
-  local"). Se o IP mudar: `TEST_DB_DSN=... go test ./internal/service/`.
+- O DSN vem de `TEST_DB_DSN`; o default é a porta publicada no host pelo compose
+  (`localhost:5431`). De dentro da rede docker ou em CI:
+  `TEST_DB_DSN=... go test ./internal/service/`.
 - **A ordem dos dois `t.Cleanup` em `bancoDeTeste` é proposital** (`t.Cleanup` roda em
   LIFO: o `migrate` fecha antes do `pool`). Invertida, `pool.Close()` espera para sempre
   pela conexão que o `migrate` ainda segura e o teste **pendura em vez de falhar** — o
