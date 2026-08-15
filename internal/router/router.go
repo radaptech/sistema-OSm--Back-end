@@ -41,7 +41,9 @@ func ConfigurarRotas(r *gin.Engine, c *Container) {
 
 	autenticacao := api.Group("/autenticacao")
 
-	autenticacao.POST("/login", middleware.TenantMiddleware(c.queries), middleware.LimitarPorIP(rate.Every(12*time.Second), 5), c.Login.Login())
+	// Limiter antes do TenantMiddleware: força bruta barrada não paga um
+	// ObterEmpresaPorSubdominio (ida ao banco) por tentativa.
+	autenticacao.POST("/login", middleware.LimitarPorIP(rate.Every(12*time.Second), 5), middleware.TenantMiddleware(c.queries), c.Login.Login())
 	autenticacao.POST("/logout", c.Login.Logout())
 	autenticacao.GET("/sessao", middleware.AutenticacaoJwt(), c.Login.Sessao())
 
