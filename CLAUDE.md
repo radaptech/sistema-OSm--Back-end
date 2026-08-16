@@ -16,7 +16,13 @@ completo e os contratos já fechados com o front.
   `HashPassword`/`HashCompare`, `argon2id.DefaultParams`). `bcrypt` foi removido —
   `provisionamento.go` também passou a usar `auth.HashPassword`; não reintroduza bcrypt
   em nenhum caminho de senha nova.
-- Infra alvo: Railway (app) + Supabase (Postgres + Storage). Local: Docker Compose
+- Infra alvo: **Railway** (app + Postgres, plano Hobby) e **Cloudflare R2** (bucket de
+  fotos/vídeos, S3-compatível). O Postgres do Railway é instância direta, sem pooler no
+  meio — `pgx`/`sqlc` conectam sem ajuste de prepared statements. Aponte
+  `DB_SERVER`/`DB_PORT`/... pras variáveis do plugin de Postgres e use o host **interno**
+  (`*.railway.internal`, rede privada IPv6), não o proxy público.
+  ⚠️ **Hobby não tem PITR**: backup é `pg_dump` agendado mandando pro R2, com restore
+  ensaiado — não existe rede de proteção gerenciada aqui. Local: Docker Compose
   (`postgres_container-sistema-OS`, `api_sistema-OS` com hot-reload via CompileDaemon,
   `pgadmin_container-sistema-OS`).
 
@@ -469,9 +475,66 @@ cadastro de usuários.
   pra `localhost:5432`. Sem ele o `loginIntegracao_test.go` daria `t.Skip` e o CI
   passaria verde tendo rodado só os unitários — pior que não ter CI. `JWT_SECRET`
   também vai no env do job: `AutenticacaoJwt` dá `panic` sem ela.
-- **Não há job de deploy de propósito**: o Railway redeploya sozinho no push do repo
+- **Não há job de deploy de propósito**: o Railway redeploya sozinho no push do branch
   conectado. Um job aqui seria uma segunda fonte da verdade + um `RAILWAY_TOKEN` pra
   guardar. Migrations rodam no boot (`main.go`), então também não precisam de passo.
+  Qual branch o Railway escuta é o que separa "salvei um arquivo" de "publiquei" — ver
+  "Deploy e produção".
+
+## Deploy e produção (decisões tomadas, retomar aqui)
+
+**Não existe servidor de homologação, e é decisão consciente.** Staging serve pra pegar
+o que localhost não pega; neste projeto isso é conexão com o banco gerenciado, cookie
+`Secure`/`SameSite` no domínio real, CORS e `TRUSTED_PROXIES` com o proxy do Railway —
+quatro coisas de **configuração de ambiente, que se erram uma vez só**. Não sustentam um
+ambiente permanente. No plano Hobby ainda custam dinheiro: staging seria um segundo
+Postgres + segunda API 24/7, dobrando o consumo em cima de um crédito de $5.
+
+**O primeiro deploy É a homologação.** A janela entre subir e o admin começar a cadastrar
+é o ambiente de teste: mesma infra, mesmo código, banco ainda descartável. Suba,
+provisione um tenant de teste (`make provisionar-admin`), exercite os fluxos, apague o
+tenant, entregue.
+
+### Antes de entregar pro admin
+- **Backup com restore ensaiado.** `pg_dump` agendado mandando pro R2 (Hobby não tem
+  PITR — ver "Stack"). Faça o caminho de volta pelo menos uma vez: dump → restaura em
+  banco novo → confere. Backup nunca testado não é backup.
+- **A partir daqui, toda migration é migration com dado dentro.** A regra de testar
+  `up`+`down` num Postgres descartável (ver "Migrations") sobe de nível: teste contra um
+  **restore do dump de produção**, não contra banco vazio. O que passa no vazio e quebra
+  com dado é sempre o mesmo: `NOT NULL` sem default, `UNIQUE` em coluna que já tem
+  duplicata, `CHECK` novo em linha antiga.
+- **Faça a bagunça de schema antes.** Buraco de modelagem descoberto depois do handover
+  vira `ALTER` com dado. Dois já apareceram assim: empresa×loja (resolvido: empresa É o
+  tenant) e o `os_evento` que `docs/modelagem-banco-dados.md` lista em "Pontos em aberto".
+
+### Riscos operacionais conhecidos
+- ⚠️ **Migration falha = produção fora do ar, não feature quebrada.** `main.go` roda
+  `RunMigrationPostgress` no boot e faz `log.Fatal` no erro — a API não sobe, e com
+  restart automático vira crash loop. Tenha o rollback do deploy do Railway à mão. É o
+  preço de migrar no boot, que continua valendo a pena enquanto o deploy for um só.
+- **O Railway redeploya sozinho a cada push do branch conectado.** Com o admin cadastrando
+  em produção enquanto o resto do software é construído, isso é um restart no meio do
+  formulário dele. Trabalhe em `dev` e conecte o Railway só ao `master` (o CI já roda nos
+  dois). Merge pra `master` passa a ser o gesto de "quero publicar isto".
+- **Tenant de teste em produção é o staging dos pobres.** O sistema é multi-tenant: um
+  `teste.<dominio>` exercita fluxo com dado descartável, isolado do tenant real, sem
+  custo nenhum. Não cobre erro de schema — migration pega todos os tenants.
+
+### R2 — decisões pendentes que afetam a migration de `maquina`/anexo
+Nada disso está implementado; decidir **antes** de escrever a migration que guarda o
+arquivo, não depois.
+- **Guardar a key, não a URL**, com prefixo por tenant (`tenant/{id}/maquina/{id}/foto.jpg`)
+  e gerar **URL assinada de leitura** na resposta, com TTL curto. Bucket público num
+  sistema multi-tenant significa que qualquer um com o link vê a foto de outro tenant. O
+  contrato do front não muda: `fotoUrl` continua sendo uma string.
+- **Egress do R2 é grátis** — é o motivo de ele estar aqui. Sirva o arquivo direto pro
+  browser; nunca faça proxy pela API.
+- **Vídeo passando pelo container é o que vai doer primeiro.** O contrato hoje manda
+  multipart pra API (`POST /maquinas`, as três criações de solicitação) e o Gin bufferiza
+  32MB por padrão — no Hobby isso é RAM e CPU que não sobram. Mantenha multipart por
+  enquanto, **com limite de tamanho explícito**, e troque por `PUT` assinado direto do
+  browser quando incomodar (muda o contrato, precisa do front junto).
 
 ## Regras herdadas do contrato com o front (não reinvente)
 - **401 é só "sem sessão"**; fora de escopo/perfil errado é sempre **403** — 401 fora de
