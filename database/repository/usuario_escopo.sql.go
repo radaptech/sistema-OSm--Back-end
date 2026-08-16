@@ -155,6 +155,54 @@ func (q *Queries) ObterEscoposPorUsuario(ctx context.Context, usuarioID int64) (
 	return items, nil
 }
 
+const obterEscoposSessaoPorUsuarios = `-- name: ObterEscoposSessaoPorUsuarios :many
+SELECT
+    ue.usuario_id,
+    ue.loja_id,
+    ue.acesso_total_setores,
+    array_remove(array_agg(ues.setor_id), NULL)::bigint[] AS setores_ids
+FROM usuario_escopo ue
+LEFT JOIN usuario_escopo_setor ues ON ues.escopo_id = ue.id
+WHERE ue.usuario_id = ANY($1::bigint[])
+GROUP BY ue.id, ue.usuario_id, ue.loja_id, ue.acesso_total_setores
+ORDER BY ue.usuario_id, ue.loja_id
+`
+
+type ObterEscoposSessaoPorUsuariosRow struct {
+	UsuarioID          int64
+	LojaID             int64
+	AcessoTotalSetores bool
+	SetoresIds         []int64
+}
+
+// Mesma forma de ObterEscopoSessaoPorUsuario, só que para vários usuários numa
+// ida só ao banco -- é o que ListarUsuarios usa para montar o escopo de uma
+// página inteira sem N+1.
+func (q *Queries) ObterEscoposSessaoPorUsuarios(ctx context.Context, usuarioIds []int64) ([]ObterEscoposSessaoPorUsuariosRow, error) {
+	rows, err := q.db.Query(ctx, obterEscoposSessaoPorUsuarios, usuarioIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ObterEscoposSessaoPorUsuariosRow
+	for rows.Next() {
+		var i ObterEscoposSessaoPorUsuariosRow
+		if err := rows.Scan(
+			&i.UsuarioID,
+			&i.LojaID,
+			&i.AcessoTotalSetores,
+			&i.SetoresIds,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const obterSetoresPorEscopos = `-- name: ObterSetoresPorEscopos :many
 SELECT escopo_id, setor_id FROM usuario_escopo_setor
 WHERE escopo_id = ANY($1::bigint[])

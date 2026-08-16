@@ -87,16 +87,29 @@ WHERE tenant_id = $1
     OR nome ILIKE '%' || $3 || '%'
     OR email ILIKE '%' || $3 || '%'
   )
+  AND (
+    $4::bigint IS NULL
+    OR EXISTS (
+      SELECT 1 FROM usuario_escopo ue
+      WHERE ue.usuario_id = usuario.id AND ue.loja_id = $4
+    )
+  )
 `
 
 type ContarUsuariosParams struct {
 	TenantID int64
 	Perfil   *PerfilUsuario
 	Busca    *string
+	LojaID   *int64
 }
 
 func (q *Queries) ContarUsuarios(ctx context.Context, arg ContarUsuariosParams) (int64, error) {
-	row := q.db.QueryRow(ctx, contarUsuarios, arg.TenantID, arg.Perfil, arg.Busca)
+	row := q.db.QueryRow(ctx, contarUsuarios,
+		arg.TenantID,
+		arg.Perfil,
+		arg.Busca,
+		arg.LojaID,
+	)
 	var count int64
 	err := row.Scan(&count)
 	return count, err
@@ -149,7 +162,7 @@ func (q *Queries) CriarUsuario(ctx context.Context, arg CriarUsuarioParams) (Usu
 	return i, err
 }
 
-const desativarUsuario = `-- name: DesativarUsuario :exec
+const desativarUsuario = `-- name: DesativarUsuario :execrows
 UPDATE usuario
 SET ativo = false
 WHERE id = $1 AND tenant_id = $2
@@ -160,9 +173,15 @@ type DesativarUsuarioParams struct {
 	TenantID int64
 }
 
-func (q *Queries) DesativarUsuario(ctx context.Context, arg DesativarUsuarioParams) error {
-	_, err := q.db.Exec(ctx, desativarUsuario, arg.ID, arg.TenantID)
-	return err
+// :execrows e não :exec -- sem a contagem de linhas, desativar um id que não
+// existe (ou que é de outro tenant) responderia 200 igualzinho a desativar um
+// de verdade. Já desativado conta 1 mesmo assim: o UPDATE casa a linha.
+func (q *Queries) DesativarUsuario(ctx context.Context, arg DesativarUsuarioParams) (int64, error) {
+	result, err := q.db.Exec(ctx, desativarUsuario, arg.ID, arg.TenantID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const listarUsuarios = `-- name: ListarUsuarios :many
@@ -175,6 +194,13 @@ WHERE tenant_id = $1
     OR nome ILIKE '%' || $5 || '%'
     OR email ILIKE '%' || $5 || '%'
   )
+  AND (
+    $6::bigint IS NULL
+    OR EXISTS (
+      SELECT 1 FROM usuario_escopo ue
+      WHERE ue.usuario_id = usuario.id AND ue.loja_id = $6
+    )
+  )
 ORDER BY nome
 LIMIT $2 OFFSET $3
 `
@@ -185,11 +211,19 @@ type ListarUsuariosParams struct {
 	Offset   int32
 	Perfil   *PerfilUsuario
 	Busca    *string
+	LojaID   *int64
 }
 
-// Filtros combináveis: perfil e busca (nome/email) são opcionais -- passe
-// NULL para não filtrar por eles. Paginação por LIMIT/OFFSET, contagem total
-// em ContarUsuarios (RespostaPaginada exige os dois).
+// Filtros combináveis: perfil, busca (nome/email) e loja_id são opcionais --
+// passe NULL para não filtrar por eles. Paginação por LIMIT/OFFSET, contagem
+// total em ContarUsuarios (RespostaPaginada exige os dois).
+//
+// loja_id filtra pelo escopo de acesso (usuario_escopo), com EXISTS e não
+// JOIN: usuário com N escopos apareceria N vezes e estouraria o LIMIT com
+// repetição. Administrador não tem escopo nenhum (a ausência É o acesso
+// total, 3.8), então some de qualquer listagem filtrada por loja -- que é o
+// certo: ele não pertence a loja alguma. ContarUsuarios repete o mesmo WHERE
+// de propósito; divergir entre as duas dá total que não bate com a página.
 func (q *Queries) ListarUsuarios(ctx context.Context, arg ListarUsuariosParams) ([]Usuario, error) {
 	rows, err := q.db.Query(ctx, listarUsuarios,
 		arg.TenantID,
@@ -197,6 +231,7 @@ func (q *Queries) ListarUsuarios(ctx context.Context, arg ListarUsuariosParams) 
 		arg.Offset,
 		arg.Perfil,
 		arg.Busca,
+		arg.LojaID,
 	)
 	if err != nil {
 		return nil, err

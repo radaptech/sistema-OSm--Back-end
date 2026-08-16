@@ -49,3 +49,18 @@ WHERE escopo_id IN (SELECT id FROM usuario_escopo WHERE usuario_id = $1);
 -- name: DeletarEscoposPorUsuario :exec
 DELETE FROM usuario_escopo
 WHERE usuario_id = $1;
+
+-- name: ObterEscoposSessaoPorUsuarios :many
+-- Mesma forma de ObterEscopoSessaoPorUsuario, só que para vários usuários numa
+-- ida só ao banco -- é o que ListarUsuarios usa para montar o escopo de uma
+-- página inteira sem N+1.
+SELECT
+    ue.usuario_id,
+    ue.loja_id,
+    ue.acesso_total_setores,
+    array_remove(array_agg(ues.setor_id), NULL)::bigint[] AS setores_ids
+FROM usuario_escopo ue
+LEFT JOIN usuario_escopo_setor ues ON ues.escopo_id = ue.id
+WHERE ue.usuario_id = ANY(sqlc.arg(usuario_ids)::bigint[])
+GROUP BY ue.id, ue.usuario_id, ue.loja_id, ue.acesso_total_setores
+ORDER BY ue.usuario_id, ue.loja_id;
