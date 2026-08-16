@@ -16,14 +16,20 @@ import (
 type Container struct {
 	queries *repository.Queries
 	Login   *controller.LoginController
+	Loja    *controller.LojaController
+	Setor   *controller.SetorController
 }
 
 func NewContainer(db *pgxpool.Pool) *Container {
 
 	serviceLogin := service.NewRepoUsuario(db)
+	serviceLoja := service.NewRepoLojas(db)
+	serviceSetor := service.NewRepoSetor(db)
 
 	return &Container{
 		Login:   controller.NewLoginController(serviceLogin),
+		Loja:    controller.NewLojaController(serviceLoja),
+		Setor:   controller.NewSetorController(serviceSetor),
 		queries: repository.New(db),
 	}
 }
@@ -53,4 +59,29 @@ func ConfigurarRotas(r *gin.Engine, c *Container) {
 	usuarios.GET("/:id", middleware.Permitir("administrador"), c.Login.Obter())
 	usuarios.PUT("/:id", middleware.Permitir("administrador"), c.Login.Atualizar())
 	usuarios.DELETE("/:id", middleware.Permitir("administrador"), c.Login.Desativar())
+
+	// Empresa não tem CRUD (o tenant nasce pela CLI de provisionamento): esta
+	// rota existe só para o select de Empresa no cadastro de loja, e por isso
+	// mora no controller de loja.
+	api.GET("/empresas", middleware.AutenticacaoJwt(), middleware.Permitir("administrador"), c.Loja.ListarEmpresas())
+
+	lojas := api.Group("/lojas", middleware.AutenticacaoJwt())
+	// Listar fica sem Permitir de propósito: o gestor precisa da lista para
+	// montar os blocos por loja do painel, e o solicitante/técnico veem o nome
+	// da loja nas telas deles. Escrever é só do administrador.
+	lojas.GET("", c.Loja.Listar())
+	lojas.GET("/:id", middleware.Permitir("administrador"), c.Loja.Obter())
+	lojas.POST("", middleware.Permitir("administrador"), c.Loja.Cadastrar())
+	lojas.PUT("/:id", middleware.Permitir("administrador"), c.Loja.Atualizar())
+	lojas.DELETE("/:id", middleware.Permitir("administrador"), c.Loja.Desativar())
+
+	setores := api.Group("/setores", middleware.AutenticacaoJwt())
+	// Listar sem Permitir pelo mesmo motivo de /lojas: o painel do gestor nomeia
+	// os blocos por setor e o cadastro de máquina/usuário usa o select em
+	// cascata. Escrever é só do administrador.
+	setores.GET("", c.Setor.Listar())
+	setores.GET("/:id", middleware.Permitir("administrador"), c.Setor.Obter())
+	setores.POST("", middleware.Permitir("administrador"), c.Setor.Cadastrar())
+	setores.PUT("/:id", middleware.Permitir("administrador"), c.Setor.Atualizar())
+	setores.DELETE("/:id", middleware.Permitir("administrador"), c.Setor.Desativar())
 }
