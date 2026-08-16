@@ -2,8 +2,11 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
+
+	"github.com/jackc/pgx/v5"
 
 	"github.com/radaptech/sistema-OSm--Back-end/database/repository"
 	"github.com/radaptech/sistema-OSm--Back-end/internal/helper"
@@ -171,4 +174,132 @@ func (s *UsuarioService) montarSessao(ctx context.Context, repo *repository.Quer
 	sessao.SetorNome = &setor.Nome
 
 	return sessao, nil
+}
+
+// montarUsuario achata o escopo do banco (uma linha por loja, com a lista de
+// setores) no formato plano que o front espera em Usuario -- lojasIds,
+// setoresIds e um acessoTotalSetores só. É o caminho inverso de
+// escopoDoPerfil.
+//
+// ⚠️ A perda é a mesma lacuna já conhecida do payload de escrita: como
+// acessoTotalSetores é um flag global, "total na loja A e parcial na B" não
+// tem como voltar inteiro. Só é true quando TODOS os escopos são totais --
+// caso contrário o front marcaria o alternador e apagaria os setores da loja
+// parcial ao salvar de novo. Some quando o contrato virar
+// escopos: [{lojaId, setoresIds}] (ver front-end/CLAUDE.md item 7).
+func montarUsuario(u repository.Usuario, escopos []repository.ObterEscoposSessaoPorUsuariosRow) model.Usuario {
+
+	// Slices não-nil de propósito: o front tipa lojasIds/setoresIds como
+	// number[], e nil viraria `null` no JSON.
+	lojasIds, setoresIds := []int64{}, []int64{}
+	acessoTotal := len(escopos) > 0
+
+	for _, e := range escopos {
+		lojasIds = append(lojasIds, e.LojaID)
+		setoresIds = append(setoresIds, e.SetoresIds...)
+		acessoTotal = acessoTotal && e.AcessoTotalSetores
+	}
+
+	return model.Usuario{
+		Id:                 u.ID,
+		Nome:               u.Nome,
+		Telefone:           u.Telefone,
+		Email:              u.Email,
+		Perfil:             string(u.Perfil),
+		LojasIds:           lojasIds,
+		SetoresIds:         setoresIds,
+		AcessoTotalSetores: acessoTotal,
+		Ativo:              u.Ativo,
+	}
+}
+
+// resolverAreaTecnico traduz o nome da área (o que o front manda) no
+// area_tecnico_id que a coluna guarda. Devolve nil fora do perfil técnico:
+// ck_usuario_area_tecnico exige area_tecnico_id NOT NULL exatamente quando
+// perfil = 'tecnico', então trocar o perfil de técnico para outro tem que
+// zerar a área junto -- é por isso que quem chama nunca preserva o valor
+// antigo.
+func resolverAreaTecnico(ctx context.Context, repo *repository.Queries, perfil string, area *string, tenantID int64) (*int16, error) {
+
+	if perfil != "tecnico" {
+		return nil, nil
+	}
+	if area == nil {
+		return nil, fmt.Errorf("técnico exige área de atuação: %w", helper.ErrValidacao)
+	}
+
+	id, err := repo.ObterAreaTecnicoPorNome(ctx, repository.ObterAreaTecnicoPorNomeParams{
+		TenantID: tenantID,
+		Nome:     *area,
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("área técnica %q não cadastrada neste tenant: %w", *area, helper.ErrNaoEncontrado)
+		}
+		return nil, helper.TraduzErroPostgres(err)
+	}
+
+	return &id, nil
+}
+
+// gravarEscopo cria as linhas de usuario_escopo (+ usuario_escopo_setor) do
+// usuário e devolve o escopo já normalizado, no formato plano que a resposta
+// usa. Compartilhado por CadastrarUsuario e AtualizarUsuario -- no update quem
+// chama apaga o conjunto antigo antes, porque escopo se substitui inteiro e
+// não se mescla (ver usuario_escopo.sql).
+func gravarEscopo(ctx context.Context, repo *repository.Queries, usuarioID, tenantID int64, p model.NovoUsuarioPayload) (lojasIds, setoresIds []int64, acessoTotal bool, err error) {
+
+	lojasIds, setoresIds, acessoTotal = escopoDoPerfil(p)
+
+	// Cada setor entra só no escopo da própria loja -- ver setoresPorLoja.
+	var porLoja map[int64][]int64
+	if len(setoresIds) > 0 {
+		porLoja, err = setoresPorLoja(ctx, repo, tenantID, lojasIds, setoresIds)
+		if err != nil {
+			return nil, nil, false, err
+		}
+	}
+
+	for _, idLoja := range lojasIds {
+
+		escopo, err := repo.CriarEscopo(ctx, repository.CriarEscopoParams{
+			UsuarioID:          usuarioID,
+			LojaID:             idLoja,
+			AcessoTotalSetores: acessoTotal,
+		})
+		if err != nil {
+			return nil, nil, false, helper.TraduzErroPostgres(err)
+		}
+
+		// acesso_total_setores = true não tem linha de setor: a ausência é o
+		// acesso total à loja (docs/modelagem-banco-dados.md 3.8).
+		for _, idSetor := range porLoja[idLoja] {
+			if err := repo.CriarEscopoSetor(ctx, repository.CriarEscopoSetorParams{
+				EscopoID: escopo.ID,
+				SetorID:  idSetor,
+			}); err != nil {
+				return nil, nil, false, helper.TraduzErroPostgres(err)
+			}
+		}
+	}
+
+	return lojasIds, setoresIds, acessoTotal, nil
+}
+
+// comoNovoPayload existe só para AtualizarUsuario reaproveitar validarEscopo,
+// escopoDoPerfil e gravarEscopo, todos escritos sobre NovoUsuarioPayload. Os
+// dois payloads só diferem na senha (opcional no update), que não tem nada a
+// ver com escopo -- duplicar as três funções por causa disso deixaria a regra
+// de cardinalidade em dois lugares para divergir.
+func comoNovoPayload(p model.AtualizarUsuarioPayload) model.NovoUsuarioPayload {
+	return model.NovoUsuarioPayload{
+		Nome:               p.Nome,
+		Telefone:           p.Telefone,
+		Email:              p.Email,
+		Perfil:             p.Perfil,
+		LojasIds:           p.LojasIds,
+		SetoresIds:         p.SetoresIds,
+		AcessoTotalSetores: p.AcessoTotalSetores,
+		Area:               p.Area,
+	}
 }
