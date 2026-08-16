@@ -64,7 +64,14 @@ que o front espera (camelCase, datas `dd/mm/yyyy HH:MM:SS`, ver `config/dataBr.g
 - `internal/model/` — structs de request/response, com `json` (camelCase, espelhando os
   tipos do front) e `binding` (validação do `go-playground/validator` via Gin) nas tags.
   `login.go` (`Login`, `SessaoUsuario`, `EscopoAcessoGestor`), `usuarios.go`
-  (`NovoUsuarioPayload`, `AtualizarUsuarioPayload`, `Usuario`).
+  (`NovoUsuarioPayload`, `AtualizarUsuarioPayload`, `Usuario`), `loja.go` (`Loja`,
+  `Empresa`, `NovaLojaPayload`), `setor.go` (`Setor`, `NovoSetorPayload`),
+  `paginacao.go` (`RespostaPaginada[T]`, genérico — espelha `RespostaPaginada<T>` do
+  front; só `GET /usuarios` usa hoje).
+  **Toda struct de resposta precisa do `id` e das tags camelCase**: sem tag o Go
+  serializa `Nome` e o front lê `undefined`, e sem `id` a listagem não serve pra nada
+  (é o `value` do select, o `/:id` do botão editar e o que vai pro escopo). Já
+  aconteceu com `Loja` e `Setor`.
 - `internal/helper/Errors.go` — `TraduzErroPostgres`: converte código de erro do
   Postgres (`23505`, `23503`, `23502`, ...) em erro de negócio (`ErrDadoDuplicado`,
   `ErrConflitoIntegridade`, ...) pros controllers não fazerem `switch` em `pgErr.Code`
@@ -72,26 +79,77 @@ que o front espera (camelCase, datas `dd/mm/yyyy HH:MM:SS`, ver `config/dataBr.g
   "Autenticação" abaixo. `ErrValidacao` é o sentinela que os erros de regra de negócio
   do service embrulham com `%w` (`validarEscopo`, `setoresPorLoja`) pro controller
   responder 400 sem olhar o texto do erro.
-- `internal/service/` — regras de negócio. `UsuarioService` guarda o `*pgxpool.Pool`
+  **Sentinela sempre na frente do `%w`**: `fmt.Errorf("%w: detalhe", helper.ErrX)`, nunca
+  `"detalhe: %w"`. A mensagem inteira vai pro toast do front, e no formato antigo o texto
+  genérico do sentinela ficava pendurado no rabo ("a loja ainda tem 2 setores: ID nao
+  existe no sistema"). Formato atual: `categoria: detalhe`.
+  ⚠️ **`TraduzErroPostgres` não entende `pgx.ErrNoRows`** — ele só olha código do
+  `pgconn` e cai num `fmt.Errorf("%v", err)` final, com `%v` e não `%w`, que **quebra o
+  `errors.Is`**. Todo `:one` precisa de `if errors.Is(err, pgx.ErrNoRows)` **antes** de
+  chamar o helper, senão um id inexistente vira 500 em vez de 404.
+- `internal/service/` — regras de negócio. Todo service guarda o `*pgxpool.Pool`
   (não um `Querier`): as escritas precisam de transação e `Querier` não expõe `WithTx`,
-  então cada método monta o seu `repository.New(tx)`.
-  - `loginService.go` — `CadastrarUsuario` (usuário + escopo numa transação só),
-    `Login` e `ObterSessao` (o `GET /autenticacao/sessao`: `ObterUsuarioPorID` **não**
-    filtra `ativo` como o `ObterUsuarioPorEmail`, então o `!user.Ativo` está explícito
-    ali; usuário sumido ou desativado devolve `ErrSessaoExpirada`).
+  então cada método monta o seu `repository.New(tx)`. Um `montarX` por entidade
+  (`montarUsuario`, `montarLoja`, `montarSetor`) é a **única** tradução de linha do banco
+  pra resposta — espalhar isso em cada método já fez o `id` sumir de metade delas.
+  Listagem devolve slice **não-nil** (`make(..., 0, n)`): o front tipa `T[]` e `null`
+  quebra o `.map`.
+  - `loginService.go` — CRUD de usuário (`CadastrarUsuario`, `ObterUsuario`,
+    `ListarUsuarios`, `AtualizarUsuario`, `DesativarUsuario`), `Login` e `ObterSessao`.
+    - `ObterSessao` (`GET /autenticacao/sessao`) confere **empresa e usuário**:
+      `ObterUsuarioPorID` **não** filtra `ativo` como o `ObterUsuarioPorEmail`, então o
+      `!user.Ativo` está explícito ali, e antes dele vem `EmpresaAtiva` — sem esse cheque
+      desativar um tenant só barrava login novo e quem já estava dentro seguia até o
+      `exp`. Os três casos (empresa inativa, usuário sumido, usuário inativo) devolvem
+      `ErrSessaoExpirada`.
+    - `ListarUsuarios` monta o escopo da página inteira com **uma** query
+      (`ObterEscoposSessaoPorUsuarios`), não uma por usuário.
+    - `AtualizarUsuario` substitui o escopo inteiro na mesma transação (setores antes dos
+      escopos, sem `ON DELETE CASCADE`) e zera `area_tecnico_id` fora do perfil técnico —
+      `ck_usuario_area_tecnico` exige a coluna NOT NULL exatamente para `tecnico`.
+    - `DesativarUsuario` recusa `id == atorId`. Não é vaidade: só administrador chega na
+      rota, então o último deles se desativando trancaria o tenant inteiro pra fora, com
+      saída só pela CLI de provisionamento.
   - `EscopoPerfilService.go` — o que é por perfil e não por endpoint: `validarEscopo`
     (cardinalidade de 3.8, que as tags de `binding` não alcançam), `escopoDoPerfil`
     (normaliza o payload plano do front), `setoresPorLoja` (distribui cada setor no
     escopo da loja certa — ver "Queries e repository") e `montarSessao` (o corpo de
     `SessaoUsuario`, compartilhado entre `POST /autenticacao/login` e
-    `GET /autenticacao/sessao`).
+    `GET /autenticacao/sessao`). Também `gravarEscopo` e `resolverAreaTecnico`,
+    compartilhados por `CadastrarUsuario`/`AtualizarUsuario`, e `montarUsuario` (o
+    caminho inverso de `escopoDoPerfil`: achata o escopo do banco no formato plano do
+    front — `acessoTotalSetores` só é `true` quando **todos** os escopos são totais,
+    senão o front marcaria o alternador e apagaria os setores da loja parcial no próximo
+    save).
+  - `lojaService.go` — CRUD de loja + `ListarEmpresas`. `nomeValido` (apara e recusa
+    vazio; `binding:"required"` passa numa string de espaços e não há CHECK no banco) é
+    compartilhado com setor. **`DesativarLoja` recusa enquanto houver setor ativo**, e a
+    contagem roda na mesma transação do UPDATE — separadas, alguém cria um setor no meio
+    e a loja fica inativa com setor ativo pendurado no escopo de um gestor. Recusa em vez
+    de cascatear porque o soft delete não tem volta pela API.
+  - `setorService.go` — CRUD de setor. **`CadastrarSetor` é transacional** e recusa loja
+    inexistente, de outro tenant ou **desativada**: a FK composta garante o tenant, não o
+    `ativa`, e sem isso dava pra desativar a loja (permitido com zero setores) e pendurar
+    um setor novo nela depois, contornando a regra pelo outro lado. O
+    `ObterLojaParaEscrita` usa `FOR SHARE` pra loja não ser desativada entre o cheque e o
+    INSERT. `AtualizarSetor` **não** muda `loja_id` (ver "Queries e repository").
 - `controller/` — `loginController.go`: `LoginController` recebe um
   `LoginServiceInterface` (a interface existe pro teste do handler poder trocar o
   service — `UsuarioService` guarda `*pgxpool.Pool` concreto, não dá pra mockar de
   outro jeito). Handlers: `Registrar` (`POST /usuarios`), `Login`, `Logout`, `Sessao`.
   O cookie de sessão sai só de `cookieSessao(ctx, token, maxAge)` — login e logout
   passam pela mesma função porque o `Set-Cookie` de remoção só apaga se casar com o de
-  criação (nome, path, `Secure`, `SameSite`).
+  criação (nome, path, `Secure`, `SameSite`). Mais `Obter`/`ListarUsuarios`/
+  `Atualizar`/`Desativar`, e os helpers de pacote `idDaRota` (`:id` malformado é **400**,
+  não 404 — `/abc` não é um id que não existe, é bug de cliente) e `tenantDaRota`.
+  `lojaController.go` e `setorController.go` seguem o mesmo molde (interface própria +
+  `corpoLoja`/`corpoSetor`).
+  **Mapa de erro → status**: `ErrValidacao` 400, `ErrDadoDuplicado` 409,
+  `ErrConflitoIntegridade` 422, resto 500 **com o erro cru só no `log`**.
+  `ErrNaoEncontrado` é **404 quando o `:id` da rota é a única coisa que pode faltar**
+  (loja, setor, `GET`/`DELETE /usuarios/:id`) e **422 em `POST`/`PUT /usuarios`**, onde o
+  mesmo sentinela também cobre "área técnica citada no corpo não existe" e `errors.Is`
+  não distingue os dois.
 - `internal/router/router.go` — `Container` (injeção: guarda os controllers montados +
   o `*repository.Queries` que o `TenantMiddleware` precisa) e `ConfigurarRotas`. Ver
   "Rotas e rate limit".
@@ -174,8 +232,12 @@ administrador a ela.
   `ErrDadoDuplicado` → 409, `ErrNaoEncontrado`/`ErrConflitoIntegridade` → 422, resto →
   500 **com o erro só no `log`**: o erro cru do pgx carrega nome de constraint/coluna e
   às vezes o SQL, não pode ir no corpo da resposta.
-- **Ainda falta revogar sessão antes do `exp`** — desativar usuário, trocar senha e
-  logout não matam um token já emitido, e `HttpOnly` não impede o dono do navegador de
+- **Revogação: metade feita.** `ObterSessao` já derruba sessão de usuário desativado e
+  de **empresa desativada** (`EmpresaAtiva`), e o front desloga sozinho no 401 do
+  `/sessao`. Mas isso fecha só o caminho do browser: o `AutenticacaoJwt` valida
+  assinatura e não vai ao banco, então **um token cru na mão continua escrevendo em todas
+  as outras rotas até o `exp` de 8h**. Trocar senha e logout também não matam token
+  emitido, e `HttpOnly` não impede o dono do navegador de
   copiar o cookie no DevTools (ele protege contra XSS, não contra o usuário). O `exp`
   de 8h limita a janela a um turno. Conserto barato quando for mexer: `token_version`
   na `usuario`, o JWT carrega o valor e o middleware compara — dá pra juntar na mesma
@@ -183,8 +245,25 @@ administrador a ela.
 
 ## Rotas e rate limit
 - Tudo em `internal/router/router.go`, sob o grupo `/api`. Registradas hoje:
-  `GET /api` (healthcheck), `POST /autenticacao/login`, `POST /autenticacao/logout`,
-  `GET /autenticacao/sessao`, `POST /usuarios`.
+
+  | rota | RBAC |
+  |---|---|
+  | `GET /api` (healthcheck) | pública |
+  | `POST /autenticacao/login` | pública (rate limit + `TenantMiddleware`) |
+  | `POST /autenticacao/logout` | pública, ver abaixo |
+  | `GET /autenticacao/sessao` | autenticada |
+  | `GET·POST /usuarios`, `GET·PUT·DELETE /usuarios/:id` | administrador |
+  | `GET /empresas` | administrador |
+  | `GET /lojas`, `GET /setores` | **qualquer perfil autenticado** |
+  | `GET·PUT·DELETE /lojas/:id`, `POST /lojas` | administrador |
+  | `GET·PUT·DELETE /setores/:id`, `POST /setores` | administrador |
+
+- **As duas listagens sem `Permitir` são de propósito**: o painel do gestor agrupa por
+  loja e nomeia os blocos por setor (`acessoGestor.ts` procura o setor por id), e os
+  selects em cascata de cadastro dependem das duas. Restringir a administrador deixa o
+  painel do gestor sem nomes. Escrever continua só do administrador.
+- `GET /empresas` mora no `LojaController` porque empresa **não tem CRUD** — o tenant
+  nasce pela CLI de provisionamento, e a única tela que pergunta por ela é a de loja.
 - **`TenantMiddleware` entra só em `/autenticacao/login`** — é o único endpoint que lê o
   header `X-tenant-ID`; ver "Autenticação". Rota autenticada que precise de tenant usa
   `GetTenantIDToken`, não o middleware.
@@ -225,8 +304,18 @@ administrador a ela.
   `database/repository/` na mão**, é tudo gerado.
 - Convenção de nomenclatura: em português, verbo primeiro (`CriarX`, `ObterXPorId`,
   `ListarX`, `AtualizarX`, `DeletarX`), espelhando o estilo do resto do Go do projeto.
-- **Exclusão é sempre soft delete** (`ativo = false`) — ver "Soft delete" em
-  `docs/modelagem-banco-dados.md`. Não há `DELETE` de usuário; só `DesativarUsuario`.
+- **Exclusão é sempre soft delete** — ver "Soft delete" em
+  `docs/modelagem-banco-dados.md`. Não há `DELETE` de linha em lugar nenhum.
+  ⚠️ A coluna é **`ativa`** na `loja` (feminino) e **`ativo`** em `usuario`/`setor`.
+- **Toda query de desativar é `:execrows`**, nunca `:exec`: sem a contagem de linhas,
+  desativar um id inexistente (ou de outro tenant) responde sucesso igual a desativar um
+  de verdade. `linhas == 0` → `ErrNaoEncontrado`. Já desativado casa a linha e conta 1,
+  então desativar de novo é idempotente — e é assim que o front espera.
+- **Não existe reativação pela API**: `ativo`/`ativa` só vai para `false`. É por isso que
+  `DesativarLoja` recusa em vez de cascatear nos setores.
+- `AtualizarSetor` **não** muda `loja_id`: mover setor de loja arrastaria junto máquinas,
+  histórico de OS e o escopo de quem tem acesso a ele. Setor na loja errada se resolve
+  desativando e criando na certa. O front manda `lojaId` no PUT; o service ignora.
 - **Escopo de acesso (`usuario_escopo` + `usuario_escopo_setor`, ver
   `docs/modelagem-banco-dados.md` 3.8) edita substituindo o conjunto inteiro**, mesmo
   padrão de preventivas em `CadastrarMaquina`: o service apaga tudo do usuário
@@ -248,6 +337,17 @@ administrador a ela.
 - `ObterEscopoSessaoPorUsuario` já devolve no formato que o front consome
   (`EscopoAcessoGestor[]`, um `array_agg` de `setor_id` por loja) — é a query certa pra
   montar `SessaoUsuario.escoposGestor` no login/sessão.
+  **`ObterEscoposSessaoPorUsuarios`** (plural) é a mesma coisa para uma lista de ids, e
+  existe pro `ListarUsuarios` montar o escopo da página inteira numa ida só ao banco.
+  Listagem nova que precise de escopo usa a plural — a singular é do caminho da sessão.
+- **Filtro por loja em `ListarUsuarios`/`ContarUsuarios` é `EXISTS` sobre
+  `usuario_escopo`, não `JOIN`**: com `JOIN`, um usuário com N escopos aparece N vezes e
+  come o `LIMIT` com repetição. As duas queries repetem o mesmo `WHERE` de propósito —
+  divergir dá `total` que não bate com a página. Efeito colateral correto: administrador
+  não tem escopo nenhum, então some de qualquer listagem filtrada por loja.
+- `ObterLojaParaEscrita` é o `ObterLojaPorID` com **`FOR SHARE`**, usado dentro da
+  transação que cria setor: sem o lock, alguém desativa a loja entre o cheque de `ativa`
+  e o `INSERT`. `FOR SHARE` e não `FOR UPDATE` porque ninguém altera a loja ali.
 - Onde o front fala **nome** e o banco guarda **id**, a tradução é do service, com query
   própria: `area_tecnico.sql` (`ObterAreaTecnicoPorNome` — `NovoUsuarioPayload.area` vem
   como o texto de `AreaTecnico` no front, `usuario.area_tecnico_id` é `smallint`) e
@@ -256,8 +356,10 @@ administrador a ela.
   para o service distribuir o escopo).
 
 ⚠️ **`area_tecnico` não é populada por nada hoje** — nem migration de seed, nem
-`ProvisionarAdministrador`, nem CRUD. Cadastrar técnico falha com "área técnica não
-cadastrada neste tenant" até existir uma dessas.
+`ProvisionarAdministrador`, nem CRUD. Cadastrar técnico falha com "registro não
+encontrado: área técnica ... não cadastrada neste tenant" até existir uma dessas, e o
+front exige `area` obrigatória para o perfil Técnico. É o próximo bloqueio real do
+cadastro de usuários.
 
 ## Ambiente local
 - `.env` na raiz: `DB_SERVER`, `DB_USER`, `DB_PORT`, `DATABASE`, `DB_PASSWORD`
@@ -265,9 +367,26 @@ cadastrada neste tenant" até existir uma dessas.
   fica no `.env`: vem do `environment` do compose em dev (é endereço de infra, muda com
   a topologia) e do ambiente do Railway em produção.
 - Dentro da rede Docker do projeto, o Postgres resolve por `DB_SERVER=postgres`,
-  `DB_PORT=5432` — é o que `api_sistema-OS` usa. No host, o compose publica em
-  `localhost:5431`. Para testar comandos Go pontualmente, rode dentro do container já
-  ativo: `docker exec api_sistema-OS go run . ...`.
+  `DB_PORT=5432` — é o que `api_sistema-OS` usa. Para testar comandos Go pontualmente,
+  rode dentro do container já ativo: `docker exec api_sistema-OS go run . ...`.
+- **A porta 5431 no host é obrigatória, não estética**: o projeto vizinho
+  `sgeepi-infra` já publica `0.0.0.0:5432->5432` com o `postgres_container` dele. Duas
+  aplicações não dividem a mesma porta do host, então este compose sai da frente e usa
+  a 5431. Não "conserte" isso publicando na 5432 — os dois bancos brigam e o que subir
+  depois não sobe.
+- ⚠️ **O que está furado é o lado direito do mapeamento, não o esquerdo.** O compose diz
+  `5431:5431`, mas dentro do container o Postgres escuta **só na 5432** (imagem
+  `postgres:16-alpine` sem `-p` no command; confira com
+  `docker exec postgres_container-sistema-OS psql -U postgres -tAc "show port"`). Ou
+  seja: a porta publicada não tem ninguém do outro lado e `localhost:5431` **não conecta
+  do host** — dá `connection reset by peer`, porque o proxy do Docker aceita e não acha
+  upstream. O conserto mantém a sua escolha de porta: **`5431:5432`** (host 5431, livre
+  do conflito; container 5432, onde o Postgres está).
+- Enquanto o mapeamento não for corrigido, os testes de integração precisam falar direto
+  com o IP do container:
+  `TEST_DB_DSN='postgres://postgres:postgres@172.29.0.3:5432/postgres?sslmode=disable'`.
+  Sintoma de esquecer: `go test ./...` **verde sem ter rodado a integração** (`t.Skip`
+  silencioso) — exatamente o que o job de CI existe pra evitar.
 - O compose (`../docker-compose.yml`, um nível acima deste repo) sobe **front + api atrás
   de um traefik**: `http://<tenant>.localhost:8090` serve o Vite, e `/api` cai na api.
   Dashboard do traefik em `:8091`, pgadmin em `:5051`. **`api` e `front` não publicam
@@ -302,7 +421,13 @@ cadastrada neste tenant" até existir uma dessas.
     `LoginServiceInterface` variando só o erro; as tabelas cobrem erro → status, o
     cookie de sessão (nome, `HttpOnly`/`Secure`/`Max-Age`) e o corpo. O caso "erro não
     emite cookie" existe porque o sucesso do login já esteve dentro do `if err != nil`:
-    respondia 200 vazio, sem cookie, e o erro escrevia dois corpos.
+    respondia 200 vazio, sem cookie, e o erro escrevia dois corpos. O fake também **grava
+    o que recebeu** (filtros de `ListarUsuarios`, `{alvo, ator}` de `Desativar`), porque
+    parâmetro vindo do lugar errado não muda o status: se o ator viesse da rota em vez do
+    token, a trava de auto-desativação viraria decoração e o teste de status passaria.
+  - `controller/lojaController_test.go` e `setorController_test.go` — mesmo molde. O de
+    setor cobre `?lojaId=` separado (ausente/vazio → `nil` no service, inválido → 400 sem
+    tocar no banco): é esse filtro que faz o select em cascata mostrar só a loja escolhida.
   - `middleware/perfil_test.go` — `Permitir` com um perfil, vários, nenhum, e o caso de
     falha fechada (contexto sem perfil **nega**, protege contra montar o middleware na
     ordem errada).
@@ -313,20 +438,29 @@ cadastrada neste tenant" até existir uma dessas.
 - Dois níveis em `internal/service/`:
   - `loginService_test.go` — unitário, sem banco: tabela cobrindo `validarEscopo` +
     `escopoDoPerfil` nos 4 perfis.
-  - `loginIntegracao_test.go` — integração de verdade contra Postgres. `bancoDeTeste`
-    cria um banco descartável (`teste_login_<pid>`), aplica as migrations nele e dropa
-    no fim; os usuários do seed são criados via `CadastrarUsuario`, então o caminho de
-    escrita entra junto. **Sem Postgres alcançável ele dá `t.Skip`**, não falha.
-- O DSN vem de `TEST_DB_DSN`; o default é a porta publicada no host pelo compose
-  (`localhost:5431`). De dentro da rede docker ou em CI:
-  `TEST_DB_DSN=... go test ./internal/service/`.
+  - `loginIntegracao_test.go`, `lojaIntegracao_test.go`, `setorIntegracao_test.go` —
+    integração de verdade contra Postgres. `bancoDeTeste` (em `loginIntegracao_test.go`,
+    compartilhado) cria um banco descartável (`teste_<nome do teste>_<pid>`), aplica as
+    migrations nele e dropa no fim; o seed é criado pelos próprios services, então o
+    caminho de escrita entra junto. **Sem Postgres alcançável ele dá `t.Skip`**, não falha.
+    O que só aparece aqui: transação voltando inteira quando a validação recusa, gatilhos
+    `DEFERRABLE` que só disparam no commit (gestor virando administrador precisa perder o
+    escopo junto), unicidade por tenant/loja, e `ErrNoRows` virando `ErrNaoEncontrado` em
+    vez de 500.
+- O DSN vem de `TEST_DB_DSN`. O default (`localhost:5431`) **não conecta hoje** — a porta
+  do host está certa (a 5432 é do projeto vizinho), mas o compose mapeia pra 5431 dentro
+  do container, onde o Postgres não escuta; ver "Ambiente local". Use o IP do container:
+  `TEST_DB_DSN='postgres://postgres:postgres@172.29.0.3:5432/postgres?sslmode=disable' go test -race ./...`.
 - **A ordem dos dois `t.Cleanup` em `bancoDeTeste` é proposital** (`t.Cleanup` roda em
   LIFO: o `migrate` fecha antes do `pool`). Invertida, `pool.Close()` espera para sempre
   pela conexão que o `migrate` ainda segura e o teste **pendura em vez de falhar** — o
   banco descartável também fica órfão. Se um teste travar em ~nada de saída, é isso.
 - Não há mock do `repository`: o service guarda `*pgxpool.Pool` concreto. Regra de
-  negócio pura vai em função livre (como `validarEscopo`) justamente pra ser testável
-  sem banco.
+  negócio pura vai em função livre (como `validarEscopo` ou `montarUsuario`) justamente
+  pra ser testável sem banco.
+- Teste que confere mensagem de erro existe onde o **texto** é o produto: o 422 de
+  `DesativarLoja` precisa carregar a contagem de setores ("ainda tem 3 setor(es)"), senão
+  o admin lê um toast que não diz o que fazer.
 
 ## CI
 - `.github/workflows/ci.yml` — push em `master`/`dev` e todo PR: `gofmt` (falha se algum
@@ -347,6 +481,15 @@ cadastrada neste tenant" até existir uma dessas.
   `config.DataBr` em todo campo de data de resposta, nunca `time.Time` cru.
 - **Multi-tenant por subdomínio**: header `X-tenant-ID`, tenant nunca vem por rota nem
   por corpo.
+- **Empresa É o tenant** (decisão fechada). `loja.tenant_id` referencia `empresa (id)`
+  direto, não existe coluna `empresa_id` nem tabela intermediária, e o front tipa a
+  "Hierarquia Tenant > Empresa > Loja > Setor" como se houvesse. Consequências:
+  `GET /empresas` devolve **uma lista de um item só** (a empresa do tenant autenticado,
+  `id` = `tenant_id`), e `Loja.empresaId` é o `tenant_id` da própria linha — campo
+  derivado, não coluna. O front precisa dele porque filtra "lojas já cadastradas dessa
+  empresa" comparando com o valor do select. **`empresaId` no corpo de `POST/PUT /lojas`
+  é ignorado**: como empresa = tenant, aceitá-lo do cliente seria aceitar o tenant do
+  corpo — o mesmo buraco do `X-tenant-ID` em rota autenticada, por outra porta.
 - **Escopo (loja/setor/técnico) é sempre filtrado no `WHERE` do servidor**, nunca
   devolvido inteiro pro cliente filtrar.
 - **Transições de estado são `POST` em sub-recurso** (`/iniciar`, `/pausar`,
