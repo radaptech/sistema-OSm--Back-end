@@ -35,10 +35,20 @@ type Querier interface {
 	// Roda antes de DeletarEscoposPorUsuario -- não há ON DELETE CASCADE entre
 	// as duas tabelas.
 	DeletarSetoresDosEscoposPorUsuario(ctx context.Context, usuarioID int64) error
-	DesativarUsuario(ctx context.Context, arg DesativarUsuarioParams) error
-	// Filtros combináveis: perfil e busca (nome/email) são opcionais -- passe
-	// NULL para não filtrar por eles. Paginação por LIMIT/OFFSET, contagem total
-	// em ContarUsuarios (RespostaPaginada exige os dois).
+	// :execrows e não :exec -- sem a contagem de linhas, desativar um id que não
+	// existe (ou que é de outro tenant) responderia 200 igualzinho a desativar um
+	// de verdade. Já desativado conta 1 mesmo assim: o UPDATE casa a linha.
+	DesativarUsuario(ctx context.Context, arg DesativarUsuarioParams) (int64, error)
+	// Filtros combináveis: perfil, busca (nome/email) e loja_id são opcionais --
+	// passe NULL para não filtrar por eles. Paginação por LIMIT/OFFSET, contagem
+	// total em ContarUsuarios (RespostaPaginada exige os dois).
+	//
+	// loja_id filtra pelo escopo de acesso (usuario_escopo), com EXISTS e não
+	// JOIN: usuário com N escopos apareceria N vezes e estouraria o LIMIT com
+	// repetição. Administrador não tem escopo nenhum (a ausência É o acesso
+	// total, 3.8), então some de qualquer listagem filtrada por loja -- que é o
+	// certo: ele não pertence a loja alguma. ContarUsuarios repete o mesmo WHERE
+	// de propósito; divergir entre as duas dá total que não bate com a página.
 	ListarUsuarios(ctx context.Context, arg ListarUsuariosParams) ([]Usuario, error)
 	// Usado no cadastro de técnico: o front manda o nome da área (AreaTecnico em
 	// front-end/src/tipos/tecnico.ts), o banco guarda o id em usuario.area_tecnico_id.
@@ -48,6 +58,10 @@ type Querier interface {
 	// um escopo por loja, com a lista de setor_id (vazia quando acesso_total_setores).
 	ObterEscopoSessaoPorUsuario(ctx context.Context, usuarioID int64) ([]ObterEscopoSessaoPorUsuarioRow, error)
 	ObterEscoposPorUsuario(ctx context.Context, usuarioID int64) ([]UsuarioEscopo, error)
+	// Mesma forma de ObterEscopoSessaoPorUsuario, só que para vários usuários numa
+	// ida só ao banco -- é o que ListarUsuarios usa para montar o escopo de uma
+	// página inteira sem N+1.
+	ObterEscoposSessaoPorUsuarios(ctx context.Context, usuarioIds []int64) ([]ObterEscoposSessaoPorUsuariosRow, error)
 	// Usado no login/sessão do solicitante: SessaoUsuario.setorNome vem daqui
 	// (usuario_escopo guarda só o setor_id).
 	ObterSetorPorID(ctx context.Context, arg ObterSetorPorIDParams) (ObterSetorPorIDRow, error)

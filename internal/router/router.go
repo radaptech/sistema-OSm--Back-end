@@ -49,4 +49,8 @@ func ConfigurarRotas(r *gin.Engine, c *Container) {
 
 	usuarios := api.Group("/usuarios", middleware.AutenticacaoJwt())
 	usuarios.POST("", middleware.Permitir("administrador"), c.Login.Registrar())
+	usuarios.GET("", middleware.Permitir("administrador"), c.Login.ListarUsuarios())
+	usuarios.GET("/:id", middleware.Permitir("administrador"), c.Login.Obter())
+	usuarios.PUT("/:id", middleware.Permitir("administrador"), c.Login.Atualizar())
+	usuarios.DELETE("/:id", middleware.Permitir("administrador"), c.Login.Desativar())
 }
