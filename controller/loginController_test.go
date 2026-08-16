@@ -95,9 +95,9 @@ func TestRegistrarMapeiaErroParaStatus(t *testing.T) {
 		vazando string // texto interno que NÃO pode aparecer na resposta
 	}{
 		{"sucesso", nil, http.StatusCreated, ""},
-		{"validacao", fmt.Errorf("gestor precisa de ao menos 1 loja: %w", helper.ErrValidacao), http.StatusBadRequest, ""},
+		{"validacao", fmt.Errorf("%w: gestor precisa de ao menos 1 loja", helper.ErrValidacao), http.StatusBadRequest, ""},
 		{"duplicado", helper.ErrDadoDuplicado, http.StatusConflict, ""},
-		{"nao encontrado", fmt.Errorf("área técnica não cadastrada: %w", helper.ErrNaoEncontrado), http.StatusUnprocessableEntity, ""},
+		{"nao encontrado", fmt.Errorf("%w: área técnica não cadastrada", helper.ErrNaoEncontrado), http.StatusUnprocessableEntity, ""},
 		{"interno", fmt.Errorf(`ERROR: null value in column "senha_hash" (SQLSTATE 23502)`), http.StatusInternalServerError, "senha_hash"},
 	}
 
@@ -438,9 +438,9 @@ func TestAtualizarMapeiaErroParaStatus(t *testing.T) {
 		{"sucesso", "3", nil, http.StatusOK, ""},
 		{"id malformado não é 404", "abc", nil, http.StatusBadRequest, ""},
 		{"id zero", "0", nil, http.StatusBadRequest, ""},
-		{"validacao", "3", fmt.Errorf("gestor precisa de 1 loja: %w", helper.ErrValidacao), http.StatusBadRequest, ""},
+		{"validacao", "3", fmt.Errorf("%w: gestor precisa de 1 loja", helper.ErrValidacao), http.StatusBadRequest, ""},
 		{"duplicado", "3", helper.ErrDadoDuplicado, http.StatusConflict, ""},
-		{"nao encontrado", "3", fmt.Errorf("área técnica não cadastrada: %w", helper.ErrNaoEncontrado), http.StatusUnprocessableEntity, ""},
+		{"nao encontrado", "3", fmt.Errorf("%w: área técnica não cadastrada", helper.ErrNaoEncontrado), http.StatusUnprocessableEntity, ""},
 		{"interno", "3", fmt.Errorf(`ERROR: duplicate key "uq_usuario_email" (SQLSTATE 23505)`), http.StatusInternalServerError, "uq_usuario_email"},
 	}
 
@@ -482,7 +482,7 @@ func TestDesativarMapeiaErroParaStatus(t *testing.T) {
 		{"id malformado", "abc", nil, http.StatusBadRequest},
 		// Auto-desativação: o service recusa, e 400 é o que diz ao front que o
 		// pedido está errado -- 403 seria "você não pode", e ele pode, só não em si.
-		{"desativar a si mesmo", "42", fmt.Errorf("não pode desativar a si mesmo: %w", helper.ErrValidacao), http.StatusBadRequest},
+		{"desativar a si mesmo", "42", fmt.Errorf("%w: não pode desativar a si mesmo", helper.ErrValidacao), http.StatusBadRequest},
 		{"id inexistente", "999", helper.ErrNaoEncontrado, http.StatusNotFound},
 		{"integridade", "3", helper.ErrConflitoIntegridade, http.StatusUnprocessableEntity},
 		{"interno", "3", fmt.Errorf("conexão recusada"), http.StatusInternalServerError},

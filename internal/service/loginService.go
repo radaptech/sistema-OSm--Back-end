@@ -94,9 +94,25 @@ func (s *UsuarioService) CadastrarUsuario(ctx context.Context, modelUser model.N
 // Usuário sumido ou desativado devolve ErrSessaoExpirada -- token válido para
 // alguém que não existe mais é sessão morta, não erro de servidor
 // (ObterUsuarioPorID não filtra `ativo`, diferente de ObterUsuarioPorEmail).
+// A empresa desativada cai no mesmo lugar: sem esse cheque, desativar um
+// tenant só barrava login novo (ObterEmpresaPorSubdominio filtra `ativa`) e
+// quem já estava dentro seguia trabalhando até o exp.
 func (s *UsuarioService) ObterSessao(ctx context.Context, userId, tenantId int64) (model.SessaoUsuario, error) {
 
 	repo := repository.New(s.Pool)
+
+	// Empresa antes do usuário: tenant desativado invalida a sessão de todo
+	// mundo dele, não adianta o usuário estar ativo.
+	tenantAtivo, err := repo.EmpresaAtiva(ctx, tenantId)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return model.SessaoUsuario{}, helper.ErrSessaoExpirada
+		}
+		return model.SessaoUsuario{}, helper.TraduzErroPostgres(err)
+	}
+	if !tenantAtivo {
+		return model.SessaoUsuario{}, helper.ErrSessaoExpirada
+	}
 
 	user, err := repo.ObterUsuarioPorID(ctx, repository.ObterUsuarioPorIDParams{
 		ID:       userId,
@@ -359,7 +375,7 @@ func (s *UsuarioService) AtualizarUsuario(ctx context.Context, id int64, payload
 func (s *UsuarioService) DesativarUsuario(ctx context.Context, id, tenantId, atorId int64) error {
 
 	if id == atorId {
-		return fmt.Errorf("um usuário não pode desativar a si mesmo: %w", helper.ErrValidacao)
+		return fmt.Errorf("%w: um usuário não pode desativar a si mesmo", helper.ErrValidacao)
 	}
 
 	repo := repository.New(s.Pool)

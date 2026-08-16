@@ -12,6 +12,7 @@ import (
 	"github.com/golang-migrate/migrate/v4"
 	migratepgx "github.com/golang-migrate/migrate/v4/database/pgx/v5"
 	_ "github.com/golang-migrate/migrate/v4/source/file"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jackc/pgx/v5/stdlib"
 	"github.com/radaptech/sistema-OSm--Back-end/database/repository"
@@ -780,4 +781,53 @@ func TestObterUsuario(t *testing.T) {
 			t.Error("ativo devia ser false")
 		}
 	})
+}
+
+// Desativar um tenant precisa derrubar quem já está dentro. Antes disto o
+// AND ativa só existia no login: token emitido antes seguia valendo até o exp.
+func TestSessaoMorreComTenantDesativado(t *testing.T) {
+
+	t.Setenv("JWT_SECRET", "segredo-de-teste-nao-usar-em-producao")
+
+	ctx := context.Background()
+	pool := bancoDeTeste(t)
+	svc := NewRepoUsuario(pool)
+
+	var tenantID int64
+	if err := pool.QueryRow(ctx, `INSERT INTO empresa (subdominio, nome) VALUES ('morre', 'Empresa Morre') RETURNING id`).Scan(&tenantID); err != nil {
+		t.Fatalf("erro ao criar empresa: %v", err)
+	}
+
+	admin, err := svc.CadastrarUsuario(ctx, model.NovoUsuarioPayload{
+		Nome: "Ana", Email: "ana@morre.com", Perfil: "administrador", Senha: "senha-forte-123",
+	}, tenantID)
+	if err != nil {
+		t.Fatalf("erro ao cadastrar admin: %v", err)
+	}
+
+	// Sessão viva enquanto a empresa está ativa.
+	if _, err := svc.ObterSessao(ctx, admin.Id, tenantID); err != nil {
+		t.Fatalf("sessão devia estar viva: %v", err)
+	}
+
+	if _, err := pool.Exec(ctx, `UPDATE empresa SET ativa = false WHERE id = $1`, tenantID); err != nil {
+		t.Fatalf("erro ao desativar empresa: %v", err)
+	}
+
+	// O usuário continua ativo -- é a empresa que derruba a sessão.
+	if _, err := svc.ObterSessao(ctx, admin.Id, tenantID); !errors.Is(err, helper.ErrSessaoExpirada) {
+		t.Fatalf("esperado ErrSessaoExpirada, veio %v", err)
+	}
+
+	// Login novo já era barrado antes (ObterEmpresaPorSubdominio filtra ativa),
+	// mas o TenantMiddleware nem resolve o subdomínio -- aqui só confirmamos
+	// que a empresa sumiu da resolução.
+	if _, err := repository.New(pool).ObterEmpresaPorSubdominio(ctx, "morre"); !errors.Is(err, pgx.ErrNoRows) {
+		t.Errorf("subdomínio de empresa inativa não devia resolver: %v", err)
+	}
+
+	// Empresa apagada de vez cai no mesmo lugar, não em 500.
+	if _, err := svc.ObterSessao(ctx, admin.Id, tenantID+1000); !errors.Is(err, helper.ErrSessaoExpirada) {
+		t.Errorf("tenant inexistente: esperado ErrSessaoExpirada, veio %v", err)
+	}
 }

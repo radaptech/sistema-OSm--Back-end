@@ -60,13 +60,15 @@ func setoresPorLoja(ctx context.Context, repo *repository.Queries, tenantID int6
 		return nil, helper.TraduzErroPostgres(err)
 	}
 	if len(setores) != len(setoresIds) {
-		return nil, fmt.Errorf("setor inexistente neste tenant: %w", helper.ErrNaoEncontrado)
+		// Sentinela na frente: com "%w" no fim, o texto genérico do sentinela
+		// fica pendurado no rabo da mensagem que o front mostra no toast.
+		return nil, fmt.Errorf("%w: setor inexistente neste tenant", helper.ErrNaoEncontrado)
 	}
 
 	porLoja := make(map[int64][]int64, len(lojasIds))
 	for _, s := range setores {
 		if !slices.Contains(lojasIds, s.LojaID) {
-			return nil, fmt.Errorf("setor %d não pertence a nenhuma das lojas selecionadas: %w", s.ID, helper.ErrValidacao)
+			return nil, fmt.Errorf("%w: setor %d não pertence a nenhuma das lojas selecionadas", helper.ErrValidacao, s.ID)
 		}
 		porLoja[s.LojaID] = append(porLoja[s.LojaID], s.ID)
 	}
@@ -75,7 +77,7 @@ func setoresPorLoja(ctx context.Context, repo *repository.Queries, tenantID int6
 	// preenchimento, não acesso total (esse é o acessoTotalSetores).
 	for _, idLoja := range lojasIds {
 		if len(porLoja[idLoja]) == 0 {
-			return nil, fmt.Errorf("loja %d ficou sem nenhum setor selecionado: %w", idLoja, helper.ErrValidacao)
+			return nil, fmt.Errorf("%w: loja %d ficou sem nenhum setor selecionado", helper.ErrValidacao, idLoja)
 		}
 	}
 
@@ -91,21 +93,21 @@ func validarEscopo(p model.NovoUsuarioPayload) error {
 		return nil
 	case "solicitante":
 		if len(p.LojasIds) != 1 || len(p.SetoresIds) != 1 {
-			return fmt.Errorf("solicitante precisa de exatamente 1 loja e 1 setor: %w", helper.ErrValidacao)
+			return fmt.Errorf("%w: solicitante precisa de exatamente 1 loja e 1 setor", helper.ErrValidacao)
 		}
 	case "tecnico":
 		if len(p.LojasIds) == 0 {
-			return fmt.Errorf("técnico precisa de ao menos 1 loja: %w", helper.ErrValidacao)
+			return fmt.Errorf("%w: técnico precisa de ao menos 1 loja", helper.ErrValidacao)
 		}
 		if p.Area == nil || *p.Area == "" {
-			return fmt.Errorf("técnico precisa de uma área: %w", helper.ErrValidacao)
+			return fmt.Errorf("%w: técnico precisa de uma área", helper.ErrValidacao)
 		}
 	case "gestor":
 		if len(p.LojasIds) == 0 {
-			return fmt.Errorf("gestor precisa de ao menos 1 loja: %w", helper.ErrValidacao)
+			return fmt.Errorf("%w: gestor precisa de ao menos 1 loja", helper.ErrValidacao)
 		}
 		if !p.AcessoTotalSetores && len(p.SetoresIds) == 0 {
-			return fmt.Errorf("gestor precisa de ao menos 1 setor ou acesso total aos setores: %w", helper.ErrValidacao)
+			return fmt.Errorf("%w: gestor precisa de ao menos 1 setor ou acesso total aos setores", helper.ErrValidacao)
 		}
 	}
 
@@ -225,7 +227,7 @@ func resolverAreaTecnico(ctx context.Context, repo *repository.Queries, perfil s
 		return nil, nil
 	}
 	if area == nil {
-		return nil, fmt.Errorf("técnico exige área de atuação: %w", helper.ErrValidacao)
+		return nil, fmt.Errorf("%w: técnico exige área de atuação", helper.ErrValidacao)
 	}
 
 	id, err := repo.ObterAreaTecnicoPorNome(ctx, repository.ObterAreaTecnicoPorNomeParams{
@@ -234,7 +236,7 @@ func resolverAreaTecnico(ctx context.Context, repo *repository.Queries, perfil s
 	})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, fmt.Errorf("área técnica %q não cadastrada neste tenant: %w", *area, helper.ErrNaoEncontrado)
+			return nil, fmt.Errorf("%w: área técnica %q não cadastrada neste tenant", helper.ErrNaoEncontrado, *area)
 		}
 		return nil, helper.TraduzErroPostgres(err)
 	}
