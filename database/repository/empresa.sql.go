@@ -9,6 +9,45 @@ import (
 	"context"
 )
 
+const empresaAtiva = `-- name: EmpresaAtiva :one
+SELECT ativa FROM empresa
+WHERE id = $1
+`
+
+// Usado por ObterSessao: desativar uma empresa precisa derrubar as sessões
+// abertas dela, senão um token emitido antes continua valendo até expirar (8h).
+// Query própria em vez de JOIN em ObterUsuarioPorID porque aquela devolve
+// repository.Usuario, que montarSessao consome inteiro -- virar Row ali
+// espalharia a mudança por todo o caminho da sessão.
+func (q *Queries) EmpresaAtiva(ctx context.Context, id int64) (bool, error) {
+	row := q.db.QueryRow(ctx, empresaAtiva, id)
+	var ativa bool
+	err := row.Scan(&ativa)
+	return ativa, err
+}
+
+const obterEmpresaPorID = `-- name: ObterEmpresaPorID :one
+SELECT id, nome
+FROM empresa
+WHERE id = $1
+  AND ativa
+`
+
+type ObterEmpresaPorIDRow struct {
+	ID   int64
+	Nome string
+}
+
+// GET /empresas: o tenant É a empresa (loja.tenant_id referencia empresa
+// direto), então a listagem que alimenta o select de Empresa no cadastro de
+// loja tem exatamente uma linha -- a do próprio tenant autenticado.
+func (q *Queries) ObterEmpresaPorID(ctx context.Context, id int64) (ObterEmpresaPorIDRow, error) {
+	row := q.db.QueryRow(ctx, obterEmpresaPorID, id)
+	var i ObterEmpresaPorIDRow
+	err := row.Scan(&i.ID, &i.Nome)
+	return i, err
+}
+
 const obterEmpresaPorSubdominio = `-- name: ObterEmpresaPorSubdominio :one
 SELECT id, nome
 FROM empresa

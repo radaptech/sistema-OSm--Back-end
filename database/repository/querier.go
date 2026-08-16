@@ -9,11 +9,21 @@ import (
 )
 
 type Querier interface {
+	AtualizarLoja(ctx context.Context, arg AtualizarLojaParams) (Loja, error)
 	AtualizarSenhaUsuario(ctx context.Context, arg AtualizarSenhaUsuarioParams) error
+	// Sem loja_id: mudar o setor de loja moveria junto as máquinas, o histórico de
+	// OS e o escopo de quem tem acesso a ele -- e ninguém pediu isso. Setor na
+	// loja errada se resolve desativando e criando na certa.
+	AtualizarSetor(ctx context.Context, arg AtualizarSetorParams) (Setor, error)
 	// Sem senha_hash -- troca de senha tem query própria (AtualizarSenhaUsuario),
 	// porque na edição ela é opcional (ver CadastrarUsuario: senha omitida mantém
 	// o hash atual).
 	AtualizarUsuario(ctx context.Context, arg AtualizarUsuarioParams) (Usuario, error)
+	// Loja não é desativada por baixo dos setores: o escopo de acesso aponta pro
+	// setor (usuario_escopo_setor), então setor ativo pendurado em loja inativa
+	// continua dando acesso a uma loja que sumiu das listagens. Quem chama decide
+	// se recusa ou se desativa os setores junto, mas precisa saber que existem.
+	ContarSetoresAtivosDaLoja(ctx context.Context, arg ContarSetoresAtivosDaLojaParams) (int64, error)
 	ContarUsuarios(ctx context.Context, arg ContarUsuariosParams) (int64, error)
 	// Escopo de acesso (loja + setor) dos 4 perfis -- ver "3.8 Escopo de acesso
 	// unificado" em docs/modelagem-banco-dados.md:
@@ -27,6 +37,28 @@ type Querier interface {
 	// transação -- não há UPDATE de escopo individual aqui de propósito.
 	CriarEscopo(ctx context.Context, arg CriarEscopoParams) (UsuarioEscopo, error)
 	CriarEscopoSetor(ctx context.Context, arg CriarEscopoSetorParams) error
+	// Loja é a unidade/filial dentro do tenant. Exclusão é sempre soft delete
+	// (ativa = false) -- ver "Soft delete" em docs/modelagem-banco-dados.md:
+	// máquina, setor e todo o histórico de OS apontam pra loja, então apagar de
+	// verdade levaria o histórico junto.
+	//
+	// ⚠️ A coluna é `ativa` (feminino) na loja e `ativo` no setor/usuário.
+	// Nome é único por tenant (uq_loja_tenant_nome): duplicado volta 23505 e
+	// vira ErrDadoDuplicado no helper, sem switch em pgErr.Code no service.
+	CriarLoja(ctx context.Context, arg CriarLojaParams) (Loja, error)
+	// Setor pertence a uma loja. Exclusão é soft delete (ativo = false) -- ver
+	// "Soft delete" em docs/modelagem-banco-dados.md: máquina, solicitação e o
+	// escopo de acesso apontam pro setor.
+	//
+	// Não existe lista fixa de setores: quem cadastra é o Administrador, com nome
+	// livre e unicidade por loja (uq_setor_loja). Dois "Padaria" em lojas
+	// diferentes são registros distintos de propósito -- por isso todo lugar
+	// referencia setor_id, nunca o nome (front-end/CLAUDE.md item 6).
+	// tenant_id vai explícito mesmo já estando implícito na loja: a FK composta
+	// fk_setor_loja (tenant_id, loja_id) -> loja (tenant_id, id) só fecha com os
+	// dois, e é ela que torna impossível pendurar um setor numa loja de outro
+	// tenant -- o banco recusa, não depende de disciplina no service.
+	CriarSetor(ctx context.Context, arg CriarSetorParams) (Setor, error)
 	// Exclusão é sempre soft delete (ativo = false) -- ver "Soft delete" em
 	// docs/modelagem-banco-dados.md: perde-se o cadastro, não o histórico de OS
 	// vinculado ao usuário (solicitante/técnico/gestor).
@@ -36,9 +68,36 @@ type Querier interface {
 	// as duas tabelas.
 	DeletarSetoresDosEscoposPorUsuario(ctx context.Context, usuarioID int64) error
 	// :execrows e não :exec -- sem a contagem de linhas, desativar um id que não
+	// existe (ou que é de outro tenant) responderia igual a desativar um de
+	// verdade. Já desativada conta 1: o UPDATE casa a linha do mesmo jeito.
+	DesativarLoja(ctx context.Context, arg DesativarLojaParams) (int64, error)
+	// :execrows pelo mesmo motivo de DesativarLoja: distinguir "desativei" de
+	// "esse id não existe neste tenant".
+	DesativarSetor(ctx context.Context, arg DesativarSetorParams) (int64, error)
+	// Cascata em cima do soft delete: desativar a loja sem isto deixa setor ativo
+	// pendurado em loja inativa, e o escopo de acesso aponta pro setor.
+	DesativarSetoresDaLoja(ctx context.Context, arg DesativarSetoresDaLojaParams) (int64, error)
+	// :execrows e não :exec -- sem a contagem de linhas, desativar um id que não
 	// existe (ou que é de outro tenant) responderia 200 igualzinho a desativar um
 	// de verdade. Já desativado conta 1 mesmo assim: o UPDATE casa a linha.
 	DesativarUsuario(ctx context.Context, arg DesativarUsuarioParams) (int64, error)
+	// Usado por ObterSessao: desativar uma empresa precisa derrubar as sessões
+	// abertas dela, senão um token emitido antes continua valendo até expirar (8h).
+	// Query própria em vez de JOIN em ObterUsuarioPorID porque aquela devolve
+	// repository.Usuario, que montarSessao consome inteiro -- virar Row ali
+	// espalharia a mudança por todo o caminho da sessão.
+	EmpresaAtiva(ctx context.Context, id int64) (bool, error)
+	// Sem paginação nem filtro de busca de propósito: /lojas devolve array simples
+	// e o front pagina/filtra no cliente (front-end/CLAUDE.md item 12). Só
+	// /usuarios e /solicitacoes/minhas paginam no servidor.
+	ListarLojas(ctx context.Context, tenantID int64) ([]Loja, error)
+	// loja_id é opcional (NULL não filtra) porque o front usa os dois modos: o
+	// select em cascata pede os setores de uma loja (GET /setores?lojaId=) e
+	// agruparPorEscopoGestor pede todos de uma vez, para nomear o cabeçalho de um
+	// subgrupo vazio -- onde não há item de onde tirar o setorNome.
+	//
+	// Array simples, sem paginação: o front pagina no cliente (item 12).
+	ListarSetores(ctx context.Context, arg ListarSetoresParams) ([]Setor, error)
 	// Filtros combináveis: perfil, busca (nome/email) e loja_id são opcionais --
 	// passe NULL para não filtrar por eles. Paginação por LIMIT/OFFSET, contagem
 	// total em ContarUsuarios (RespostaPaginada exige os dois).
@@ -53,6 +112,10 @@ type Querier interface {
 	// Usado no cadastro de técnico: o front manda o nome da área (AreaTecnico em
 	// front-end/src/tipos/tecnico.ts), o banco guarda o id em usuario.area_tecnico_id.
 	ObterAreaTecnicoPorNome(ctx context.Context, arg ObterAreaTecnicoPorNomeParams) (int16, error)
+	// GET /empresas: o tenant É a empresa (loja.tenant_id referencia empresa
+	// direto), então a listagem que alimenta o select de Empresa no cadastro de
+	// loja tem exatamente uma linha -- a do próprio tenant autenticado.
+	ObterEmpresaPorID(ctx context.Context, id int64) (ObterEmpresaPorIDRow, error)
 	ObterEmpresaPorSubdominio(ctx context.Context, subdominio string) (ObterEmpresaPorSubdominioRow, error)
 	// Formato que o front consome direto em EscopoAcessoGestor[] (login/sessão):
 	// um escopo por loja, com a lista de setor_id (vazia quando acesso_total_setores).
@@ -62,6 +125,18 @@ type Querier interface {
 	// ida só ao banco -- é o que ListarUsuarios usa para montar o escopo de uma
 	// página inteira sem N+1.
 	ObterEscoposSessaoPorUsuarios(ctx context.Context, usuarioIds []int64) ([]ObterEscoposSessaoPorUsuariosRow, error)
+	// Igual a ObterLojaPorID, com FOR SHARE: usada dentro da transação que cria
+	// setor, para a loja não ser desativada entre o cheque de `ativa` e o INSERT.
+	// FOR SHARE e não FOR UPDATE porque ninguém aqui altera a loja -- só precisa
+	// impedir que ela mude enquanto o setor entra.
+	ObterLojaParaEscrita(ctx context.Context, arg ObterLojaParaEscritaParams) (Loja, error)
+	// Sem filtro de `ativa`, igual a ObterUsuarioPorID: a tela de edição precisa
+	// ler o registro para preencher o formulário, e quem decide o que fazer com
+	// uma loja desativada é o service.
+	ObterLojaPorID(ctx context.Context, arg ObterLojaPorIDParams) (Loja, error)
+	// Diferente de ObterSetorPorID acima, que projeta só o que a sessão precisa:
+	// esta devolve a linha inteira para a tela de edição.
+	ObterSetorCompletoPorID(ctx context.Context, arg ObterSetorCompletoPorIDParams) (Setor, error)
 	// Usado no login/sessão do solicitante: SessaoUsuario.setorNome vem daqui
 	// (usuario_escopo guarda só o setor_id).
 	ObterSetorPorID(ctx context.Context, arg ObterSetorPorIDParams) (ObterSetorPorIDRow, error)
