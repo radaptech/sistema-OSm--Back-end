@@ -14,6 +14,7 @@ import (
 	_ "github.com/golang-migrate/migrate/v4/source/file"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jackc/pgx/v5/stdlib"
+	"github.com/radaptech/sistema-OSm--Back-end/database/repository"
 	"github.com/radaptech/sistema-OSm--Back-end/internal/helper"
 	"github.com/radaptech/sistema-OSm--Back-end/internal/model"
 )
@@ -304,6 +305,479 @@ func TestLogin(t *testing.T) {
 		}
 		if antes == nil {
 			t.Fatal("ultimo_acesso continuou nulo depois do login")
+		}
+	})
+}
+
+// TestListarUsuarios cobre o que o teste de unidade não alcança: o WHERE.
+// Em especial o filtro por loja, que é EXISTS sobre usuario_escopo -- um JOIN
+// no lugar dele traria o usuário com N escopos N vezes na mesma página.
+func TestListarUsuarios(t *testing.T) {
+
+	ctx := context.Background()
+	pool := bancoDeTeste(t)
+	svc := NewRepoUsuario(pool)
+
+	var tenantID, lojaA, lojaB, setorA int64
+	if err := pool.QueryRow(ctx, `INSERT INTO empresa (subdominio, nome) VALUES ('listar', 'Empresa Listar') RETURNING id`).Scan(&tenantID); err != nil {
+		t.Fatalf("erro ao criar empresa: %v", err)
+	}
+	for _, l := range []struct {
+		nome string
+		dest *int64
+	}{{"Loja A", &lojaA}, {"Loja B", &lojaB}} {
+		if err := pool.QueryRow(ctx, `INSERT INTO loja (tenant_id, nome) VALUES ($1, $2) RETURNING id`, tenantID, l.nome).Scan(l.dest); err != nil {
+			t.Fatalf("erro ao criar loja: %v", err)
+		}
+	}
+	if err := pool.QueryRow(ctx, `INSERT INTO setor (tenant_id, loja_id, nome) VALUES ($1, $2, 'Padaria') RETURNING id`, tenantID, lojaA).Scan(&setorA); err != nil {
+		t.Fatalf("erro ao criar setor: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO area_tecnico (tenant_id, nome) VALUES ($1, 'Elétrica')`, tenantID); err != nil {
+		t.Fatalf("erro ao criar área técnica: %v", err)
+	}
+
+	area := "Elétrica"
+	cadastrar := func(nome, email, perfil string, p model.NovoUsuarioPayload) {
+		t.Helper()
+		p.Nome, p.Email, p.Perfil, p.Senha = nome, email, perfil, "senha-forte-123"
+		if _, err := svc.CadastrarUsuario(ctx, p, tenantID); err != nil {
+			t.Fatalf("erro ao cadastrar %s: %v", perfil, err)
+		}
+	}
+
+	cadastrar("Ana", "ana@listar.com", "administrador", model.NovoUsuarioPayload{})
+	cadastrar("Bruno", "bruno@listar.com", "solicitante", model.NovoUsuarioPayload{
+		LojasIds: []int64{lojaA}, SetoresIds: []int64{setorA},
+	})
+	cadastrar("Carla", "carla@listar.com", "gestor", model.NovoUsuarioPayload{
+		LojasIds: []int64{lojaB}, AcessoTotalSetores: true,
+	})
+	// Escopo nas duas lojas: é este que duplicaria com JOIN em vez de EXISTS.
+	cadastrar("Dora", "dora@listar.com", "tecnico", model.NovoUsuarioPayload{
+		LojasIds: []int64{lojaA, lojaB}, Area: &area,
+	})
+
+	nomes := func(r model.RespostaPaginada[model.Usuario]) []string {
+		out := make([]string, 0, len(r.Dados))
+		for _, u := range r.Dados {
+			out = append(out, u.Nome)
+		}
+		return out
+	}
+	perfilGestor := "gestor"
+	busca := "dor"
+
+	casos := []struct {
+		nome     string
+		perfil   *string
+		busca    *string
+		lojaId   *int64
+		esperado []string // ORDER BY nome
+		total    int64
+	}{
+		{nome: "sem filtro devolve o tenant inteiro", esperado: []string{"Ana", "Bruno", "Carla", "Dora"}, total: 4},
+		{nome: "loja A: só quem tem escopo nela, sem o administrador", lojaId: &lojaA, esperado: []string{"Bruno", "Dora"}, total: 2},
+		{nome: "loja B", lojaId: &lojaB, esperado: []string{"Carla", "Dora"}, total: 2},
+		{nome: "perfil combina com loja", perfil: &perfilGestor, lojaId: &lojaB, esperado: []string{"Carla"}, total: 1},
+		{nome: "perfil que não tem ninguém na loja A", perfil: &perfilGestor, lojaId: &lojaA, esperado: []string{}, total: 0},
+		{nome: "busca combina com loja", busca: &busca, lojaId: &lojaA, esperado: []string{"Dora"}, total: 1},
+	}
+
+	for _, c := range casos {
+		t.Run(c.nome, func(t *testing.T) {
+			resp, err := svc.ListarUsuarios(ctx, tenantID, 1, c.perfil, c.busca, c.lojaId)
+			if err != nil {
+				t.Fatalf("erro ao listar: %v", err)
+			}
+			if got := nomes(resp); !slices.Equal(got, c.esperado) {
+				t.Errorf("nomes = %v, esperado %v", got, c.esperado)
+			}
+			// total é query própria (ContarUsuarios): se divergir da página, a
+			// paginação do front mostra páginas que não existem.
+			if resp.Total != c.total {
+				t.Errorf("total = %d, esperado %d", resp.Total, c.total)
+			}
+			if resp.Pagina != 1 {
+				t.Errorf("pagina = %d, esperado 1", resp.Pagina)
+			}
+		})
+	}
+
+	t.Run("página além do fim é lista vazia, não erro", func(t *testing.T) {
+		resp, err := svc.ListarUsuarios(ctx, tenantID, 99, nil, nil, nil)
+		if err != nil {
+			t.Fatalf("erro ao listar: %v", err)
+		}
+		if len(resp.Dados) != 0 || resp.Total != 4 || resp.TotalPaginas != 1 {
+			t.Errorf("esperado página vazia com total 4 e 1 página: %+v", resp)
+		}
+	})
+
+	t.Run("escopo volta achatado no formato do front", func(t *testing.T) {
+		resp, err := svc.ListarUsuarios(ctx, tenantID, 1, nil, nil, &lojaA)
+		if err != nil {
+			t.Fatalf("erro ao listar: %v", err)
+		}
+		bruno, dora := resp.Dados[0], resp.Dados[1]
+		if !slices.Equal(bruno.LojasIds, []int64{lojaA}) || !slices.Equal(bruno.SetoresIds, []int64{setorA}) || bruno.AcessoTotalSetores {
+			t.Errorf("solicitante: %+v", bruno)
+		}
+		// Técnico: escopo nas duas lojas mesmo o filtro sendo só a Loja A --
+		// o filtro escolhe QUEM aparece, não recorta o escopo de quem apareceu.
+		if !slices.Equal(dora.LojasIds, []int64{lojaA, lojaB}) || len(dora.SetoresIds) != 0 || !dora.AcessoTotalSetores {
+			t.Errorf("tecnico: %+v", dora)
+		}
+	})
+}
+
+// Atualizar e desativar mexem em transação e esbarram nos gatilhos deferred de
+// administrador-sem-escopo, que só disparam no commit -- nada disso aparece
+// sem banco de verdade.
+func TestAtualizarEDesativarUsuario(t *testing.T) {
+
+	// Os casos de senha conferem o resultado via Login, que assina um JWT.
+	t.Setenv("JWT_SECRET", "segredo-de-teste-nao-usar-em-producao")
+
+	ctx := context.Background()
+	pool := bancoDeTeste(t)
+	svc := NewRepoUsuario(pool)
+
+	var tenantID, lojaA, lojaB, setorA, setorB, setorC int64
+	if err := pool.QueryRow(ctx, `INSERT INTO empresa (subdominio, nome) VALUES ('editar', 'Empresa Editar') RETURNING id`).Scan(&tenantID); err != nil {
+		t.Fatalf("erro ao criar empresa: %v", err)
+	}
+	for _, l := range []struct {
+		nome string
+		dest *int64
+	}{{"Loja A", &lojaA}, {"Loja B", &lojaB}} {
+		if err := pool.QueryRow(ctx, `INSERT INTO loja (tenant_id, nome) VALUES ($1, $2) RETURNING id`, tenantID, l.nome).Scan(l.dest); err != nil {
+			t.Fatalf("erro ao criar loja: %v", err)
+		}
+	}
+	for _, s := range []struct {
+		nome string
+		loja int64
+		dest *int64
+	}{{"Padaria", lojaA, &setorA}, {"Açougue", lojaA, &setorB}, {"Hortifruti", lojaB, &setorC}} {
+		if err := pool.QueryRow(ctx, `INSERT INTO setor (tenant_id, loja_id, nome) VALUES ($1, $2, $3) RETURNING id`, tenantID, s.loja, s.nome).Scan(s.dest); err != nil {
+			t.Fatalf("erro ao criar setor: %v", err)
+		}
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO area_tecnico (tenant_id, nome) VALUES ($1, 'Elétrica'), ($1, 'Mecânica')`, tenantID); err != nil {
+		t.Fatalf("erro ao criar área técnica: %v", err)
+	}
+
+	area := "Elétrica"
+	const senhaOriginal = "senha-forte-123"
+	cadastrar := func(nome, email, perfil string, p model.NovoUsuarioPayload) model.Usuario {
+		t.Helper()
+		p.Nome, p.Email, p.Perfil, p.Senha = nome, email, perfil, senhaOriginal
+		u, err := svc.CadastrarUsuario(ctx, p, tenantID)
+		if err != nil {
+			t.Fatalf("erro ao cadastrar %s: %v", perfil, err)
+		}
+		return u
+	}
+	// Lê o escopo direto do banco: a resposta do service é o que ele achou que
+	// gravou, e é justamente isso que o teste não pode acreditar.
+	escopoGravado := func(usuarioID int64) []repository.ObterEscopoSessaoPorUsuarioRow {
+		t.Helper()
+		linhas, err := repository.New(pool).ObterEscopoSessaoPorUsuario(ctx, usuarioID)
+		if err != nil {
+			t.Fatalf("erro ao ler escopo: %v", err)
+		}
+		return linhas
+	}
+
+	admin := cadastrar("Ana", "ana@editar.com", "administrador", model.NovoUsuarioPayload{})
+
+	t.Run("gestor troca de loja: escopo é substituído, não somado", func(t *testing.T) {
+		u := cadastrar("Bia", "bia@editar.com", "gestor", model.NovoUsuarioPayload{
+			LojasIds: []int64{lojaA}, SetoresIds: []int64{setorA, setorB},
+		})
+
+		atualizado, err := svc.AtualizarUsuario(ctx, u.Id, model.AtualizarUsuarioPayload{
+			Nome: "Bia Souza", Email: "bia@editar.com", Perfil: "gestor",
+			LojasIds: []int64{lojaB}, SetoresIds: []int64{setorC},
+		}, tenantID)
+		if err != nil {
+			t.Fatalf("erro ao atualizar: %v", err)
+		}
+		if atualizado.Nome != "Bia Souza" {
+			t.Errorf("nome não atualizou: %q", atualizado.Nome)
+		}
+
+		escopos := escopoGravado(u.Id)
+		if len(escopos) != 1 || escopos[0].LojaID != lojaB || !slices.Equal(escopos[0].SetoresIds, []int64{setorC}) {
+			t.Fatalf("escopo devia ter só a Loja B com o setor C: %+v", escopos)
+		}
+	})
+
+	t.Run("senha omitida mantém o hash; senha nova passa a valer", func(t *testing.T) {
+		u := cadastrar("Caio", "caio@editar.com", "solicitante", model.NovoUsuarioPayload{
+			LojasIds: []int64{lojaA}, SetoresIds: []int64{setorA},
+		})
+		base := model.AtualizarUsuarioPayload{
+			Nome: "Caio", Email: "caio@editar.com", Perfil: "solicitante",
+			LojasIds: []int64{lojaA}, SetoresIds: []int64{setorA},
+		}
+
+		if _, err := svc.AtualizarUsuario(ctx, u.Id, base, tenantID); err != nil {
+			t.Fatalf("erro ao atualizar sem senha: %v", err)
+		}
+		if _, _, err := svc.Login(ctx, model.Login{Email: "caio@editar.com", Perfil: "solicitante", Senha: senhaOriginal}, tenantID); err != nil {
+			t.Fatalf("senha antiga devia continuar valendo: %v", err)
+		}
+
+		nova := "outra-senha-forte-456"
+		comSenha := base
+		comSenha.Senha = &nova
+		if _, err := svc.AtualizarUsuario(ctx, u.Id, comSenha, tenantID); err != nil {
+			t.Fatalf("erro ao atualizar com senha: %v", err)
+		}
+		if _, _, err := svc.Login(ctx, model.Login{Email: "caio@editar.com", Perfil: "solicitante", Senha: nova}, tenantID); err != nil {
+			t.Fatalf("senha nova devia valer: %v", err)
+		}
+		if _, _, err := svc.Login(ctx, model.Login{Email: "caio@editar.com", Perfil: "solicitante", Senha: senhaOriginal}, tenantID); !errors.Is(err, helper.ErrCredenciaisInvalidas) {
+			t.Fatalf("senha antiga devia ter morrido, erro = %v", err)
+		}
+	})
+
+	t.Run("técnico vira gestor: área é zerada e o escopo passa a ter setor", func(t *testing.T) {
+		u := cadastrar("Davi", "davi@editar.com", "tecnico", model.NovoUsuarioPayload{
+			LojasIds: []int64{lojaA, lojaB}, Area: &area,
+		})
+
+		if _, err := svc.AtualizarUsuario(ctx, u.Id, model.AtualizarUsuarioPayload{
+			Nome: "Davi", Email: "davi@editar.com", Perfil: "gestor",
+			LojasIds: []int64{lojaA}, SetoresIds: []int64{setorA},
+		}, tenantID); err != nil {
+			// ck_usuario_area_tecnico proíbe area_tecnico_id fora do perfil técnico.
+			t.Fatalf("erro ao trocar técnico por gestor: %v", err)
+		}
+
+		var areaID *int16
+		if err := pool.QueryRow(ctx, `SELECT area_tecnico_id FROM usuario WHERE id = $1`, u.Id).Scan(&areaID); err != nil {
+			t.Fatalf("erro ao ler área: %v", err)
+		}
+		if areaID != nil {
+			t.Errorf("área devia ter sido zerada: %v", *areaID)
+		}
+	})
+
+	t.Run("gestor vira administrador: escopo antigo tem que sumir junto", func(t *testing.T) {
+		u := cadastrar("Elis", "elis@editar.com", "gestor", model.NovoUsuarioPayload{
+			LojasIds: []int64{lojaA}, SetoresIds: []int64{setorA},
+		})
+
+		// trg_usuario_admin_sem_escopo é DEFERRABLE: se o service não apagasse
+		// o escopo, isto estouraria no commit, não antes.
+		if _, err := svc.AtualizarUsuario(ctx, u.Id, model.AtualizarUsuarioPayload{
+			Nome: "Elis", Email: "elis@editar.com", Perfil: "administrador",
+		}, tenantID); err != nil {
+			t.Fatalf("erro ao promover a administrador: %v", err)
+		}
+		if escopos := escopoGravado(u.Id); len(escopos) != 0 {
+			t.Fatalf("administrador não pode ter escopo: %+v", escopos)
+		}
+	})
+
+	t.Run("escopo inválido não grava nada (transação inteira volta)", func(t *testing.T) {
+		u := cadastrar("Fabio", "fabio@editar.com", "gestor", model.NovoUsuarioPayload{
+			LojasIds: []int64{lojaA}, SetoresIds: []int64{setorA},
+		})
+
+		// setorC é da Loja B: o service recusa antes de gravar.
+		_, err := svc.AtualizarUsuario(ctx, u.Id, model.AtualizarUsuarioPayload{
+			Nome: "Fabio Alterado", Email: "fabio@editar.com", Perfil: "gestor",
+			LojasIds: []int64{lojaA}, SetoresIds: []int64{setorC},
+		}, tenantID)
+		if !errors.Is(err, helper.ErrValidacao) {
+			t.Fatalf("esperado ErrValidacao, veio %v", err)
+		}
+
+		var nome string
+		if err := pool.QueryRow(ctx, `SELECT nome FROM usuario WHERE id = $1`, u.Id).Scan(&nome); err != nil {
+			t.Fatalf("erro ao reler usuário: %v", err)
+		}
+		if nome != "Fabio" {
+			t.Errorf("nome não podia ter mudado com escopo inválido: %q", nome)
+		}
+		if escopos := escopoGravado(u.Id); len(escopos) != 1 || escopos[0].LojaID != lojaA {
+			t.Errorf("escopo antigo devia estar intacto: %+v", escopos)
+		}
+	})
+
+	t.Run("id inexistente e id de outro tenant são não encontrado", func(t *testing.T) {
+		payload := model.AtualizarUsuarioPayload{
+			Nome: "Ninguém", Email: "ninguem@editar.com", Perfil: "administrador",
+		}
+		if _, err := svc.AtualizarUsuario(ctx, 999999, payload, tenantID); !errors.Is(err, helper.ErrNaoEncontrado) {
+			t.Errorf("id inexistente: esperado ErrNaoEncontrado, veio %v", err)
+		}
+		if _, err := svc.AtualizarUsuario(ctx, admin.Id, payload, tenantID+1000); !errors.Is(err, helper.ErrNaoEncontrado) {
+			t.Errorf("outro tenant: esperado ErrNaoEncontrado, veio %v", err)
+		}
+	})
+
+	t.Run("desativar: some do login e da listagem, e é idempotente", func(t *testing.T) {
+		u := cadastrar("Gil", "gil@editar.com", "solicitante", model.NovoUsuarioPayload{
+			LojasIds: []int64{lojaA}, SetoresIds: []int64{setorA},
+		})
+
+		if err := svc.DesativarUsuario(ctx, u.Id, tenantID, admin.Id); err != nil {
+			t.Fatalf("erro ao desativar: %v", err)
+		}
+		if _, _, err := svc.Login(ctx, model.Login{Email: "gil@editar.com", Perfil: "solicitante", Senha: senhaOriginal}, tenantID); !errors.Is(err, helper.ErrCredenciaisInvalidas) {
+			t.Errorf("desativado não pode logar, erro = %v", err)
+		}
+		if _, err := svc.ObterSessao(ctx, u.Id, tenantID); !errors.Is(err, helper.ErrSessaoExpirada) {
+			t.Errorf("sessão de desativado devia morrer, erro = %v", err)
+		}
+
+		lista, err := svc.ListarUsuarios(ctx, tenantID, 1, nil, nil, nil)
+		if err != nil {
+			t.Fatalf("erro ao listar: %v", err)
+		}
+		for _, item := range lista.Dados {
+			if item.Id == u.Id {
+				t.Errorf("desativado não pode aparecer na listagem: %+v", item)
+			}
+		}
+
+		// Soft delete: some o cadastro, fica a linha (e o histórico que aponta pra ela).
+		var existe bool
+		if err := pool.QueryRow(ctx, `SELECT ativo FROM usuario WHERE id = $1`, u.Id).Scan(&existe); err != nil {
+			t.Fatalf("linha devia continuar existindo: %v", err)
+		}
+		if existe {
+			t.Error("ativo devia ser false")
+		}
+
+		if err := svc.DesativarUsuario(ctx, u.Id, tenantID, admin.Id); err != nil {
+			t.Errorf("desativar de novo devia ser idempotente: %v", err)
+		}
+	})
+
+	t.Run("desativar a si mesmo é recusado", func(t *testing.T) {
+		if err := svc.DesativarUsuario(ctx, admin.Id, tenantID, admin.Id); !errors.Is(err, helper.ErrValidacao) {
+			t.Fatalf("esperado ErrValidacao, veio %v", err)
+		}
+		var ativo bool
+		if err := pool.QueryRow(ctx, `SELECT ativo FROM usuario WHERE id = $1`, admin.Id).Scan(&ativo); err != nil {
+			t.Fatalf("erro ao reler admin: %v", err)
+		}
+		if !ativo {
+			t.Error("o administrador continua ativo")
+		}
+	})
+
+	t.Run("desativar id inexistente ou de outro tenant é não encontrado", func(t *testing.T) {
+		if err := svc.DesativarUsuario(ctx, 999999, tenantID, admin.Id); !errors.Is(err, helper.ErrNaoEncontrado) {
+			t.Errorf("id inexistente: esperado ErrNaoEncontrado, veio %v", err)
+		}
+		if err := svc.DesativarUsuario(ctx, admin.Id, tenantID+1000, 0); !errors.Is(err, helper.ErrNaoEncontrado) {
+			t.Errorf("outro tenant: esperado ErrNaoEncontrado, veio %v", err)
+		}
+	})
+}
+
+// ObterUsuario alimenta a tela de edição: se o escopo vier errado daqui, o
+// formulário abre com as lojas/setores errados e o próximo save grava isso.
+func TestObterUsuario(t *testing.T) {
+
+	ctx := context.Background()
+	pool := bancoDeTeste(t)
+	svc := NewRepoUsuario(pool)
+
+	var tenantID, lojaA, lojaB, setorA int64
+	if err := pool.QueryRow(ctx, `INSERT INTO empresa (subdominio, nome) VALUES ('obter', 'Empresa Obter') RETURNING id`).Scan(&tenantID); err != nil {
+		t.Fatalf("erro ao criar empresa: %v", err)
+	}
+	for _, l := range []struct {
+		nome string
+		dest *int64
+	}{{"Loja A", &lojaA}, {"Loja B", &lojaB}} {
+		if err := pool.QueryRow(ctx, `INSERT INTO loja (tenant_id, nome) VALUES ($1, $2) RETURNING id`, tenantID, l.nome).Scan(l.dest); err != nil {
+			t.Fatalf("erro ao criar loja: %v", err)
+		}
+	}
+	if err := pool.QueryRow(ctx, `INSERT INTO setor (tenant_id, loja_id, nome) VALUES ($1, $2, 'Padaria') RETURNING id`, tenantID, lojaA).Scan(&setorA); err != nil {
+		t.Fatalf("erro ao criar setor: %v", err)
+	}
+
+	cadastrar := func(nome, email, perfil string, p model.NovoUsuarioPayload) model.Usuario {
+		t.Helper()
+		p.Nome, p.Email, p.Perfil, p.Senha = nome, email, perfil, "senha-forte-123"
+		u, err := svc.CadastrarUsuario(ctx, p, tenantID)
+		if err != nil {
+			t.Fatalf("erro ao cadastrar %s: %v", perfil, err)
+		}
+		return u
+	}
+
+	admin := cadastrar("Ana", "ana@obter.com", "administrador", model.NovoUsuarioPayload{})
+	gestor := cadastrar("Bia", "bia@obter.com", "gestor", model.NovoUsuarioPayload{
+		LojasIds: []int64{lojaA, lojaB}, AcessoTotalSetores: true,
+	})
+	solicitante := cadastrar("Caio", "caio@obter.com", "solicitante", model.NovoUsuarioPayload{
+		LojasIds: []int64{lojaA}, SetoresIds: []int64{setorA},
+	})
+
+	t.Run("devolve o mesmo escopo que o cadastro gravou", func(t *testing.T) {
+		u, err := svc.ObterUsuario(ctx, gestor.Id, tenantID)
+		if err != nil {
+			t.Fatalf("erro ao obter: %v", err)
+		}
+		if !slices.Equal(u.LojasIds, []int64{lojaA, lojaB}) || len(u.SetoresIds) != 0 || !u.AcessoTotalSetores {
+			t.Errorf("escopo do gestor: %+v", u)
+		}
+		if u.Nome != "Bia" || u.Email != "bia@obter.com" || u.Perfil != "gestor" || !u.Ativo {
+			t.Errorf("campos do usuário: %+v", u)
+		}
+	})
+
+	t.Run("solicitante traz loja e setor", func(t *testing.T) {
+		u, err := svc.ObterUsuario(ctx, solicitante.Id, tenantID)
+		if err != nil {
+			t.Fatalf("erro ao obter: %v", err)
+		}
+		if !slices.Equal(u.LojasIds, []int64{lojaA}) || !slices.Equal(u.SetoresIds, []int64{setorA}) || u.AcessoTotalSetores {
+			t.Errorf("escopo do solicitante: %+v", u)
+		}
+	})
+
+	t.Run("administrador vem com escopo vazio, não nulo", func(t *testing.T) {
+		u, err := svc.ObterUsuario(ctx, admin.Id, tenantID)
+		if err != nil {
+			t.Fatalf("erro ao obter: %v", err)
+		}
+		// O front tipa number[]: nil viraria `null` no JSON e quebraria o .map.
+		if u.LojasIds == nil || u.SetoresIds == nil || len(u.LojasIds) != 0 || len(u.SetoresIds) != 0 {
+			t.Errorf("esperado arrays vazios: %+v", u)
+		}
+	})
+
+	t.Run("id inexistente e id de outro tenant são não encontrado", func(t *testing.T) {
+		if _, err := svc.ObterUsuario(ctx, 999999, tenantID); !errors.Is(err, helper.ErrNaoEncontrado) {
+			t.Errorf("id inexistente: esperado ErrNaoEncontrado, veio %v", err)
+		}
+		if _, err := svc.ObterUsuario(ctx, gestor.Id, tenantID+1000); !errors.Is(err, helper.ErrNaoEncontrado) {
+			t.Errorf("outro tenant: esperado ErrNaoEncontrado, veio %v", err)
+		}
+	})
+
+	t.Run("desativado continua legível, com ativo false", func(t *testing.T) {
+		if err := svc.DesativarUsuario(ctx, solicitante.Id, tenantID, admin.Id); err != nil {
+			t.Fatalf("erro ao desativar: %v", err)
+		}
+		u, err := svc.ObterUsuario(ctx, solicitante.Id, tenantID)
+		if err != nil {
+			t.Fatalf("desativado devia continuar legível: %v", err)
+		}
+		if u.Ativo {
+			t.Error("ativo devia ser false")
 		}
 	})
 }

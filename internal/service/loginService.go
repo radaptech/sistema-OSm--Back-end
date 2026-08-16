@@ -46,21 +46,9 @@ func (s *UsuarioService) CadastrarUsuario(ctx context.Context, modelUser model.N
 
 	repo := repository.New(tx)
 
-	// area_tecnico_id é NOT NULL exatamente quando perfil = 'tecnico'
-	// (ck_usuario_area_tecnico) -- o front manda o nome, o banco quer o id.
-	var areaID *int16
-	if modelUser.Perfil == "tecnico" {
-		id, err := repo.ObterAreaTecnicoPorNome(ctx, repository.ObterAreaTecnicoPorNomeParams{
-			TenantID: TenantID,
-			Nome:     *modelUser.Area,
-		})
-		if err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
-				return model.Usuario{}, fmt.Errorf("área técnica %q não cadastrada neste tenant: %w", *modelUser.Area, helper.ErrNaoEncontrado)
-			}
-			return model.Usuario{}, helper.TraduzErroPostgres(err)
-		}
-		areaID = &id
+	areaID, err := resolverAreaTecnico(ctx, repo, modelUser.Perfil, modelUser.Area, TenantID)
+	if err != nil {
+		return model.Usuario{}, err
 	}
 
 	usuario, err := repo.CriarUsuario(ctx, repository.CriarUsuarioParams{
@@ -76,39 +64,9 @@ func (s *UsuarioService) CadastrarUsuario(ctx context.Context, modelUser model.N
 		return model.Usuario{}, helper.TraduzErroPostgres(err)
 	}
 
-	lojasIds, setoresIds, acessoTotal := escopoDoPerfil(modelUser)
-
-	// Cada setor entra só no escopo da própria loja -- ver setoresPorLoja.
-	var porLoja map[int64][]int64
-	if len(setoresIds) > 0 {
-		porLoja, err = setoresPorLoja(ctx, repo, TenantID, lojasIds, setoresIds)
-		if err != nil {
-			return model.Usuario{}, err
-		}
-	}
-
-	for _, idLoja := range lojasIds {
-
-		escopo, err := repo.CriarEscopo(ctx, repository.CriarEscopoParams{
-			UsuarioID:          usuario.ID,
-			LojaID:             idLoja,
-			AcessoTotalSetores: acessoTotal,
-		})
-		if err != nil {
-			return model.Usuario{}, helper.TraduzErroPostgres(err)
-		}
-
-		// acesso_total_setores = true não tem linha de setor: a ausência é o
-		// acesso total à loja (docs/modelagem-banco-dados.md 3.8).
-		for _, idSetor := range porLoja[idLoja] {
-			err := repo.CriarEscopoSetor(ctx, repository.CriarEscopoSetorParams{
-				EscopoID: escopo.ID,
-				SetorID:  idSetor,
-			})
-			if err != nil {
-				return model.Usuario{}, helper.TraduzErroPostgres(err)
-			}
-		}
+	lojasIds, setoresIds, acessoTotal, err := gravarEscopo(ctx, repo, usuario.ID, TenantID, modelUser)
+	if err != nil {
+		return model.Usuario{}, err
 	}
 
 	if err := tx.Commit(ctx); err != nil {
@@ -211,4 +169,252 @@ func (s *UsuarioService) Login(ctx context.Context, loginModel model.Login, tena
 	}
 
 	return token, sessao, nil
+}
+
+// TamanhoPaginaUsuarios é o tamanho de página de GET /usuarios -- o front
+// pagina de 10 em 10 em todas as listagens do Administrador
+// (front-end/CLAUDE.md item 12).
+const TamanhoPaginaUsuarios = 10
+
+// ListarUsuarios devolve uma página de usuários ativos do tenant, cada um com
+// o escopo já achatado no formato do front. Sem transação: são só leituras.
+//
+// `perfil`, `busca` e `lojaId` são opcionais (nil = não filtra). A contagem é
+// query própria porque RespostaPaginada exige `total`/`totalPaginas`, e
+// LIMIT/OFFSET não sabem quantos ficaram de fora.
+func (s *UsuarioService) ListarUsuarios(ctx context.Context, tenantId int64, pagina int32, perfil, busca *string, lojaId *int64) (model.RespostaPaginada[model.Usuario], error) {
+
+	var vazio model.RespostaPaginada[model.Usuario]
+
+	if pagina < 1 {
+		pagina = 1
+	}
+
+	repo := repository.New(s.Pool)
+
+	total, err := repo.ContarUsuarios(ctx, repository.ContarUsuariosParams{
+		TenantID: tenantId,
+		Perfil:   (*repository.PerfilUsuario)(perfil),
+		Busca:    busca,
+		LojaID:   lojaId,
+	})
+	if err != nil {
+		return vazio, helper.TraduzErroPostgres(err)
+	}
+
+	usuarios, err := repo.ListarUsuarios(ctx, repository.ListarUsuariosParams{
+		TenantID: tenantId,
+		Limit:    TamanhoPaginaUsuarios,
+		Offset:   (pagina - 1) * TamanhoPaginaUsuarios,
+		Perfil:   (*repository.PerfilUsuario)(perfil),
+		Busca:    busca,
+		LojaID:   lojaId,
+	})
+	if err != nil {
+		return vazio, helper.TraduzErroPostgres(err)
+	}
+
+	// Página vazia não é erro (busca sem resultado, ou página além do fim):
+	// devolve dados: [] com o total certo, e o front mostra o estado vazio.
+	ids := make([]int64, len(usuarios))
+	for i, u := range usuarios {
+		ids[i] = u.ID
+	}
+
+	escopos, err := repo.ObterEscoposSessaoPorUsuarios(ctx, ids)
+	if err != nil {
+		return vazio, helper.TraduzErroPostgres(err)
+	}
+
+	porUsuario := make(map[int64][]repository.ObterEscoposSessaoPorUsuariosRow, len(usuarios))
+	for _, e := range escopos {
+		porUsuario[e.UsuarioID] = append(porUsuario[e.UsuarioID], e)
+	}
+
+	dados := make([]model.Usuario, 0, len(usuarios))
+	for _, u := range usuarios {
+		dados = append(dados, montarUsuario(u, porUsuario[u.ID]))
+	}
+
+	return model.RespostaPaginada[model.Usuario]{
+		Dados:        dados,
+		Pagina:       pagina,
+		TotalPaginas: int32((total + TamanhoPaginaUsuarios - 1) / TamanhoPaginaUsuarios),
+		Total:        total,
+	}, nil
+}
+
+// AtualizarUsuario é PUT /usuarios/:id: dados do usuário e o escopo inteiro,
+// numa transação só -- mesmo motivo de CadastrarUsuario, um usuário com o
+// perfil novo e o escopo velho enxerga a coisa errada.
+//
+// O escopo é substituído, nunca mesclado: apaga tudo do usuário e recria com o
+// que veio (ver usuario_escopo.sql -- não existe AtualizarEscopo de propósito).
+// Os setores saem antes dos escopos, que não há ON DELETE CASCADE entre as
+// duas tabelas.
+//
+// Senha é opcional: omitida, o hash atual fica de pé. Ela tem query própria
+// porque AtualizarUsuario não toca em senha_hash.
+func (s *UsuarioService) AtualizarUsuario(ctx context.Context, id int64, payload model.AtualizarUsuarioPayload, tenantId int64) (model.Usuario, error) {
+
+	// Os dois payloads só diferem na senha; toda a validação de escopo é
+	// compartilhada -- ver comoNovoPayload.
+	novo := comoNovoPayload(payload)
+
+	if err := validarEscopo(novo); err != nil {
+		return model.Usuario{}, err
+	}
+
+	tx, err := s.Pool.Begin(ctx)
+	if err != nil {
+		return model.Usuario{}, fmt.Errorf("erro ao abrir transação: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	repo := repository.New(tx)
+
+	areaID, err := resolverAreaTecnico(ctx, repo, payload.Perfil, payload.Area, tenantId)
+	if err != nil {
+		return model.Usuario{}, err
+	}
+
+	usuario, err := repo.AtualizarUsuario(ctx, repository.AtualizarUsuarioParams{
+		ID:            id,
+		TenantID:      tenantId,
+		Perfil:        repository.PerfilUsuario(payload.Perfil),
+		AreaTecnicoID: areaID,
+		Nome:          payload.Nome,
+		Email:         payload.Email,
+		Telefone:      payload.Telefone,
+	})
+	if err != nil {
+		// Id de outro tenant cai aqui igual a id inexistente: o WHERE filtra
+		// tenant_id, então não há como editar fora do próprio tenant.
+		if errors.Is(err, pgx.ErrNoRows) {
+			return model.Usuario{}, helper.ErrNaoEncontrado
+		}
+		return model.Usuario{}, helper.TraduzErroPostgres(err)
+	}
+
+	if payload.Senha != nil {
+		senhaHash, err := auth.HashPassword(*payload.Senha)
+		if err != nil {
+			return model.Usuario{}, fmt.Errorf("erro ao gerar hash da senha: %w", err)
+		}
+		if err := repo.AtualizarSenhaUsuario(ctx, repository.AtualizarSenhaUsuarioParams{
+			ID:        id,
+			TenantID:  tenantId,
+			SenhaHash: string(senhaHash),
+		}); err != nil {
+			return model.Usuario{}, helper.TraduzErroPostgres(err)
+		}
+	}
+
+	if err := repo.DeletarSetoresDosEscoposPorUsuario(ctx, id); err != nil {
+		return model.Usuario{}, helper.TraduzErroPostgres(err)
+	}
+	if err := repo.DeletarEscoposPorUsuario(ctx, id); err != nil {
+		return model.Usuario{}, helper.TraduzErroPostgres(err)
+	}
+
+	lojasIds, setoresIds, acessoTotal, err := gravarEscopo(ctx, repo, id, tenantId, novo)
+	if err != nil {
+		return model.Usuario{}, err
+	}
+
+	// Os dois gatilhos de administrador-sem-escopo são DEFERRABLE INITIALLY
+	// DEFERRED, então virar administrador (ou deixar de ser) só é conferido
+	// aqui, contra o estado final -- a ordem das operações acima não importa,
+	// mas o erro só aparece no commit.
+	if err := tx.Commit(ctx); err != nil {
+		return model.Usuario{}, helper.TraduzErroPostgres(err)
+	}
+
+	return model.Usuario{
+		Id:                 usuario.ID,
+		Nome:               usuario.Nome,
+		Telefone:           usuario.Telefone,
+		Email:              usuario.Email,
+		Perfil:             string(usuario.Perfil),
+		LojasIds:           lojasIds,
+		SetoresIds:         setoresIds,
+		AcessoTotalSetores: acessoTotal,
+		Ativo:              usuario.Ativo,
+	}, nil
+}
+
+// DesativarUsuario é DELETE /usuarios/:id -- soft delete (ativo = false), ver
+// "Soft delete" em docs/modelagem-banco-dados.md: some o cadastro, fica o
+// histórico de OS que aponta pro usuário. Não há DELETE de usuário.
+//
+// Sem transação: é um UPDATE só. O escopo fica onde está de propósito --
+// apagá-lo perderia a configuração de acesso de quem for reativado depois, e
+// usuário inativo não loga (ObterUsuarioPorEmail filtra `AND ativo`).
+//
+// atorId é quem está pedindo, e não pode ser o alvo. Não é vaidade: é o que
+// garante que sobra pelo menos um administrador ativo no tenant. Só
+// administrador chega nesta rota (RBAC), então o último deles se desativando
+// tranca o tenant inteiro pra fora -- e a única saída seria a CLI de
+// provisionamento.
+func (s *UsuarioService) DesativarUsuario(ctx context.Context, id, tenantId, atorId int64) error {
+
+	if id == atorId {
+		return fmt.Errorf("um usuário não pode desativar a si mesmo: %w", helper.ErrValidacao)
+	}
+
+	repo := repository.New(s.Pool)
+
+	linhas, err := repo.DesativarUsuario(ctx, repository.DesativarUsuarioParams{
+		ID:       id,
+		TenantID: tenantId,
+	})
+	if err != nil {
+		return helper.TraduzErroPostgres(err)
+	}
+
+	// Zero linhas: id inexistente ou de outro tenant (o WHERE filtra os dois).
+	// Usuário já inativo casa a linha e conta 1 -- desativar de novo é idempotente.
+	if linhas == 0 {
+		return helper.ErrNaoEncontrado
+	}
+
+	return nil
+}
+
+// ObterUsuario é GET /usuarios/:id -- o que a tela de edição
+// (/cadastrar-usuario/:id no front) carrega para preencher o formulário.
+// Existe porque a edição é deep-linkável: F5 na tela ou link direto não têm
+// listagem em cache de onde tirar a linha.
+//
+// Sem transação: duas leituras. Usa a mesma query em lote de ListarUsuarios
+// com um id só, em vez da ObterEscopoSessaoPorUsuario (que devolve outra
+// struct), pra montar a resposta com o mesmo montarUsuario -- um formato só
+// de Usuario, montado num lugar só.
+//
+// ObterUsuarioPorID não filtra `ativo`, então um usuário desativado ainda é
+// legível aqui. É de propósito: a flag vem no corpo e a listagem já não expõe
+// esse id, mas quem tiver o link não recebe um 404 mentiroso.
+func (s *UsuarioService) ObterUsuario(ctx context.Context, id, tenantId int64) (model.Usuario, error) {
+
+	repo := repository.New(s.Pool)
+
+	usuario, err := repo.ObterUsuarioPorID(ctx, repository.ObterUsuarioPorIDParams{
+		ID:       id,
+		TenantID: tenantId,
+	})
+	if err != nil {
+		// tenant_id está no WHERE: id de outro tenant é indistinguível de
+		// inexistente, que é exatamente o que o cliente pode saber.
+		if errors.Is(err, pgx.ErrNoRows) {
+			return model.Usuario{}, helper.ErrNaoEncontrado
+		}
+		return model.Usuario{}, helper.TraduzErroPostgres(err)
+	}
+
+	escopos, err := repo.ObterEscoposSessaoPorUsuarios(ctx, []int64{id})
+	if err != nil {
+		return model.Usuario{}, helper.TraduzErroPostgres(err)
+	}
+
+	return montarUsuario(usuario, escopos), nil
 }
