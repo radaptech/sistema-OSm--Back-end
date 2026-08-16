@@ -9,11 +9,16 @@ import (
 
 // Definição de Erros Amigáveis (Negócio)
 var (
-	ErrId                  = errors.New("id invalido")
-	ErrInternal            = errors.New("Erro Internal do banco de dados")
-	ErrNaoEncontrado       = errors.New("registro não encontrado")
-	ErrDadoDuplicado       = errors.New("este registro já existe no sistema")
-	ErrConflitoIntegridade = errors.New("ID nao existe no sistema")
+	ErrId            = errors.New("id invalido")
+	ErrInternal      = errors.New("Erro Internal do banco de dados")
+	ErrNaoEncontrado = errors.New("registro não encontrado")
+	ErrDadoDuplicado = errors.New("este registro já existe no sistema")
+	// Violação de FK (23503), que acontece nas duas direções: apontar para um
+	// registro que não existe e desativar um registro que ainda é referenciado.
+	// O texto cobre as duas porque ele vai direto pro toast do front -- e ele
+	// vem PRIMEIRO quando alguém embrulha com %w, senão o detalhe específico
+	// ("a loja ainda tem 2 setores") fica com este genérico colado no rabo.
+	ErrConflitoIntegridade = errors.New("registro relacionado inválido ou em uso")
 	ErrCampoObrigatorio    = errors.New("campo obrigatório não preenchido")
 	ErrSessaoExpirada      = errors.New("sua sessão expirou, faça login novamente")
 	// Mensagem única de propósito: e-mail inexistente, senha errada, usuário
