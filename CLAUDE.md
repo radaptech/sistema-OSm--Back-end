@@ -162,6 +162,21 @@ que o front espera (camelCase, datas `dd/mm/yyyy HH:MM:SS`, ver `config/dataBr.g
 - `database/migrate/` — migrations SQL puro (`golang-migrate`), numeradas e sequenciais.
 - `database/queries/` + `database/repository/` — ver "Queries e repository (sqlc)"
   abaixo.
+- `bucketR2/` — cliente do Cloudflare R2 (`s3.Client` via SDK da AWS, `BaseEndpoint`
+  apontado pro R2). `InitR2_cloudflare` monta `s3Client` e `presignClient` (vars de
+  pacote, um de cada, montados uma vez no boot — não recriar por request). `UploadFoto(
+  fotoUrl, bucket string) gin.HandlerFunc` faz upload multipart com `MaxBytesReader` +
+  `ParseMultipartForm` (10MB, `tamanhoMaximoFoto`), key prefixada por tenant
+  (`tenant/{id}/...`, lida de `middleware.GetTenantIDToken` — **500**, não 401, se a claim
+  faltar: nesse ponto o `AutenticacaoJwt` já devia ter garantido ela, então `!ok` aqui é
+  bug de wiring, não sessão inválida) e `ContentType` do header do arquivo (senão o R2
+  serve como `application/octet-stream` e o browser força download em vez de exibir).
+  `URLLeitura(ctx, bucket, key string, ttl time.Duration) (string, error)` gera a URL
+  assinada de leitura via `presignClient.PresignGetObject` — é o que resolve
+  `maquina.foto_chave`/`solicitacao_anexo.chave` (guardados como key, não URL — ver
+  "R2 — storage de anexos" abaixo) num `fotoUrl`/`url` de resposta. **Ainda não está
+  wireado no router** — nenhuma rota chama `UploadFoto` nem `URLLeitura` hoje; é infra
+  pronta esperando o CRUD de `maquina`/`solicitacao_anexo`.
 
 ## Migrations
 - Criar novo par: `make migration nome_da_migration` (gera `NNNNNN_nome.up.sql` +
@@ -521,20 +536,35 @@ tenant, entregue.
   `teste.<dominio>` exercita fluxo com dado descartável, isolado do tenant real, sem
   custo nenhum. Não cobre erro de schema — migration pega todos os tenants.
 
-### R2 — decisões pendentes que afetam a migration de `maquina`/anexo
-Nada disso está implementado; decidir **antes** de escrever a migration que guarda o
-arquivo, não depois.
-- **Guardar a key, não a URL**, com prefixo por tenant (`tenant/{id}/maquina/{id}/foto.jpg`)
-  e gerar **URL assinada de leitura** na resposta, com TTL curto. Bucket público num
-  sistema multi-tenant significa que qualquer um com o link vê a foto de outro tenant. O
-  contrato do front não muda: `fotoUrl` continua sendo uma string.
+### R2 — storage de anexos (parcialmente implementado)
+Schema e cliente R2 prontos (`bucketR2/`, migration `000003_anexo_chave_r2`); falta o
+CRUD que os usa. Decisões já fechadas, não reabrir sem motivo novo:
+- **Key, não URL, prefixada por tenant** (`tenant/{id}/{timestamp}{ext}`, ver
+  `bucketR2.UploadFoto`) e **URL assinada de leitura** gerada na hora (`bucketR2.
+  URLLeitura`), com TTL curto — nunca persistida. Bucket público num sistema
+  multi-tenant deixaria qualquer um com o link ver a foto de outro tenant, e uma URL
+  persistida acumula link morto sem indicar que quebrou (docs/modelagem-banco-dados.md
+  3.10). O contrato do front não muda: `fotoUrl`/`AnexoSolicitacao.url` continuam string,
+  só que resolvida no service a partir da key, nunca devolvida crua.
+- **Colunas já renomeadas** (migration `000003`): `maquina.foto_url` → `foto_chave`,
+  `solicitacao_anexo.url` → `chave`. Sem coluna `bucket` — cada tipo de anexo sobe pra
+  um bucket fixo, escolhido no código que registra a rota (`UploadFoto(url, bucket)`),
+  não varia por linha.
 - **Egress do R2 é grátis** — é o motivo de ele estar aqui. Sirva o arquivo direto pro
   browser; nunca faça proxy pela API.
 - **Vídeo passando pelo container é o que vai doer primeiro.** O contrato hoje manda
   multipart pra API (`POST /maquinas`, as três criações de solicitação) e o Gin bufferiza
-  32MB por padrão — no Hobby isso é RAM e CPU que não sobram. Mantenha multipart por
-  enquanto, **com limite de tamanho explícito**, e troque por `PUT` assinado direto do
-  browser quando incomodar (muda o contrato, precisa do front junto).
+  32MB por padrão — no Hobby isso é RAM e CPU que não sobram. `UploadFoto` já limita em
+  10MB (`tamanhoMaximoFoto`, com `http.MaxBytesReader` — sem ele o `ParseMultipartForm`
+  só limita o que fica em memória, não o tamanho do request). Mantenha multipart por
+  enquanto e troque por `PUT` assinado direto do browser quando incomodar (muda o
+  contrato, precisa do front junto).
+
+**O que falta pra fechar o fluxo:** wirear `UploadFoto`/`URLLeitura` numa rota real
+(`POST /maquinas`, as criações de solicitação), o CRUD de `maquina`/`solicitacao_anexo`
+em si (nada em `database/queries/` ainda), e o service resolvendo `foto_chave`/`chave`
+em `fotoUrl`/`url` assinada na resposta. Validação de content-type/extensão também não
+existe — `UploadFoto` aceita qualquer arquivo enviado no campo `foto`.
 
 ## Regras herdadas do contrato com o front (não reinvente)
 - **401 é só "sem sessão"**; fora de escopo/perfil errado é sempre **403** — 401 fora de
