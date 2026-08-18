@@ -343,9 +343,12 @@ três telefones que envelhecem em ritmos diferentes.
 
 ### 3.10 Anexo aponta para chave, não para URL
 
-`solicitacao_anexo.url` guarda a chave do objeto no storage, não um endereço assinado. A URL de
-acesso é gerada na leitura, porque link assinado expira — persistido, o banco acumula endereços que
-param de funcionar sem nada indicar que quebraram.
+`solicitacao_anexo.chave` (e `maquina.foto_chave`, mesmo motivo) guarda a chave do objeto no R2, não
+um endereço assinado. A URL de acesso é gerada na leitura (`bucketR2.URLLeitura`), porque link
+assinado expira — persistido, o banco acumula endereços que param de funcionar sem nada indicar que
+quebraram. Sem coluna `bucket`: cada tipo de anexo já sobe pra um bucket fixo, escolhido no código
+que registra a rota (`bucketR2.UploadFoto(url, bucket)`), não varia por linha — guardar isso no banco
+seria flexibilidade que nada no contrato pede.
 
 ### 3.11 Impactos como N:N
 
@@ -636,11 +639,12 @@ garantindo o corte no banco e não só na aplicação.
 > **Resolvido na revisão 4:** terceirização vira desfecho da OS e não tipo de pedido, o setor
 > passa a ser coluna da solicitação (ponto 6 abaixo) e a rejeição ganha motivo (seção 1.4).
 
-1. **Storage real dos anexos.**
-   Hoje foto e vídeo viram `blob:` do navegador via `URL.createObjectURL` — somem ao recarregar a
-   página. Em produção precisam de bucket (S3, MinIO, R2), e aí `solicitacao_anexo` ganha `bucket` e
-   `chave` no lugar de uma `url` solta. Vale também definir política de retenção: foto de OS de 2019
-   continua ocupando espaço.
+1. ~~**Storage real dos anexos.**~~ **Resolvido na migration `000003` — sem coluna `bucket`.**
+   `solicitacao_anexo.url` virou `chave` e `maquina.foto_url` virou `foto_chave` (seção 3.10):
+   R2 real (Cloudflare) no lugar do `blob:` do navegador, chave prefixada por tenant
+   (`bucketR2.UploadFoto`), URL assinada gerada na leitura (`bucketR2.URLLeitura`). Sem coluna
+   `bucket`: o bucket de cada tipo de anexo é fixo no código que registra a rota, não varia por
+   linha. Falta política de retenção: foto de OS de 2019 continua ocupando espaço — ainda em aberto.
 
 2. **Histórico de lançamento de custo.** *(mais urgente desde a revisão 4)*
    `os_custo` é 1:1 com a OS e guarda quem lançou e quando — mas se o Administrador corrigir o valor,
