@@ -10,6 +10,15 @@ import (
 
 type Querier interface {
 	AtualizarLoja(ctx context.Context, arg AtualizarLojaParams) (Loja, error)
+	// setor_id entra no SET (diferente de AtualizarSetor, que ignora loja_id):
+	// mover uma máquina de setor não arrasta setor/loja de ninguém, só o próprio
+	// histórico dela, então mudar é uma operação válida, não um bug.
+	AtualizarMaquina(ctx context.Context, arg AtualizarMaquinaParams) (Maquina, error)
+	// Sem maquina_id, mesmo motivo de AtualizarSetor não mexer em loja_id: mover a
+	// preventiva de máquina deixaria as solicitações que ela já gerou apontando
+	// para uma máquina que não é mais a dela. O front manda o campo no PUT; o
+	// service ignora.
+	AtualizarPreventiva(ctx context.Context, arg AtualizarPreventivaParams) (Preventiva, error)
 	AtualizarSenhaUsuario(ctx context.Context, arg AtualizarSenhaUsuarioParams) error
 	// Sem loja_id: mudar o setor de loja moveria junto as máquinas, o histórico de
 	// OS e o escopo de quem tem acesso a ele -- e ninguém pediu isso. Setor na
@@ -19,6 +28,10 @@ type Querier interface {
 	// porque na edição ela é opcional (ver CadastrarUsuario: senha omitida mantém
 	// o hash atual).
 	AtualizarUsuario(ctx context.Context, arg AtualizarUsuarioParams) (Usuario, error)
+	// Roda quando a preventiva vence e gera a solicitação automática: empurra a
+	// próxima data em intervalo_dias a partir da data vencida (não a partir de
+	// hoje) -- senão um ciclo processado com atraso arrastaria todos os seguintes.
+	AvancarProximaData(ctx context.Context, arg AvancarProximaDataParams) (Preventiva, error)
 	// Loja não é desativada por baixo dos setores: o escopo de acesso aponta pro
 	// setor (usuario_escopo_setor), então setor ativo pendurado em loja inativa
 	// continua dando acesso a uma loja que sumiu das listagens. Quem chama decide
@@ -46,6 +59,59 @@ type Querier interface {
 	// Nome é único por tenant (uq_loja_tenant_nome): duplicado volta 23505 e
 	// vira ErrDadoDuplicado no helper, sem switch em pgErr.Code no service.
 	CriarLoja(ctx context.Context, arg CriarLojaParams) (Loja, error)
+	// Máquina pertence a um setor (maquina só referencia setor_id -- a loja vem
+	// por join, docs/modelagem-banco-dados.md). Exclusão é soft delete
+	// (ativa = false), mesmo motivo de loja/setor: preventiva e o histórico de OS
+	// apontam pra máquina.
+	//
+	// criticidade é o ENUM nivel_criticidade ('Baixa','Média','Alta', migration
+	// 000004) e viaja com o mesmo texto que o front manda -- sem resolução
+	// nome->id como em area_tecnico_id.
+	//
+	// foto_chave fica de fora do Criar/Atualizar de propósito: o upload
+	// (bucketR2.UploadFoto) ainda não está wireado em nenhuma rota (ver
+	// back-end/CLAUDE.md, "R2 -- storage de anexos"). Adicionar quando o CRUD
+	// de fato subir a foto na mesma requisição.
+	//
+	// ⚠️ As duas leituras (ObterMaquinaPorID, ListarMaquinas) trazem setor_nome,
+	// loja_id e loja_nome por JOIN: o tipo Maquina do front exige setorNome e
+	// lojaId, e maquina não guarda loja_id -- a loja só existe via setor. É o
+	// padrão "nome vem denormalizado do servidor" de front-end/CLAUDE.md item 6:
+	// a tela não monta o nome procurando numa lista à parte.
+	//
+	// Criar/Atualizar não conseguem fazer isso: RETURNING não enxerga tabela
+	// juntada. Quem escrever o service resolve relendo por ObterMaquinaPorID
+	// dentro da mesma transação -- é o único jeito de a resposta do POST/PUT ter
+	// a mesma forma da resposta do GET.
+	// fk_maquina_setor é composta (tenant_id, setor_id) -> setor (tenant_id, id):
+	// o banco já recusa sozinho um setor de outro tenant, sem checagem extra
+	// aqui.
+	CriarMaquina(ctx context.Context, arg CriarMaquinaParams) (Maquina, error)
+	// Manutenção preventiva de uma máquina. Máquina exige pelo menos uma
+	// (regra de negócio do front: esquemaCadastrarMaquina, preventivas min(1)), e
+	// elas viajam na mesma requisição da máquina -- CriarPreventiva é chamada
+	// tanto por POST /preventivas quanto por CadastrarMaquina, dentro da mesma
+	// transação.
+	//
+	// Exclusão é soft delete (ativa = false), e aqui isso não é só convenção da
+	// casa: fk_solicitacao_preventiva não tem ON DELETE, então toda preventiva que
+	// já disparou uma solicitação automática (origem = 'preventiva') recusaria o
+	// DELETE com 23503. Soft delete é o único caminho que não quebra depois do
+	// primeiro ciclo vencer.
+	//
+	// ⚠️ `ativa` acumula dois sentidos: o alternador "Preventiva habilitada no
+	// sistema" do ModalManutencaoPreventiva e o soft delete do DELETE
+	// /preventivas/:id. Desabilitar pelo modal e excluir produzem o mesmo estado --
+	// em ambos a preventiva para de vencer e some da listagem. Consistente com o
+	// resto do sistema (não existe reativação pela API), mas é uma decisão, não um
+	// acidente.
+	//
+	// proxima_data é `date`, não timestamptz: preventiva vence no dia, não na hora
+	// (docs/modelagem-banco-dados.md, seção 3).
+	// fk_preventiva_maquina é composta (tenant_id, maquina_id): o banco recusa
+	// sozinho pendurar preventiva em máquina de outro tenant.
+	// ck_intervalo (intervalo_dias > 0) volta 23514 e vira ErrConflitoIntegridade.
+	CriarPreventiva(ctx context.Context, arg CriarPreventivaParams) (Preventiva, error)
 	// Setor pertence a uma loja. Exclusão é soft delete (ativo = false) -- ver
 	// "Soft delete" em docs/modelagem-banco-dados.md: máquina, solicitação e o
 	// escopo de acesso apontam pro setor.
@@ -71,6 +137,22 @@ type Querier interface {
 	// existe (ou que é de outro tenant) responderia igual a desativar um de
 	// verdade. Já desativada conta 1: o UPDATE casa a linha do mesmo jeito.
 	DesativarLoja(ctx context.Context, arg DesativarLojaParams) (int64, error)
+	// :execrows e não :exec, mesmo motivo de DesativarLoja/DesativarSetor: sem a
+	// contagem de linhas, desativar um id que não existe (ou é de outro tenant)
+	// responderia sucesso igual a desativar um de verdade.
+	DesativarMaquina(ctx context.Context, arg DesativarMaquinaParams) (int64, error)
+	// :execrows e não :exec, mesmo motivo de DesativarLoja/DesativarSetor: sem a
+	// contagem de linhas, desativar um id inexistente (ou de outro tenant)
+	// responderia sucesso igual a desativar um de verdade.
+	DesativarPreventiva(ctx context.Context, arg DesativarPreventivaParams) (int64, error)
+	// PUT /maquinas/:id substitui o conjunto inteiro de preventivas (não faz merge
+	// incremental): o service desativa todas as da máquina e insere as novas, na
+	// mesma transação -- mesmo padrão do escopo de acesso em AtualizarUsuario.
+	//
+	// Desativa em vez de deletar justamente por causa de fk_solicitacao_preventiva:
+	// um DELETE aqui quebraria a edição de qualquer máquina cuja preventiva já
+	// tivesse vencido uma vez.
+	DesativarPreventivasDaMaquina(ctx context.Context, arg DesativarPreventivasDaMaquinaParams) error
 	// :execrows pelo mesmo motivo de DesativarLoja: distinguir "desativei" de
 	// "esse id não existe neste tenant".
 	DesativarSetor(ctx context.Context, arg DesativarSetorParams) (int64, error)
@@ -91,6 +173,31 @@ type Querier interface {
 	// e o front pagina/filtra no cliente (front-end/CLAUDE.md item 12). Só
 	// /usuarios e /solicitacoes/minhas paginam no servidor.
 	ListarLojas(ctx context.Context, tenantID int64) ([]Loja, error)
+	// setorId e lojaId são opcionais e combináveis (ParametrosListagemMaquinas no
+	// front) -- NULL não filtra, mesmo padrão de ListarSetores. O JOIN com setor
+	// é o que permite filtrar por loja, já que maquina não guarda loja_id.
+	//
+	// Filtra só por m.ativa, não por s.ativo/l.ativa: máquina em setor desativado
+	// continua listada. É o comportamento certo enquanto DesativarSetor não
+	// recusar (nem cascatear) com máquina ativa pendurada -- hoje não faz nem um
+	// nem outro, diferente de DesativarLoja, que recusa com setor ativo.
+	//
+	// Array simples, sem paginação: o front pagina no cliente.
+	ListarMaquinas(ctx context.Context, arg ListarMaquinasParams) ([]ListarMaquinasRow, error)
+	// maquina_id é opcional (NULL não filtra): a aba "Manutenção Prev." do painel
+	// do gestor lista tudo, e a tela de edição de máquina pede só as dela
+	// (GET /preventivas?maquinaId=).
+	//
+	// `vencida` é calculado, nunca coluna -- o front só reage ao flag
+	// (front-end/CLAUDE.md, ModalManutencaoPreventiva). A data de corte usa o fuso
+	// de São Paulo explícito e não CURRENT_DATE: o container roda em UTC, e com
+	// CURRENT_DATE uma preventiva apareceria vencida até 3h antes da virada do dia
+	// no Brasil.
+	//
+	// Ordena por proxima_data: o que interessa na fila é o que vence antes, não a
+	// ordem alfabética da máquina. Array simples, sem paginação -- o front pagina
+	// no cliente.
+	ListarPreventivas(ctx context.Context, arg ListarPreventivasParams) ([]ListarPreventivasRow, error)
 	// loja_id é opcional (NULL não filtra) porque o front usa os dois modos: o
 	// select em cascata pede os setores de uma loja (GET /setores?lojaId=) e
 	// agruparPorEscopoGestor pede todos de uma vez, para nomear o cabeçalho de um
@@ -134,6 +241,20 @@ type Querier interface {
 	// ler o registro para preencher o formulário, e quem decide o que fazer com
 	// uma loja desativada é o service.
 	ObterLojaPorID(ctx context.Context, arg ObterLojaPorIDParams) (Loja, error)
+	// Sem filtro de `ativa`, igual a ObterLojaPorID/ObterUsuarioPorID: a tela de
+	// edição precisa ler o registro para preencher o formulário mesmo desativado.
+	//
+	// Os JOINs são INNER e não LEFT de propósito: setor_id e setor.loja_id são
+	// NOT NULL com FK, então não existe máquina sem setor nem setor sem loja --
+	// LEFT só faria o Go receber ponteiro em campo que nunca é nulo.
+	ObterMaquinaPorID(ctx context.Context, arg ObterMaquinaPorIDParams) (ObterMaquinaPorIDRow, error)
+	// Traz os denormalizados porque PreventivaListada (o retorno de POST e PUT
+	// /preventivas, não só do GET) exige maquinaNome/setorId/setorNome/lojaId/
+	// lojaNome. RETURNING não enxerga tabela juntada, então Criar/Atualizar releem
+	// por aqui dentro da mesma transação para responder na forma do contrato.
+	//
+	// Sem filtro de `ativa`: a tela de edição precisa carregar o registro.
+	ObterPreventivaPorID(ctx context.Context, arg ObterPreventivaPorIDParams) (ObterPreventivaPorIDRow, error)
 	// Diferente de ObterSetorPorID acima, que projeta só o que a sessão precisa:
 	// esta devolve a linha inteira para a tela de edição.
 	ObterSetorCompletoPorID(ctx context.Context, arg ObterSetorCompletoPorIDParams) (Setor, error)

@@ -52,6 +52,49 @@ func (ns NullMarcadorImpacto) Value() (driver.Value, error) {
 	return string(ns.MarcadorImpacto), nil
 }
 
+type NivelCriticidade string
+
+const (
+	NivelCriticidadeBaixa NivelCriticidade = "Baixa"
+	NivelCriticidadeMdia  NivelCriticidade = "Média"
+	NivelCriticidadeAlta  NivelCriticidade = "Alta"
+)
+
+func (e *NivelCriticidade) Scan(src interface{}) error {
+	switch s := src.(type) {
+	case []byte:
+		*e = NivelCriticidade(s)
+	case string:
+		*e = NivelCriticidade(s)
+	default:
+		return fmt.Errorf("unsupported scan type for NivelCriticidade: %T", src)
+	}
+	return nil
+}
+
+type NullNivelCriticidade struct {
+	NivelCriticidade NivelCriticidade
+	Valid            bool // Valid is true if NivelCriticidade is not NULL
+}
+
+// Scan implements the Scanner interface.
+func (ns *NullNivelCriticidade) Scan(value interface{}) error {
+	if value == nil {
+		ns.NivelCriticidade, ns.Valid = "", false
+		return nil
+	}
+	ns.Valid = true
+	return ns.NivelCriticidade.Scan(value)
+}
+
+// Value implements the driver Valuer interface.
+func (ns NullNivelCriticidade) Value() (driver.Value, error) {
+	if !ns.Valid {
+		return nil, nil
+	}
+	return string(ns.NivelCriticidade), nil
+}
+
 type OrigemSolicitacao string
 
 const (
@@ -430,23 +473,16 @@ type Maquina struct {
 	ID               int64
 	TenantID         int64
 	SetorID          int64
-	CriticidadeID    *int16
 	NumeroPatrimonio string
 	NumeroSerie      *string
 	Nome             string
 	Descricao        *string
 	Marca            *string
 	Modelo           *string
-	FotoUrl          *string
+	FotoChave        *string
 	Ativa            bool
 	CriadoEm         pgtype.Timestamptz
-}
-
-type NivelCriticidade struct {
-	ID       int16
-	TenantID int64
-	Nome     string
-	Ordem    int16
+	Criticidade      NivelCriticidade
 }
 
 type NivelUrgencium struct {
@@ -534,7 +570,7 @@ type SolicitacaoAnexo struct {
 	ID            int64
 	SolicitacaoID int64
 	Tipo          TipoAnexo
-	Url           string
+	Chave         string
 	MimeType      string
 	TamanhoBytes  int64
 	CriadoEm      pgtype.Timestamptz
