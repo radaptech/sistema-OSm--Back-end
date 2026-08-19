@@ -43,7 +43,7 @@ func montarLoja(l repository.Loja) model.Loja {
 func nomeValido(nome string) (string, error) {
 	limpo := strings.TrimSpace(nome)
 	if limpo == "" {
-		return "", fmt.Errorf("%w: nome da loja é obrigatório", helper.ErrValidacao)
+		return "", fmt.Errorf("%w: nome é obrigatório", helper.ErrValidacao)
 	}
 	return limpo, nil
 }

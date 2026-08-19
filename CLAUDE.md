@@ -53,7 +53,12 @@ que o front espera (camelCase, datas `dd/mm/yyyy HH:MM:SS`, ver `config/dataBr.g
   `proxiesConfiaveis()` (mesmo arquivo) alimenta o `SetTrustedProxies` — ver "Rotas e
   rate limit".
 - `config/` — `VariaveisDeAmbiente` (lê `.env`), `ConnPostgresql` (pool + migrations),
-  `DataBr` (tipo de data custom, layout `02/01/2006 15:04:05`, nunca RFC3339).
+  `DataBr` (tipo de data custom, layout `02/01/2006 15:04:05`, nunca RFC3339). O
+  `UnmarshalJSON` aceita **as duas formas do contrato**: com hora e `02/01/2006` sozinho —
+  coluna `date` chega assim (`preventiva.proxima_data` vem de um `<input type="date">` que
+  o front converte pra `dd/mm/yyyy`), e sem o fallback o cadastro falhava no binding,
+  antes de chegar no service. Marshal sempre emite com hora; o front lê os dois
+  (`converterDataBackend`).
 - `auth/` — `jwt.go` (`GerarJwt`, claims `sub`/`tenantId`/`perfil`/`exp`/`iat`,
   HS256), `passHash.go` (`HashPassword`/`HashCompare`, argon2id).
 - `middleware/` — `middJwt.go` (`AutenticacaoJwt`, lê cookie `token` ou
@@ -72,12 +77,18 @@ que o front espera (camelCase, datas `dd/mm/yyyy HH:MM:SS`, ver `config/dataBr.g
   `login.go` (`Login`, `SessaoUsuario`, `EscopoAcessoGestor`), `usuarios.go`
   (`NovoUsuarioPayload`, `AtualizarUsuarioPayload`, `Usuario`), `loja.go` (`Loja`,
   `Empresa`, `NovaLojaPayload`), `setor.go` (`Setor`, `NovoSetorPayload`),
-  `paginacao.go` (`RespostaPaginada[T]`, genérico — espelha `RespostaPaginada<T>` do
-  front; só `GET /usuarios` usa hoje).
+  `maquinario.go` (`MaquinarioInsert`, `AtualizarMaquina`, `Maquinario` +
+  `MontarListaMaquinarios`), `preventiva.go` (`PreventivaPayload`, `Preventiva` +
+  `MontarPreventiva`), `paginacao.go` (`RespostaPaginada[T]`, genérico — espelha
+  `RespostaPaginada<T>` do front; só `GET /usuarios` usa hoje).
   **Toda struct de resposta precisa do `id` e das tags camelCase**: sem tag o Go
   serializa `Nome` e o front lê `undefined`, e sem `id` a listagem não serve pra nada
   (é o `value` do select, o `/:id` do botão editar e o que vai pro escopo). Já
   aconteceu com `Loja` e `Setor`.
+  ⚠️ **Campo de data em struct de resposta tem que ser `*config.DataBr`, nunca o valor.**
+  O `MarshalJSON` do `DataBr` tem receiver ponteiro, então num campo não-ponteiro o
+  `encoding/json` ignora o método e serializa `{}` — a data some da resposta sem erro
+  nenhum. Use `config.NewDataBrPtr(...)`, que existe pra isso.
 - `internal/helper/Errors.go` — `TraduzErroPostgres`: converte código de erro do
   Postgres (`23505`, `23503`, `23502`, ...) em erro de negócio (`ErrDadoDuplicado`,
   `ErrConflitoIntegridade`, ...) pros controllers não fazerem `switch` em `pgErr.Code`
@@ -139,6 +150,24 @@ que o front espera (camelCase, datas `dd/mm/yyyy HH:MM:SS`, ver `config/dataBr.g
     um setor novo nela depois, contornando a regra pelo outro lado. O
     `ObterLojaParaEscrita` usa `FOR SHARE` pra loja não ser desativada entre o cheque e o
     INSERT. `AtualizarSetor` **não** muda `loja_id` (ver "Queries e repository").
+  - `maquinario.go` — CRUD de máquina. `CadastrarMaquina`/`AtualizarMaquina` são
+    transacionais **por causa das preventivas**: máquina sem preventiva não pode chegar a
+    existir (ver `preventivaService.go` abaixo), então as duas gravam juntas ou nenhuma
+    grava. As duas releem por `ObterMaquinaPorID` antes do commit — `RETURNING` não
+    enxerga tabela juntada, e a resposta precisa sair com `setorNome`/`lojaId`/`lojaNome`
+    na mesma forma do `GET`, porque o front consome POST, PUT e GET pelo mesmo tipo
+    `Maquina`. `AtualizarMaquina` **muda** `setor_id` (diferente de `AtualizarSetor`, que
+    ignora `loja_id`): mover máquina de setor não arrasta o histórico de mais ninguém.
+  - `preventivaService.go` — CRUD de preventiva **mais** `gravarPreventivas`, função livre
+    que recebe `*repository.Queries` (não o Pool) exatamente para
+    `CadastrarMaquina`/`AtualizarMaquina` a chamarem de dentro da transação que já
+    abriram — um método de `PreventivaService` abriria transação própria e quebraria a
+    atomicidade. Mesmo padrão de `gravarEscopo`. **A regra "máquina exige ao menos uma
+    preventiva" é validada aqui, no servidor**: o `min(1)` do Zod é só do navegador, e sem
+    o cheque um POST direto criaria máquina sem preventiva nenhuma.
+    `AtualizarMaquina` substitui o conjunto inteiro (`DesativarPreventivasDaMaquina` antes
+    de `gravarPreventivas`, sem merge incremental) — mesmo padrão do escopo em
+    `AtualizarUsuario`.
 - `controller/` — `loginController.go`: `LoginController` recebe um
   `LoginServiceInterface` (a interface existe pro teste do handler poder trocar o
   service — `UsuarioService` guarda `*pgxpool.Pool` concreto, não dá pra mockar de
@@ -190,6 +219,11 @@ que o front espera (camelCase, datas `dd/mm/yyyy HH:MM:SS`, ver `config/dataBr.g
   descarte o banco. Não valide só lendo o SQL.
 - `main.go` roda migrations pendentes sozinho a cada boot — não precisa rodar `migrate`
   manualmente em dev, só em produção/CI antes do deploy do binário.
+- Aplicadas até aqui: `000001` schema inicial, `000002` horas parada desde a solicitação,
+  `000003` chave do R2, `000004` criticidade vira ENUM, `000005` foto só na solicitação
+  humana.
+- ⚠️ **Tabela e tipo dividem namespace no Postgres** — trocar uma tabela por um ENUM
+  homônimo exige dropar a tabela **antes** de criar o tipo (foi o caso de `000004`).
 
 ## Provisionamento do primeiro Administrador
 Não existe `POST /empresas` nem forma de criar o primeiro `administrador` via API —
@@ -279,6 +313,11 @@ administrador a ela.
   | `GET·PUT·DELETE /lojas/:id`, `POST /lojas` | administrador |
   | `GET·PUT·DELETE /setores/:id`, `POST /setores` | administrador |
 
+- ⚠️ **`/maquinas` e `/preventivas` ainda NÃO estão registradas.** Queries, models e
+  services existem e estão testados; falta controller e rota. Quando entrarem: `GET` das
+  duas é de **qualquer perfil autenticado** (o Solicitante escolhe máquina do próprio setor
+  em Nova Solicitação, e o painel do Gestor lista preventivas), escrita é só administrador
+  — mesmo corte de `/lojas`·`/setores`.
 - **As duas listagens sem `Permitir` são de propósito**: o painel do gestor agrupa por
   loja e nomeia os blocos por setor (`acessoGestor.ts` procura o setor por id), e os
   selects em cascata de cadastro dependem das duas. Restringir a administrador deixa o
@@ -327,7 +366,17 @@ administrador a ela.
   `ListarX`, `AtualizarX`, `DeletarX`), espelhando o estilo do resto do Go do projeto.
 - **Exclusão é sempre soft delete** — ver "Soft delete" em
   `docs/modelagem-banco-dados.md`. Não há `DELETE` de linha em lugar nenhum.
-  ⚠️ A coluna é **`ativa`** na `loja` (feminino) e **`ativo`** em `usuario`/`setor`.
+  ⚠️ A coluna é **`ativa`** na `loja`/`maquina`/`preventiva` (feminino) e **`ativo`** em
+  `usuario`/`setor`.
+  Em `preventiva` o soft delete não é só convenção: **`fk_solicitacao_preventiva` não tem
+  `ON DELETE`**, então preventiva que já disparou uma solicitação automática recusa o
+  `DELETE` com 23503 (testado). É por isso que a substituição do conjunto no
+  `PUT /maquinas/:id` também desativa em vez de deletar — um `DELETE` em massa quebraria a
+  edição de qualquer máquina cuja preventiva já tivesse vencido uma vez.
+  ⚠️ Em `preventiva`, `ativa` acumula **dois sentidos**: o alternador "Preventiva
+  habilitada no sistema" do modal e o soft delete do `DELETE /preventivas/:id`. Desabilitar
+  e excluir produzem o mesmo estado. Consistente com "não existe reativação pela API", mas
+  é decisão, não acidente.
 - **Toda query de desativar é `:execrows`**, nunca `:exec`: sem a contagem de linhas,
   desativar um id inexistente (ou de outro tenant) responde sucesso igual a desativar um
   de verdade. `linhas == 0` → `ErrNaoEncontrado`. Já desativado casa a linha e conta 1,
@@ -375,12 +424,66 @@ administrador a ela.
   `setor.sql` (`ObterSetorPorID` — `SessaoUsuario.setorNome`, já que `usuario_escopo`
   só guarda o `setor_id`; e `ObterSetoresPorIDs`, que devolve `loja_id` de cada setor
   para o service distribuir o escopo).
+- **Leitura de máquina e preventiva traz os nomes por `JOIN`, sempre.** `ListarMaquinas`/
+  `ObterMaquinaPorID` projetam `setor_nome`, `loja_id` e `loja_nome`; as de preventiva
+  projetam ainda `maquina_nome`. Não é enfeite: o front tipa `setorNome`/`lojaId` como
+  **obrigatórios**, e `maquina` **não guarda `loja_id`** — a loja só existe via setor. Os
+  JOINs são INNER porque as FKs são NOT NULL; LEFT só faria o Go receber ponteiro em campo
+  que nunca é nulo. `Criar`/`Atualizar` **não conseguem** fazer isso (`RETURNING` não
+  enxerga tabela juntada), por isso releem por `Obter...PorID` dentro da transação.
+- `maquina.criticidade` é o **ENUM `nivel_criticidade`** (`'Baixa','Média','Alta'`,
+  migration `000004`), não FK pra tabela. Era tabela por tenant, mas nada customizava (o
+  front tipa tupla fixa e não há tela de cadastro) e nenhuma migration a populava — a
+  mesma lacuna de `area_tecnico`, que deixaria o cadastro de máquina travado em todo tenant
+  novo. Como ENUM o valor nasce com o schema, e a ordem de declaração já dá o
+  `ORDER BY criticidade` (enums do Postgres são ordenáveis) que a coluna `ordem` fazia.
+  `nivel_urgencia` **continua tabela** de propósito: não está neste caminho e
+  `ordem_servico` ainda não tem escrita.
+- ⚠️ **Armadilha do sqlc em coluna calculada:** expressão booleana composta vira `*bool`,
+  e `COALESCE` sozinho vira `interface{}`. Para sair `bool` limpo, **feche com cast**:
+  `COALESCE(<expr>, false)::boolean AS x` — é o que `vencida` usa nas duas queries de
+  preventiva. Manter a expressão **idêntica** nas duas também é o que deixa as rows
+  geradas com a mesma forma, permitindo um `MontarPreventiva` só para as duas.
+- **Data "de hoje" em SQL usa fuso explícito, não `CURRENT_DATE`:**
+  `(now() AT TIME ZONE 'America/Sao_Paulo')::date`. O container roda em UTC, então com
+  `CURRENT_DATE` uma preventiva apareceria vencida até 3h antes da virada do dia no Brasil.
+- `AvancarProximaData` soma o intervalo **a partir da `proxima_data` vencida, não de hoje**
+  — senão um ciclo processado com atraso arrastaria todos os seguintes (vencida há 5 dias
+  com intervalo 30 vai pra hoje+25, não hoje+30).
 
 ⚠️ **`area_tecnico` não é populada por nada hoje** — nem migration de seed, nem
 `ProvisionarAdministrador`, nem CRUD. Cadastrar técnico falha com "registro não
 encontrado: área técnica ... não cadastrada neste tenant" até existir uma dessas, e o
 front exige `area` obrigatória para o perfil Técnico. É o próximo bloqueio real do
 cadastro de usuários.
+
+## Abertura automática de solicitação por preventiva (a fazer)
+Ao vencer a `proxima_data` de uma preventiva **ativa**, o sistema abre uma **Solicitação**
+(não uma OS) que cai na fila do Gestor. Ela nasce com `origem = 'preventiva'`,
+`preventiva_id` preenchido e `solicitante_id` **nulo** — não houve pessoa. A OS só nasce
+depois, quando o Gestor aprova com técnico + urgência: criar OS direto pularia a aprovação.
+
+- **A migration `000005` destravou isso.** `fn_check_solicitacao_tem_foto` exigia foto em
+  *toda* solicitação, e a de preventiva não tem nem como ter — ninguém fotografou nada.
+  O `INSERT` do job falhava no commit com "precisa de ao menos um anexo do tipo foto".
+  Agora a exigência vale só para `origem = 'solicitante'`. O corte usa `origem` e não
+  `solicitante_id` porque `ck_origem` já amarra os dois.
+- **Onde o job mora: não no banco.** `pg_cron` precisa de `shared_preload_libraries`, que
+  o Postgres gerenciado do Railway não deixa configurar no Hobby — e regra de negócio em
+  job de banco fica fora do teste e do CI. O caminho que encaixa é **subcomando de CLI**,
+  como `provisionar-admin` (o `main.go` já despacha subcomandos), chamado pelo Railway
+  Cron. Alternativa: ticker em goroutine dentro da API — zero infra nova, mas acopla o job
+  ao uptime e duplica com 2 réplicas.
+- ⚠️ **`uq_preventiva_pendente` é a rede de segurança**: índice único parcial em
+  `solicitacao_os (preventiva_id) WHERE status = 'Pendente'`. Uma preventiva não tem duas
+  solicitações pendentes ao mesmo tempo (mas pode ter várias ao longo do tempo, a cada
+  ciclo). Consequência prática: **a query que lista as vencidas precisa de `NOT EXISTS`
+  sobre solicitação pendente**, senão o job quebra com 23505 na segunda rodada. Em
+  compensação, é ela que torna a execução duplicada (2 réplicas) inofensiva.
+- Falta: query `ListarPreventivasVencidas` (com o `NOT EXISTS`), query de inserção da
+  solicitação automática, o service percorrendo as vencidas — **uma transação por
+  preventiva**, para uma falha não travar as demais — chamando `AvancarProximaData` junto,
+  e o subcomando + entrada no Railway Cron.
 
 ## Ambiente local
 - `.env` na raiz: `DB_SERVER`, `DB_USER`, `DB_PORT`, `DATABASE`, `DB_PASSWORD`
@@ -459,7 +562,8 @@ cadastro de usuários.
 - Dois níveis em `internal/service/`:
   - `loginService_test.go` — unitário, sem banco: tabela cobrindo `validarEscopo` +
     `escopoDoPerfil` nos 4 perfis.
-  - `loginIntegracao_test.go`, `lojaIntegracao_test.go`, `setorIntegracao_test.go` —
+  - `loginIntegracao_test.go`, `lojaIntegracao_test.go`, `setorIntegracao_test.go`,
+    `maquinarioIntegracao_test.go`, `preventivaIntegracao_test.go` —
     integração de verdade contra Postgres. `bancoDeTeste` (em `loginIntegracao_test.go`,
     compartilhado) cria um banco descartável (`teste_<nome do teste>_<pid>`), aplica as
     migrations nele e dropa no fim; o seed é criado pelos próprios services, então o
@@ -468,6 +572,12 @@ cadastro de usuários.
     `DEFERRABLE` que só disparam no commit (gestor virando administrador precisa perder o
     escopo junto), unicidade por tenant/loja, e `ErrNoRows` virando `ErrNaoEncontrado` em
     vez de 500.
+  - **Teste de escrita transacional confere o banco, não o retorno.** Em
+    `maquinarioIntegracao_test.go` a máquina criada é localizada pela *listagem*, não pelo
+    struct devolvido: um `CadastrarMaquina` sem `tx.Commit` devolvia a linha com id
+    preenchido e o rollback do `defer` apagava tudo — o teste passava olhando só o retorno.
+    Mesmo motivo do subteste "preventiva inválida desfaz a máquina junto", que confirma
+    que a máquina **não** ficou no banco.
 - O DSN vem de `TEST_DB_DSN`. O default (`localhost:5431`) **não conecta hoje** — a porta
   do host está certa (a 5432 é do projeto vizinho), mas o compose mapeia pra 5431 dentro
   do container, onde o Postgres não escuta; ver "Ambiente local". Use o IP do container:
@@ -561,10 +671,17 @@ CRUD que os usa. Decisões já fechadas, não reabrir sem motivo novo:
   contrato, precisa do front junto).
 
 **O que falta pra fechar o fluxo:** wirear `UploadFoto`/`URLLeitura` numa rota real
-(`POST /maquinas`, as criações de solicitação), o CRUD de `maquina`/`solicitacao_anexo`
-em si (nada em `database/queries/` ainda), e o service resolvendo `foto_chave`/`chave`
-em `fotoUrl`/`url` assinada na resposta. Validação de content-type/extensão também não
-existe — `UploadFoto` aceita qualquer arquivo enviado no campo `foto`.
+(`POST /maquinas`, as criações de solicitação), o CRUD de `solicitacao_anexo` (nada em
+`database/queries/` ainda — o de `maquina` já existe), e o service resolvendo
+`foto_chave`/`chave` em `fotoUrl`/`url` assinada na resposta. Validação de
+content-type/extensão também não existe — `UploadFoto` aceita qualquer arquivo enviado no
+campo `foto`.
+
+⚠️ **`Maquinario.FotoUrl` hoje devolve a chave crua**, não a URL assinada: o
+`MontarListaMaquinarios` copia `foto_chave` direto. O nome do campo já está certo
+(`fotoUrl`, o que o front espera) e a coluna é sempre `NULL` por enquanto — nada faz
+upload. Mas na hora de ligar o `UploadFoto` é aí que o `URLLeitura` tem que entrar, senão
+a chave vaza pro cliente.
 
 ## Regras herdadas do contrato com o front (não reinvente)
 - **401 é só "sem sessão"**; fora de escopo/perfil errado é sempre **403** — 401 fora de
