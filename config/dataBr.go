@@ -17,7 +17,14 @@ func (d *DataBr) UnmarshalJSON(b []byte) error {
 	// Layout brasileiro com data e hora: DD/MM/YYYY HH:MM:SS
 	t, err := time.Parse("02/01/2006 15:04:05", s)
 	if err != nil {
-		return fmt.Errorf("formato de data/hora inválido. Use DD/MM/YYYY HH:MM:SS")
+		// Sem hora: o contrato aceita as duas formas, e campo de coluna `date`
+		// chega assim -- preventiva.proxima_data vem de um <input type="date">
+		// que o front converte para dd/mm/yyyy antes de enviar. Sem este
+		// fallback, cadastrar preventiva falhava na borda, antes do service.
+		t, err = time.Parse("02/01/2006", s)
+		if err != nil {
+			return fmt.Errorf("formato de data inválido. Use DD/MM/YYYY HH:MM:SS ou DD/MM/YYYY")
+		}
 	}
 	*d = DataBr(t)
 	return nil
