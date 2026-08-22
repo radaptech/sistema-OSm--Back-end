@@ -105,6 +105,8 @@ func (s *PreventivaService) CadastrarPreventiva(ctx context.Context, tenantID in
 
 	// gravarPreventivas não devolve id (serve uma lista), então a resposta sai
 	// da listagem da máquina -- a recém-criada é a última pela ordenação.
+	// EscopoUsuarioID nil: esta releitura é interna, para achar o id da linha
+	// recém-criada -- não é listagem de ninguém, não há escopo a aplicar.
 	criadas, err := repo.ListarPreventivas(ctx, repository.ListarPreventivasParams{
 		TenantID:  tenantID,
 		MaquinaID: &payload.MaquinaId,
@@ -131,14 +133,16 @@ func (s *PreventivaService) CadastrarPreventiva(ctx context.Context, tenantID in
 }
 
 // ListarPreventivas é GET /preventivas (?maquinaId=). Só as ativas -- ver
-// preventiva.sql.
-func (s *PreventivaService) ListarPreventivas(ctx context.Context, tenantID int64, maquinaID *int64) ([]model.Preventiva, error) {
+// preventiva.sql -- e só as que o escopo de quem chama alcança: a aba
+// "Manutenção Prev." do gestor tem que trazer as lojas dele, não o tenant.
+func (s *PreventivaService) ListarPreventivas(ctx context.Context, tenantID, usuarioID int64, perfil string, maquinaID *int64) ([]model.Preventiva, error) {
 
 	repo := repository.New(s.Pool)
 
 	preventivas, err := repo.ListarPreventivas(ctx, repository.ListarPreventivasParams{
-		TenantID:  tenantID,
-		MaquinaID: maquinaID,
+		TenantID:        tenantID,
+		MaquinaID:       maquinaID,
+		EscopoUsuarioID: escopoDe(usuarioID, perfil),
 	})
 	if err != nil {
 		return nil, helper.TraduzErroPostgres(err)

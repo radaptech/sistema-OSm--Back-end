@@ -212,12 +212,34 @@ JOIN loja    l ON l.tenant_id = s.tenant_id AND l.id = s.loja_id
 WHERE p.tenant_id = $1
   AND p.ativa
   AND ($2::bigint IS NULL OR p.maquina_id = $2)
+  -- Escopo de acesso no WHERE, nunca no cliente (back-end/CLAUDE.md, "Regras
+  -- herdadas do contrato com o front"): NULL não filtra e é o caso do
+  -- administrador, que não tem escopo nenhum -- a ausência dele É o acesso
+  -- total ao tenant. Para os outros perfis o service manda o usuario.id do
+  -- token e a linha só aparece se ele alcança a loja E o setor:
+  --   solicitante -> um escopo, um setor;
+  --   tecnico     -> escopos com acesso_total_setores (escopoDoPerfil);
+  --   gestor      -> setores marcados, ou a loja inteira quando total.
+  -- EXISTS e não JOIN, mesmo motivo de ListarUsuarios: com JOIN a máquina
+  -- apareceria uma vez por escopo que a alcança.
+  AND (
+    $3::bigint IS NULL
+    OR EXISTS (
+      SELECT 1
+      FROM usuario_escopo ue
+      LEFT JOIN usuario_escopo_setor ues ON ues.escopo_id = ue.id
+      WHERE ue.usuario_id = $3
+        AND ue.loja_id = s.loja_id
+        AND (ue.acesso_total_setores OR ues.setor_id = m.setor_id)
+    )
+  )
 ORDER BY p.proxima_data, p.id
 `
 
 type ListarPreventivasParams struct {
-	TenantID  int64
-	MaquinaID *int64
+	TenantID        int64
+	MaquinaID       *int64
+	EscopoUsuarioID *int64
 }
 
 type ListarPreventivasRow struct {
@@ -251,7 +273,7 @@ type ListarPreventivasRow struct {
 // ordem alfabética da máquina. Array simples, sem paginação -- o front pagina
 // no cliente.
 func (q *Queries) ListarPreventivas(ctx context.Context, arg ListarPreventivasParams) ([]ListarPreventivasRow, error) {
-	rows, err := q.db.Query(ctx, listarPreventivas, arg.TenantID, arg.MaquinaID)
+	rows, err := q.db.Query(ctx, listarPreventivas, arg.TenantID, arg.MaquinaID, arg.EscopoUsuarioID)
 	if err != nil {
 		return nil, err
 	}

@@ -55,7 +55,7 @@ func TestPreventivaCrud(t *testing.T) {
 	}
 
 	t.Run("a preventiva do cadastro da máquina já está listada", func(t *testing.T) {
-		lidas, err := svc.ListarPreventivas(ctx, tenantID, &maquina.Id)
+		lidas, err := svc.ListarPreventivas(ctx, tenantID, 0, "administrador", &maquina.Id)
 		if err != nil {
 			t.Fatalf("erro ao listar: %v", err)
 		}
@@ -135,7 +135,7 @@ func TestPreventivaCrud(t *testing.T) {
 	})
 
 	t.Run("atualiza mantendo a máquina e devolvendo os nomes", func(t *testing.T) {
-		lidas, err := svc.ListarPreventivas(ctx, tenantID, &maquina.Id)
+		lidas, err := svc.ListarPreventivas(ctx, tenantID, 0, "administrador", &maquina.Id)
 		if err != nil || len(lidas) == 0 {
 			t.Fatalf("erro ao listar: %v", err)
 		}
@@ -165,7 +165,7 @@ func TestPreventivaCrud(t *testing.T) {
 	})
 
 	t.Run("desativada some da listagem", func(t *testing.T) {
-		antes, err := svc.ListarPreventivas(ctx, tenantID, &maquina.Id)
+		antes, err := svc.ListarPreventivas(ctx, tenantID, 0, "administrador", &maquina.Id)
 		if err != nil {
 			t.Fatalf("erro ao listar: %v", err)
 		}
@@ -177,7 +177,7 @@ func TestPreventivaCrud(t *testing.T) {
 			t.Fatalf("erro ao desativar: %v", err)
 		}
 
-		depois, err := svc.ListarPreventivas(ctx, tenantID, &maquina.Id)
+		depois, err := svc.ListarPreventivas(ctx, tenantID, 0, "administrador", &maquina.Id)
 		if err != nil {
 			t.Fatalf("erro ao listar: %v", err)
 		}
@@ -222,7 +222,7 @@ func TestPreventivaCrud(t *testing.T) {
 			t.Fatalf("erro ao atualizar máquina: %v", err)
 		}
 
-		lidas, err := svc.ListarPreventivas(ctx, tenantID, &maquina.Id)
+		lidas, err := svc.ListarPreventivas(ctx, tenantID, 0, "administrador", &maquina.Id)
 		if err != nil {
 			t.Fatalf("erro ao listar: %v", err)
 		}
