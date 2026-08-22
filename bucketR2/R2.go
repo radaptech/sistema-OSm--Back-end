@@ -2,10 +2,9 @@ package bucketr2
 
 import (
 	"context"
-
 	"fmt"
 	"log"
-	"net/http"
+	"mime/multipart"
 	"os"
 	"path/filepath"
 	"time"
@@ -14,11 +13,12 @@ import (
 	r2_config "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
-	"github.com/gin-gonic/gin"
-	"github.com/radaptech/sistema-OSm--Back-end/middleware"
 )
 
-const tamanhoMaximoFoto = 10 << 20 // 10MB
+// TamanhoMaximoFoto é o teto do corpo inteiro da requisição com foto. Exportado
+// porque quem corta o body é o handler (http.MaxBytesReader, que precisa do
+// ResponseWriter) -- aqui só existe o número, num lugar só.
+const TamanhoMaximoFoto = 10 << 20 // 10MB
 
 var s3Client *s3.Client
 var presignClient *s3.PresignClient
@@ -43,78 +43,64 @@ func InitR2_cloudflare(ctx context.Context) {
 
 }
 
-func UploadFoto(fotoUrl, bucket string) gin.HandlerFunc {
+// UploadFoto sobe o arquivo recebido no multipart e devolve a KEY do objeto --
+// nunca uma URL. A leitura é sempre assinada na hora (URLLeitura, TTL curto):
+// bucket público num sistema multi-tenant deixaria qualquer um com o link ver
+// a foto de outro tenant, e URL persistida vira link morto sem avisar.
+//
+// Recebe o *multipart.FileHeader e não um gin.Context de propósito: quem sabe
+// se a foto é obrigatória, qual o status do erro e o que fazer quando o resto
+// da transação falha é o handler do domínio -- este pacote só fala com o R2.
+// Abrir e fechar o arquivo fica aqui para o chamador não esquecer o Close.
+//
+// A key é prefixada por tenant (tenant/{id}/...) para isolar os arquivos entre
+// empresas, e o ContentType vem do header do arquivo: sem ele o R2 serve como
+// application/octet-stream e o browser baixa em vez de exibir.
+func UploadFoto(ctx context.Context, tenantID int64, bucket string, header *multipart.FileHeader) (string, error) {
 
-	return func(ctx *gin.Context) {
-
-		if ctx.Request.Method != http.MethodPost {
-
-			log.Printf("metado nao permitido para fazer o upload da imagem: %v", ctx.Request.Method)
-			ctx.JSON(http.StatusMethodNotAllowed, gin.H{
-				"erro": "metado nao permitido",
-			})
-			return
-		}
-
-		tenantId, ok := middleware.GetTenantIDToken(ctx)
-		if !ok {
-			ctx.JSON(http.StatusInternalServerError, gin.H{
-				"erro": "erro interno de tenant",
-			})
-			return
-		}
-
-		//limitando o tamanho da imagem: MaxBytesReader corta a leitura do body,
-		//ParseMultipartForm sozinho só limita o que fica em memória
-		ctx.Request.Body = http.MaxBytesReader(ctx.Writer, ctx.Request.Body, tamanhoMaximoFoto)
-		if err := ctx.Request.ParseMultipartForm(tamanhoMaximoFoto); err != nil {
-			ctx.JSON(http.StatusBadRequest, gin.H{
-				"erro":     "erro ao ler o formulario enviado",
-				"detalhes": err.Error(),
-			})
-			return
-		}
-
-		file, header, err := ctx.Request.FormFile("foto")
-		if err != nil {
-
-			ctx.JSON(http.StatusBadRequest, gin.H{
-				"erro":     "erro ao ler a foto enviada",
-				"detalhes": err.Error(),
-			})
-			return
-		}
-		defer file.Close()
-
-		//nome dos arquivos, prefixado por tenant pra isolar o bucket entre empresas
-		//(sem repetir o nome do bucket na key: a key já vive dentro dele)
-		ext := filepath.Ext(header.Filename)
-		objkey := fmt.Sprintf("tenant/%d/%d%s", tenantId, time.Now().UnixNano(), ext)
-
-		_, err = s3Client.PutObject(ctx, &s3.PutObjectInput{
-			Bucket:      aws.String(bucket),
-			Key:         aws.String(objkey),
-			Body:        file,
-			ContentType: aws.String(header.Header.Get("Content-Type")),
-		})
-		if err != nil {
-
-			log.Printf("erro ao salvar foto no r2: %v", err)
-			ctx.JSON(http.StatusInternalServerError, gin.H{
-				"erro": "erro ao salvar no R2",
-			})
-			return
-		}
-
-		ctx.JSON(http.StatusOK, gin.H{
-			"status":  "sucesso",
-			"arquivo": objkey,
-		})
-
+	// s3Client nasce nil e só é montado por InitR2_cloudflare: sem esta guarda
+	// um boot sem as variáveis do R2 derruba o processo com nil pointer no
+	// primeiro upload, em vez de devolver erro.
+	if s3Client == nil {
+		return "", fmt.Errorf("R2 não inicializado")
 	}
+
+	if bucket == "" {
+		return "", fmt.Errorf("bucket do R2 não configurado")
+	}
+
+	arquivo, err := header.Open()
+	if err != nil {
+		return "", fmt.Errorf("erro ao abrir a foto enviada: %w", err)
+	}
+	defer arquivo.Close()
+
+	ext := filepath.Ext(header.Filename)
+	objkey := fmt.Sprintf("tenant/%d/%d%s", tenantID, time.Now().UnixNano(), ext)
+
+	_, err = s3Client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket:      aws.String(bucket),
+		Key:         aws.String(objkey),
+		Body:        arquivo,
+		ContentType: aws.String(header.Header.Get("Content-Type")),
+	})
+	if err != nil {
+		log.Printf("erro ao salvar foto no r2 bucket=%s key=%s: %v", bucket, objkey, err)
+		return "", fmt.Errorf("erro ao salvar no R2")
+	}
+
+	return objkey, nil
 }
 
 func URLLeitura(ctx context.Context, bucket, key string, ttl time.Duration) (string, error) {
+
+	// Mesma guarda do UploadFoto: presignClient nasce nil e só é montado por
+	// InitR2_cloudflare. Sem ela, um boot sem as variáveis do R2 vira panic de
+	// nil pointer na primeira máquina com foto que alguém listar -- e aí não é
+	// só a foto que some, é a resposta inteira.
+	if presignClient == nil {
+		return "", fmt.Errorf("R2 não inicializado")
+	}
 
 	resul, err := presignClient.PresignGetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(bucket),
