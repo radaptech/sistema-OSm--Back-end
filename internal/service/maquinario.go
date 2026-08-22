@@ -59,6 +59,7 @@ func (m *MaquinarioService) CadastrarMaquina(ctx context.Context, tenantId int64
 		Descricao:        payload.Descricao,
 		Marca:            payload.Marca,
 		Modelo:           payload.Modelo,
+		FotoChave:        payload.FotoChave,
 	})
 	if err != nil {
 
@@ -87,14 +88,20 @@ func (m *MaquinarioService) CadastrarMaquina(ctx context.Context, tenantId int64
 	return model.MontarListaMaquinarios(repository.ListarMaquinasRow(maquinario)), nil
 }
 
-func (m *MaquinarioService) ListarMaquinario(ctx context.Context, tenantId int64, lojaId, setorId *int64) ([]model.Maquinario, error) {
+// ListarMaquinario é GET /maquinas. Além dos filtros opcionais que o cliente
+// pede (?lojaId=/?setorId=), a listagem é recortada pelo escopo de quem chama:
+// o solicitante enxerga o próprio setor, o técnico e o gestor as lojas/setores
+// deles. Sem isso o front seria a única barreira -- e ele manda o filtro, não
+// o impõe.
+func (m *MaquinarioService) ListarMaquinario(ctx context.Context, tenantId, usuarioId int64, perfil string, lojaId, setorId *int64) ([]model.Maquinario, error) {
 
 	repo := repository.New(m.Pool)
 
 	maquinarios, err := repo.ListarMaquinas(ctx, repository.ListarMaquinasParams{
-		TenantID: tenantId,
-		SetorID:  setorId,
-		LojaID:   lojaId,
+		TenantID:        tenantId,
+		SetorID:         setorId,
+		LojaID:          lojaId,
+		EscopoUsuarioID: escopoDe(usuarioId, perfil),
 	})
 	if err != nil {
 		return nil, helper.TraduzErroPostgres(err)
@@ -153,6 +160,7 @@ func (m *MaquinarioService) AtualizarMaquina(ctx context.Context, tenantId, id i
 		Descricao:        payload.Descricao,
 		Marca:            payload.Marca,
 		Modelo:           payload.Modelo,
+		FotoChave:        payload.FotoChave,
 	})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {

@@ -56,7 +56,7 @@ func TestMaquinarioCrud(t *testing.T) {
 	// uma resposta bonita antes do rollback.
 	buscarPorPatrimonio := func(t *testing.T, patrimonio string) (model.Maquinario, bool) {
 		t.Helper()
-		lidas, err := svc.ListarMaquinario(ctx, tenantID, nil, nil)
+		lidas, err := svc.ListarMaquinario(ctx, tenantID, 0, "administrador", nil, nil)
 		if err != nil {
 			t.Fatalf("erro ao listar: %v", err)
 		}

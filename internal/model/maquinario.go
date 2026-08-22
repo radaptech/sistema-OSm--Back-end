@@ -5,25 +5,41 @@ import (
 	"github.com/radaptech/sistema-OSm--Back-end/database/repository"
 )
 
+// MaquinarioInsert é o corpo de POST /maquinas -- o JSON que vem na parte
+// `dados` do multipart (montarMultipart no front), espelhando
+// NovaMaquinaPayload (src/tipos/maquina.ts).
+//
 // Preventivas viaja junto da máquina de propósito: a regra de negócio exige ao
 // menos uma (esquemaCadastrarMaquina, min(1)) e as duas coisas gravam na mesma
 // transação -- máquina sem preventiva não deve chegar a existir. O MaquinaId de
 // cada item é ignorado aqui: no cadastro a máquina ainda não tem id.
+//
+// ⚠️ Os `json:"-"` não são enfeite: ID, TenantID, FotoChave, Ativa e CriadoEm
+// são derivados do servidor. Sem a tag o encoding/json casa por nome, sem
+// diferenciar maiúscula -- um cliente mandando {"tenantId": 7} escreveria no
+// tenant alheio se algum caminho passasse o payload adiante sem sobrescrever.
+//
+// ⚠️ `serie`, não `numeroSerie`: é o nome que o front manda. Sem a tag o
+// Unmarshal não casaria nada e o campo chegaria nil, calado.
+//
+// As tags `binding` só valem se alguém rodar o validator: o corpo chega por
+// json.Unmarshal (multipart), não pelo ShouldBindJSON, e o Unmarshal ignora
+// tag de validação -- quem chama roda binding.Validator.ValidateStruct.
 type MaquinarioInsert struct {
-	ID               int64
-	TenantID         int64
-	SetorID          int64
-	NumeroPatrimonio string
-	NumeroSerie      *string
-	Nome             string
-	Descricao        *string
-	Marca            *string
-	Modelo           *string
-	FotoChave        *string
-	Ativa            bool
-	CriadoEm         config.DataBr
-	Criticidade      string
-	Preventivas      []PreventivaPayload
+	ID               int64               `json:"-"`
+	TenantID         int64               `json:"-"`
+	SetorID          int64               `json:"setorId" binding:"required,gt=0"`
+	NumeroPatrimonio string              `json:"numeroPatrimonio" binding:"required"`
+	NumeroSerie      *string             `json:"serie"`
+	Nome             string              `json:"nome" binding:"required"`
+	Descricao        *string             `json:"descricao"`
+	Marca            *string             `json:"marca"`
+	Modelo           *string             `json:"modelo"`
+	FotoChave        *string             `json:"-"`
+	Ativa            bool                `json:"-"`
+	CriadoEm         config.DataBr       `json:"-"`
+	Criticidade      string              `json:"criticidade" binding:"required,oneof=Baixa Média Alta"`
+	Preventivas      []PreventivaPayload `json:"preventivas" binding:"required,min=1,dive"`
 }
 
 // Maquinario é o corpo de resposta de /maquinas -- espelha Maquina no front
@@ -81,19 +97,29 @@ func MontarListaMaquinarios(m repository.ListarMaquinasRow) Maquinario {
 
 }
 
+// AtualizarMaquina é o corpo de PUT /maquinas/:id -- mesmo JSON de
+// MaquinarioInsert (o front manda o mesmo objeto nos dois, AtualizarMaquinaPayload
+// estende NovaMaquinaPayload), com o id vindo pela rota. As tags seguem a mesma
+// regra explicada lá: `serie` é o nome do front e os derivados levam json:"-".
+//
 // Preventivas substitui o conjunto inteiro, não faz merge incremental (é o que
 // o front espera de PUT /maquinas/:id): o service desativa as atuais e insere
 // estas, na mesma transação -- mesmo padrão do escopo em AtualizarUsuario.
+//
+// FotoChave nil significa "não mandou foto nova", e a query preserva a atual
+// (COALESCE em maquina.sql) -- não é "apagar a foto". O front não tem ação de
+// remover foto, só de trocar.
 type AtualizarMaquina struct {
-	ID               int64
-	TenantID         int64
-	SetorID          int64
-	Criticidade      string
-	NumeroPatrimonio string
-	NumeroSerie      *string
-	Nome             string
-	Descricao        *string
-	Marca            *string
-	Modelo           *string
-	Preventivas      []PreventivaPayload
+	ID               int64               `json:"-"`
+	TenantID         int64               `json:"-"`
+	SetorID          int64               `json:"setorId" binding:"required,gt=0"`
+	Criticidade      string              `json:"criticidade" binding:"required,oneof=Baixa Média Alta"`
+	NumeroPatrimonio string              `json:"numeroPatrimonio" binding:"required"`
+	NumeroSerie      *string             `json:"serie"`
+	Nome             string              `json:"nome" binding:"required"`
+	Descricao        *string             `json:"descricao"`
+	Marca            *string             `json:"marca"`
+	Modelo           *string             `json:"modelo"`
+	FotoChave        *string             `json:"-"`
+	Preventivas      []PreventivaPayload `json:"preventivas" binding:"required,min=1,dive"`
 }

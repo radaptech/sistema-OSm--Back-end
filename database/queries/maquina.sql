@@ -7,10 +7,18 @@
 -- 000004) e viaja com o mesmo texto que o front manda -- sem resolução
 -- nome->id como em area_tecnico_id.
 --
--- foto_chave fica de fora do Criar/Atualizar de propósito: o upload
--- (bucketR2.UploadFoto) ainda não está wireado em nenhuma rota (ver
--- back-end/CLAUDE.md, "R2 -- storage de anexos"). Adicionar quando o CRUD
--- de fato subir a foto na mesma requisição.
+-- foto_chave é a KEY do objeto no R2, nunca uma URL: a leitura é assinada na
+-- hora (bucketR2.URLLeitura, ver back-end/CLAUDE.md "R2 -- storage de
+-- anexos"). Entra em CriarMaquina porque o POST /maquinas sobe a foto na
+-- mesma requisição; NULL quando o cliente não mandou nenhuma.
+--
+-- Em AtualizarMaquina ela entra como COALESCE($11, foto_chave): sem foto nova
+-- no multipart o valor chega NULL e a antiga fica. É o que a tela de edição
+-- precisa -- o front só sabe *trocar* a foto, não remover (UploadFoto em
+-- CadastrarMaquina.tsx), então NULL ali significa "não mexi", não "apague".
+-- ⚠️ Trocar a foto deixa o objeto antigo órfão no bucket: ninguém apaga do R2.
+-- É lixo barato e sem referência; se incomodar, o caminho é um DELETE do
+-- objeto antigo depois do commit (nunca antes -- a transação pode voltar).
 --
 -- ⚠️ As duas leituras (ObterMaquinaPorID, ListarMaquinas) trazem setor_nome,
 -- loja_id e loja_nome por JOIN: o tipo Maquina do front exige setorNome e
@@ -29,9 +37,9 @@
 -- aqui.
 INSERT INTO maquina (
     tenant_id, setor_id, criticidade, numero_patrimonio, numero_serie,
-    nome, descricao, marca, modelo
+    nome, descricao, marca, modelo, foto_chave
 )
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 RETURNING *;
 
 -- name: ObterMaquinaPorID :one
@@ -66,6 +74,27 @@ WHERE m.tenant_id = $1
   AND m.ativa
   AND (sqlc.narg(setor_id)::bigint IS NULL OR m.setor_id = sqlc.narg(setor_id))
   AND (sqlc.narg(loja_id)::bigint IS NULL OR s.loja_id = sqlc.narg(loja_id))
+  -- Escopo de acesso no WHERE, nunca no cliente (back-end/CLAUDE.md, "Regras
+  -- herdadas do contrato com o front"): NULL não filtra e é o caso do
+  -- administrador, que não tem escopo nenhum -- a ausência dele É o acesso
+  -- total ao tenant. Para os outros perfis o service manda o usuario.id do
+  -- token e a linha só aparece se ele alcança a loja E o setor:
+  --   solicitante -> um escopo, um setor;
+  --   tecnico     -> escopos com acesso_total_setores (escopoDoPerfil);
+  --   gestor      -> setores marcados, ou a loja inteira quando total.
+  -- EXISTS e não JOIN, mesmo motivo de ListarUsuarios: com JOIN a máquina
+  -- apareceria uma vez por escopo que a alcança.
+  AND (
+    sqlc.narg(escopo_usuario_id)::bigint IS NULL
+    OR EXISTS (
+      SELECT 1
+      FROM usuario_escopo ue
+      LEFT JOIN usuario_escopo_setor ues ON ues.escopo_id = ue.id
+      WHERE ue.usuario_id = sqlc.narg(escopo_usuario_id)
+        AND ue.loja_id = s.loja_id
+        AND (ue.acesso_total_setores OR ues.setor_id = m.setor_id)
+    )
+  )
 ORDER BY m.nome;
 
 -- name: AtualizarMaquina :one
@@ -80,7 +109,8 @@ SET setor_id = $3,
     nome = $7,
     descricao = $8,
     marca = $9,
-    modelo = $10
+    modelo = $10,
+    foto_chave = COALESCE(sqlc.narg('foto_chave'), foto_chave)
 WHERE id = $1 AND tenant_id = $2
 RETURNING *;
 
