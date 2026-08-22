@@ -9,6 +9,10 @@ import (
 )
 
 type Querier interface {
+	// Todos os campos editáveis de uma vez (o front manda o objeto inteiro no PUT).
+	// `ativa` fica de fora: reativar não existe pela API, e desativar tem rota
+	// própria -- ver DesativarEmpresaTerceirizada.
+	AtualizarEmpresaTerceirizada(ctx context.Context, arg AtualizarEmpresaTerceirizadaParams) (EmpresaTerceirizada, error)
 	AtualizarLoja(ctx context.Context, arg AtualizarLojaParams) (Loja, error)
 	// setor_id entra no SET (diferente de AtualizarSetor, que ignora loja_id):
 	// mover uma máquina de setor não arrasta setor/loja de ninguém, só o próprio
@@ -38,6 +42,26 @@ type Querier interface {
 	// se recusa ou se desativa os setores junto, mas precisa saber que existem.
 	ContarSetoresAtivosDaLoja(ctx context.Context, arg ContarSetoresAtivosDaLojaParams) (int64, error)
 	ContarUsuarios(ctx context.Context, arg ContarUsuariosParams) (int64, error)
+	// Empresa terceirizada é a prestadora externa que o TÉCNICO aciona quando
+	// decide não resolver a OS internamente (front-end/CLAUDE.md item 9:
+	// "terceirizar é decisão do Técnico"). Entidade simples: não pende de loja nem
+	// de setor -- é do tenant inteiro, e por isso nenhuma listagem daqui filtra por
+	// escopo, diferente de maquina/preventiva.
+	//
+	// Quem cadastra é o Administrador; quem consome é o Técnico, no
+	// ModalAcionarTerceiro. Escrita só do administrador, leitura dos dois.
+	//
+	// Exclusão é soft delete (ativa = false), como em loja/setor/maquina:
+	// ordem_servico.empresa_terceirizada_id aponta pra cá (fk_os_empresa_terceirizada,
+	// composta por tenant), então apagar de verdade levaria junto o histórico de
+	// quem executou o quê -- e a nota fiscal lançada em cima disso.
+	//
+	// ⚠️ A coluna é `ativa` (feminino), como em loja/maquina/preventiva -- e `ativo`
+	// em usuario/setor.
+	// Nome é único por tenant (uq_empresa_terceirizada_nome): duplicado volta 23505
+	// e vira ErrDadoDuplicado no helper, sem switch em pgErr.Code no service.
+	// especialidade e telefone são opcionais (NULL) -- o front tipa os dois como `?`.
+	CriarEmpresaTerceirizada(ctx context.Context, arg CriarEmpresaTerceirizadaParams) (EmpresaTerceirizada, error)
 	// Escopo de acesso (loja + setor) dos 4 perfis -- ver "3.8 Escopo de acesso
 	// unificado" em docs/modelagem-banco-dados.md:
 	//   Solicitante: 1 escopo, acesso_total_setores = false, exatamente 1 setor.
@@ -68,10 +92,18 @@ type Querier interface {
 	// 000004) e viaja com o mesmo texto que o front manda -- sem resolução
 	// nome->id como em area_tecnico_id.
 	//
-	// foto_chave fica de fora do Criar/Atualizar de propósito: o upload
-	// (bucketR2.UploadFoto) ainda não está wireado em nenhuma rota (ver
-	// back-end/CLAUDE.md, "R2 -- storage de anexos"). Adicionar quando o CRUD
-	// de fato subir a foto na mesma requisição.
+	// foto_chave é a KEY do objeto no R2, nunca uma URL: a leitura é assinada na
+	// hora (bucketR2.URLLeitura, ver back-end/CLAUDE.md "R2 -- storage de
+	// anexos"). Entra em CriarMaquina porque o POST /maquinas sobe a foto na
+	// mesma requisição; NULL quando o cliente não mandou nenhuma.
+	//
+	// Em AtualizarMaquina ela entra como COALESCE($11, foto_chave): sem foto nova
+	// no multipart o valor chega NULL e a antiga fica. É o que a tela de edição
+	// precisa -- o front só sabe *trocar* a foto, não remover (UploadFoto em
+	// CadastrarMaquina.tsx), então NULL ali significa "não mexi", não "apague".
+	// ⚠️ Trocar a foto deixa o objeto antigo órfão no bucket: ninguém apaga do R2.
+	// É lixo barato e sem referência; se incomodar, o caminho é um DELETE do
+	// objeto antigo depois do commit (nunca antes -- a transação pode voltar).
 	//
 	// ⚠️ As duas leituras (ObterMaquinaPorID, ListarMaquinas) trazem setor_nome,
 	// loja_id e loja_nome por JOIN: o tipo Maquina do front exige setorNome e
@@ -133,6 +165,17 @@ type Querier interface {
 	// Roda antes de DeletarEscoposPorUsuario -- não há ON DELETE CASCADE entre
 	// as duas tabelas.
 	DeletarSetoresDosEscoposPorUsuario(ctx context.Context, usuarioID int64) error
+	// :execrows e não :exec, mesmo motivo de DesativarLoja/DesativarMaquina: sem a
+	// contagem de linhas, desativar um id que não existe (ou que é de outro tenant)
+	// responderia sucesso igual a desativar um de verdade. linhas == 0 ->
+	// ErrNaoEncontrado. Já desativada casa a linha e conta 1, então repetir é
+	// idempotente -- e é assim que o front espera.
+	//
+	// Sem cheque de dependente antes, diferente de DesativarLoja (que recusa com
+	// setor ativo): empresa terceirizada não tem filho. Ela é REFERENCIADA por
+	// ordem_servico, mas como o delete é soft a FK nunca reclama, e a OS antiga
+	// continua mostrando quem executou o serviço.
+	DesativarEmpresaTerceirizada(ctx context.Context, arg DesativarEmpresaTerceirizadaParams) (int64, error)
 	// :execrows e não :exec -- sem a contagem de linhas, desativar um id que não
 	// existe (ou que é de outro tenant) responderia igual a desativar um de
 	// verdade. Já desativada conta 1: o UPDATE casa a linha do mesmo jeito.
@@ -169,6 +212,13 @@ type Querier interface {
 	// repository.Usuario, que montarSessao consome inteiro -- virar Row ali
 	// espalharia a mudança por todo o caminho da sessão.
 	EmpresaAtiva(ctx context.Context, id int64) (bool, error)
+	// Só as ativas: a lista alimenta o select do ModalAcionarTerceiro, e oferecer
+	// uma empresa desativada é oferecer o que o Administrador acabou de tirar do ar.
+	//
+	// Sem paginação e sem filtro de propósito -- servicoEmpresasTerceirizadas.listar()
+	// não manda parâmetro nenhum e a tela do Administrador pagina no cliente
+	// (front-end/CLAUDE.md item 12).
+	ListarEmpresasTerceirizadas(ctx context.Context, tenantID int64) ([]EmpresaTerceirizada, error)
 	// Sem paginação nem filtro de busca de propósito: /lojas devolve array simples
 	// e o front pagina/filtra no cliente (front-end/CLAUDE.md item 12). Só
 	// /usuarios e /solicitacoes/minhas paginam no servidor.
@@ -205,6 +255,41 @@ type Querier interface {
 	//
 	// Array simples, sem paginação: o front pagina no cliente (item 12).
 	ListarSetores(ctx context.Context, arg ListarSetoresParams) ([]Setor, error)
+	// GET /tecnicos -- projeção somente-leitura sobre `usuario`, não tabela
+	// própria: técnico é usuário com perfil 'tecnico'. Existe separada de
+	// ListarUsuarios por três motivos, e o primeiro é o que obriga:
+	//
+	//  1. RBAC. /usuarios inteiro é do administrador, e quem precisa desta lista é
+	//     o GESTOR, no select de "Técnico Responsável" do ModalAbrirOrdemServico --
+	//     ele levaria 403 na outra rota.
+	//  2. Forma. O tipo Tecnico do front pede `area` como NOME ("Refrigeração") e
+	//     `lojasIds`; ListarUsuarios não junta area_tecnico e é paginada, enquanto
+	//     o select quer array simples.
+	//  3. Escrita continua em /usuarios (mesma tabela) -- duas superfícies de
+	//     escrita deixariam o mesmo e-mail entrar duas vezes.
+	//
+	// O JOIN com area_tecnico é INNER porque ck_usuario_area_tecnico garante
+	// area_tecnico_id NOT NULL exatamente para o perfil 'tecnico'.
+	//
+	// lojas_ids sai de array_agg com FILTER + COALESCE: técnico sem escopo nenhum
+	// (não deve existir -- o cadastro exige loja) devolveria {NULL} sem o filtro, e
+	// NULL sem o COALESCE. O cast final é o que faz o sqlc gerar []int64 em vez de
+	// interface{} -- mesma armadilha do `vencida` em preventiva.sql.
+	//
+	// Os dois filtros são EXISTS e não JOIN, mesmo motivo de ListarUsuarios: com
+	// JOIN o técnico apareceria uma vez por escopo que casa.
+	//   loja_id           -- a loja da solicitação, mandada pelo modal do gestor.
+	//   escopo_usuario_id -- quem chama (NULL = administrador, não filtra). Sem
+	//                        isto um gestor lista nome e e-mail dos técnicos de
+	//                        lojas que ele não enxerga.
+	//
+	// ⚠️ Os dois filtros vivem no MESMO EXISTS, sobre a mesma linha de
+	// usuario_escopo, e isso é o ponto: separados, eles pediriam "atende a loja X"
+	// E "divide alguma loja comigo" -- que não é a mesma coisa. Um gestor da Loja A
+	// pedindo ?lojaId=B receberia o técnico que atende A e B, porque cada condição
+	// passava por uma loja diferente. Tem que ser a mesma loja ligando os dois.
+	// (Foi assim que a primeira versão saiu; o teste de integração pegou.)
+	ListarTecnicos(ctx context.Context, arg ListarTecnicosParams) ([]ListarTecnicosRow, error)
 	// Filtros combináveis: perfil, busca (nome/email) e loja_id são opcionais --
 	// passe NULL para não filtrar por eles. Paginação por LIMIT/OFFSET, contagem
 	// total em ContarUsuarios (RespostaPaginada exige os dois).
@@ -224,6 +309,10 @@ type Querier interface {
 	// loja tem exatamente uma linha -- a do próprio tenant autenticado.
 	ObterEmpresaPorID(ctx context.Context, id int64) (ObterEmpresaPorIDRow, error)
 	ObterEmpresaPorSubdominio(ctx context.Context, subdominio string) (ObterEmpresaPorSubdominioRow, error)
+	// Sem filtro de `ativa`, igual a ObterLojaPorID/ObterMaquinaPorID: a tela de
+	// edição precisa ler o registro para preencher o formulário mesmo desativado.
+	// Quem decide o que fazer com uma empresa inativa é o service.
+	ObterEmpresaTerceirizadaPorID(ctx context.Context, arg ObterEmpresaTerceirizadaPorIDParams) (EmpresaTerceirizada, error)
 	// Formato que o front consome direto em EscopoAcessoGestor[] (login/sessão):
 	// um escopo por loja, com a lista de setor_id (vazia quando acesso_total_setores).
 	ObterEscopoSessaoPorUsuario(ctx context.Context, usuarioID int64) ([]ObterEscopoSessaoPorUsuarioRow, error)

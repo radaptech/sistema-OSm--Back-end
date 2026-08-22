@@ -94,3 +94,76 @@ WHERE id = $1 AND tenant_id = $2;
 UPDATE usuario
 SET ativo = false
 WHERE id = $1 AND tenant_id = $2;
+
+-- name: ListarTecnicos :many
+-- GET /tecnicos -- projeção somente-leitura sobre `usuario`, não tabela
+-- própria: técnico é usuário com perfil 'tecnico'. Existe separada de
+-- ListarUsuarios por três motivos, e o primeiro é o que obriga:
+--
+--  1. RBAC. /usuarios inteiro é do administrador, e quem precisa desta lista é
+--     o GESTOR, no select de "Técnico Responsável" do ModalAbrirOrdemServico --
+--     ele levaria 403 na outra rota.
+--  2. Forma. O tipo Tecnico do front pede `area` como NOME ("Refrigeração") e
+--     `lojasIds`; ListarUsuarios não junta area_tecnico e é paginada, enquanto
+--     o select quer array simples.
+--  3. Escrita continua em /usuarios (mesma tabela) -- duas superfícies de
+--     escrita deixariam o mesmo e-mail entrar duas vezes.
+--
+-- O JOIN com area_tecnico é INNER porque ck_usuario_area_tecnico garante
+-- area_tecnico_id NOT NULL exatamente para o perfil 'tecnico'.
+--
+-- lojas_ids sai de array_agg com FILTER + COALESCE: técnico sem escopo nenhum
+-- (não deve existir -- o cadastro exige loja) devolveria {NULL} sem o filtro, e
+-- NULL sem o COALESCE. O cast final é o que faz o sqlc gerar []int64 em vez de
+-- interface{} -- mesma armadilha do `vencida` em preventiva.sql.
+--
+-- Os dois filtros são EXISTS e não JOIN, mesmo motivo de ListarUsuarios: com
+-- JOIN o técnico apareceria uma vez por escopo que casa.
+--   loja_id           -- a loja da solicitação, mandada pelo modal do gestor.
+--   escopo_usuario_id -- quem chama (NULL = administrador, não filtra). Sem
+--                        isto um gestor lista nome e e-mail dos técnicos de
+--                        lojas que ele não enxerga.
+--
+-- ⚠️ Os dois filtros vivem no MESMO EXISTS, sobre a mesma linha de
+-- usuario_escopo, e isso é o ponto: separados, eles pediriam "atende a loja X"
+-- E "divide alguma loja comigo" -- que não é a mesma coisa. Um gestor da Loja A
+-- pedindo ?lojaId=B receberia o técnico que atende A e B, porque cada condição
+-- passava por uma loja diferente. Tem que ser a mesma loja ligando os dois.
+-- (Foi assim que a primeira versão saiu; o teste de integração pegou.)
+SELECT
+    u.id,
+    u.nome,
+    u.email,
+    u.telefone,
+    a.nome AS area,
+    COALESCE(
+        array_agg(ue.loja_id) FILTER (WHERE ue.loja_id IS NOT NULL),
+        '{}'
+    )::bigint[] AS lojas_ids
+FROM usuario u
+JOIN area_tecnico a
+  ON a.tenant_id = u.tenant_id AND a.id = u.area_tecnico_id
+LEFT JOIN usuario_escopo ue
+  ON ue.usuario_id = u.id
+WHERE u.tenant_id = $1
+  AND u.perfil = 'tecnico'
+  AND u.ativo
+  AND (
+    (sqlc.narg(loja_id)::bigint IS NULL AND sqlc.narg(escopo_usuario_id)::bigint IS NULL)
+    OR EXISTS (
+      SELECT 1
+      FROM usuario_escopo t
+      WHERE t.usuario_id = u.id
+        AND (sqlc.narg(loja_id)::bigint IS NULL OR t.loja_id = sqlc.narg(loja_id))
+        AND (
+          sqlc.narg(escopo_usuario_id)::bigint IS NULL
+          OR EXISTS (
+            SELECT 1 FROM usuario_escopo c
+            WHERE c.usuario_id = sqlc.narg(escopo_usuario_id)
+              AND c.loja_id = t.loja_id
+          )
+        )
+    )
+  )
+GROUP BY u.id, u.nome, u.email, u.telefone, a.nome
+ORDER BY u.nome;
