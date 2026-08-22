@@ -111,6 +111,18 @@ func GetTenantIDToken(c *gin.Context) (int64, bool) {
 	return id, ok
 }
 
+// GetUserPerfil devolve o perfil do claim homônimo. É o que decide se uma
+// listagem filtra por escopo: administrador não tem escopo nenhum, os outros
+// perfis só enxergam o que usuario_escopo alcança.
+func GetUserPerfil(c *gin.Context) (string, bool) {
+	val, exists := c.Get(UserPerfil)
+	if !exists {
+		return "", false
+	}
+	perfil, ok := val.(string)
+	return perfil, ok
+}
+
 // GetUserID devolve o usuario.id do claim `sub`.
 func GetUserID(c *gin.Context) (int64, bool) {
 	val, exists := c.Get(UserId)
