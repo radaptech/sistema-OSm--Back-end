@@ -17,8 +17,18 @@ import (
 // serviceFake devolve sempre o mesmo erro -- é o único eixo que o teste varia.
 type serviceFake struct {
 	err        error
-	recebido   *filtrosRecebidos // opcional: só ListarUsuarios grava aqui
-	desativado *[2]int64         // opcional: {id alvo, ator} de DesativarUsuario
+	recebido   *filtrosRecebidos  // opcional: só ListarUsuarios grava aqui
+	desativado *[2]int64          // opcional: {id alvo, ator} de DesativarUsuario
+	tecnicos   *tecnicosRecebidos // opcional: só ListarTecnicos grava aqui
+}
+
+// ListarTecnicos filtra por loja E pelo escopo de quem chama -- os dois vêm de
+// lugares diferentes (query string e token) e nenhum dos dois muda o status se
+// vier errado, então o fake grava os três valores.
+type tecnicosRecebidos struct {
+	lojaId    *int64
+	usuarioId int64
+	perfil    string
 }
 
 const tokenFake = "jwt.de.mentira"
@@ -557,4 +567,95 @@ func TestObterMapeiaErroParaStatus(t *testing.T) {
 			}
 		})
 	}
+}
+
+func (s serviceFake) ListarTecnicos(_ context.Context, _, usuarioId int64, perfil string, lojaId *int64) ([]model.Tecnico, error) {
+	if s.tecnicos != nil {
+		*s.tecnicos = tecnicosRecebidos{lojaId: lojaId, usuarioId: usuarioId, perfil: perfil}
+	}
+	if s.err != nil {
+		return nil, s.err
+	}
+	return []model.Tecnico{}, nil
+}
+
+// GET /tecnicos alimenta o select de Técnico Responsável do Gestor. O ?lojaId=
+// é a loja da solicitação; o ator sai do token e recorta o escopo.
+func TestListarTecnicos(t *testing.T) {
+
+	gin.SetMode(gin.TestMode)
+
+	requisicao := func(query string) (*httptest.ResponseRecorder, *gin.Context) {
+		w := httptest.NewRecorder()
+		ctx, _ := gin.CreateTestContext(w)
+		ctx.Request = httptest.NewRequest(http.MethodGet, "/tecnicos"+query, nil)
+		ctx.Set(middleware.UserTenantId, int64(7))
+		ctx.Set(middleware.UserId, int64(42))
+		ctx.Set(middleware.UserPerfil, "gestor")
+		return w, ctx
+	}
+
+	t.Run("sem filtro chega nil e o ator vem do token", func(t *testing.T) {
+		var recebido tecnicosRecebidos
+		w, ctx := requisicao("")
+		NewLoginController(serviceFake{tecnicos: &recebido}).ListarTecnicos()(ctx)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("status = %d", w.Code)
+		}
+		if recebido.lojaId != nil {
+			t.Errorf("lojaId = %v, esperado nil", *recebido.lojaId)
+		}
+		if recebido.usuarioId != 42 || recebido.perfil != "gestor" {
+			t.Errorf("ator = %d/%s, esperado 42/gestor", recebido.usuarioId, recebido.perfil)
+		}
+	})
+
+	t.Run("lojaId válido chega no service", func(t *testing.T) {
+		var recebido tecnicosRecebidos
+		w, ctx := requisicao("?lojaId=3")
+		NewLoginController(serviceFake{tecnicos: &recebido}).ListarTecnicos()(ctx)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("status = %d", w.Code)
+		}
+		if recebido.lojaId == nil || *recebido.lojaId != 3 {
+			t.Fatalf("lojaId = %v, esperado 3", recebido.lojaId)
+		}
+	})
+
+	t.Run("lojaId inválido é 400 e não vai ao banco", func(t *testing.T) {
+		for _, ruim := range []string{"abc", "0", "-1"} {
+			var recebido tecnicosRecebidos
+			w, ctx := requisicao("?lojaId=" + ruim)
+			NewLoginController(serviceFake{tecnicos: &recebido}).ListarTecnicos()(ctx)
+
+			if w.Code != http.StatusBadRequest {
+				t.Errorf("lojaId=%s: status = %d, esperado 400", ruim, w.Code)
+			}
+			if recebido.perfil != "" {
+				t.Errorf("lojaId=%s chegou no service", ruim)
+			}
+		}
+	})
+
+	// Lista vazia tem que sair como [] e não null: o front tipa Tecnico[] e o
+	// select faz .map direto.
+	t.Run("lista vazia sai como array", func(t *testing.T) {
+		w, ctx := requisicao("")
+		NewLoginController(serviceFake{}).ListarTecnicos()(ctx)
+
+		if corpo := strings.TrimSpace(w.Body.String()); corpo != "[]" {
+			t.Errorf("corpo = %s, esperado []", corpo)
+		}
+	})
+
+	t.Run("erro do service é 500", func(t *testing.T) {
+		w, ctx := requisicao("")
+		NewLoginController(serviceFake{err: fmt.Errorf("conexão recusada")}).ListarTecnicos()(ctx)
+
+		if w.Code != http.StatusInternalServerError {
+			t.Fatalf("status = %d, esperado 500", w.Code)
+		}
+	})
 }

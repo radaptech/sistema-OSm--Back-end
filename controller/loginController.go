@@ -19,6 +19,7 @@ type LoginServiceInterface interface {
 	Login(ctx context.Context, loginModel model.Login, tenantId int64) (string, model.SessaoUsuario, error)
 	ObterSessao(ctx context.Context, userId, tenantId int64) (model.SessaoUsuario, error)
 	ListarUsuarios(ctx context.Context, tenantId int64, pagina int32, perfil, busca *string, lojaId *int64) (model.RespostaPaginada[model.Usuario], error)
+	ListarTecnicos(ctx context.Context, tenantId, usuarioId int64, perfil string, lojaId *int64) ([]model.Tecnico, error)
 	ObterUsuario(ctx context.Context, id, tenantId int64) (model.Usuario, error)
 	AtualizarUsuario(ctx context.Context, id int64, payload model.AtualizarUsuarioPayload, tenantId int64) (model.Usuario, error)
 	DesativarUsuario(ctx context.Context, id, tenantId, atorId int64) error
@@ -253,18 +254,6 @@ func (l *LoginController) ListarUsuarios() gin.HandlerFunc {
 	}
 }
 
-// idDaRota lê o :id da URL. Erro aqui é 400 e não 404 de propósito: "/abc" não
-// é um id que não existe, é um id malformado -- quem não distingue os dois
-// acaba respondendo 404 pra bug de cliente.
-func idDaRota(ctx *gin.Context) (int64, bool) {
-	id, err := strconv.ParseInt(ctx.Param("id"), 10, 64)
-	if err != nil || id < 1 {
-		ctx.JSON(http.StatusBadRequest, gin.H{"error": helper.ErrId.Error()})
-		return 0, false
-	}
-	return id, true
-}
-
 // Atualizar é PUT /usuarios/:id. Mesmo payload de Registrar com a senha
 // opcional, então o mapa de erro é o mesmo -- inclusive ErrNaoEncontrado em
 // 422, que aqui cobre tanto o usuário quanto a área técnica citada no corpo.
@@ -392,5 +381,49 @@ func (l *LoginController) Obter() gin.HandlerFunc {
 		}
 
 		ctx.JSON(http.StatusOK, user)
+	}
+}
+
+// ListarTecnicos é GET /tecnicos -- projeção somente-leitura sobre `usuario`,
+// não um CRUD: criar, editar e excluir técnico é /usuarios com perfil
+// 'tecnico' (mesma tabela; duas superfícies de escrita deixariam o mesmo
+// e-mail entrar duas vezes).
+//
+// Mora neste controller, e não num TecnicoController, pelo mesmo motivo de
+// GET /empresas morar no de loja: é uma leitura só, sobre uma tabela que este
+// controller já serve.
+//
+// Quem consome é o select de "Técnico Responsável" do Gestor
+// (ModalAbrirOrdemServico), que manda ?lojaId= com a loja da solicitação --
+// não adianta oferecer técnico que não atende aquela loja. O escopo de quem
+// chama entra por cima disso, no WHERE.
+func (l *LoginController) ListarTecnicos() gin.HandlerFunc {
+
+	return func(ctx *gin.Context) {
+
+		tenantId, ok := tenantDaRota(ctx)
+		if !ok {
+			return
+		}
+
+		lojaId, ok := idDeQuery(ctx, "lojaId")
+		if !ok {
+			return
+		}
+
+		usuarioId, perfil, ok := atorDaRota(ctx)
+		if !ok {
+			return
+		}
+
+		tecnicos, err := l.service.ListarTecnicos(ctx.Request.Context(), tenantId, usuarioId, perfil, lojaId)
+		if err != nil {
+
+			log.Printf("listar tecnicos tenant=%d: %v", tenantId, err)
+			ctx.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao listar técnicos"})
+			return
+		}
+
+		ctx.JSON(http.StatusOK, tecnicos)
 	}
 }

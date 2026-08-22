@@ -122,9 +122,6 @@ func TestLogin(t *testing.T) {
 			t.Fatalf("erro ao criar setor: %v", err)
 		}
 	}
-	if _, err := pool.Exec(ctx, `INSERT INTO area_tecnico (tenant_id, nome) VALUES ($1, 'Elétrica')`, tenantID); err != nil {
-		t.Fatalf("erro ao criar área técnica: %v", err)
-	}
 
 	area := "Elétrica"
 	senha := "senha-forte-123"
@@ -334,9 +331,6 @@ func TestListarUsuarios(t *testing.T) {
 	if err := pool.QueryRow(ctx, `INSERT INTO setor (tenant_id, loja_id, nome) VALUES ($1, $2, 'Padaria') RETURNING id`, tenantID, lojaA).Scan(&setorA); err != nil {
 		t.Fatalf("erro ao criar setor: %v", err)
 	}
-	if _, err := pool.Exec(ctx, `INSERT INTO area_tecnico (tenant_id, nome) VALUES ($1, 'Elétrica')`, tenantID); err != nil {
-		t.Fatalf("erro ao criar área técnica: %v", err)
-	}
 
 	area := "Elétrica"
 	cadastrar := func(nome, email, perfil string, p model.NovoUsuarioPayload) {
@@ -464,9 +458,6 @@ func TestAtualizarEDesativarUsuario(t *testing.T) {
 		if err := pool.QueryRow(ctx, `INSERT INTO setor (tenant_id, loja_id, nome) VALUES ($1, $2, $3) RETURNING id`, tenantID, s.loja, s.nome).Scan(s.dest); err != nil {
 			t.Fatalf("erro ao criar setor: %v", err)
 		}
-	}
-	if _, err := pool.Exec(ctx, `INSERT INTO area_tecnico (tenant_id, nome) VALUES ($1, 'Elétrica'), ($1, 'Mecânica')`, tenantID); err != nil {
-		t.Fatalf("erro ao criar área técnica: %v", err)
 	}
 
 	area := "Elétrica"
