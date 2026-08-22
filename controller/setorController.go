@@ -5,7 +5,6 @@ import (
 	"errors"
 	"log"
 	"net/http"
-	"strconv"
 
 	"github.com/gin-gonic/gin"
 	"github.com/radaptech/sistema-OSm--Back-end/internal/helper"
@@ -31,21 +30,6 @@ func NewSetorController(service SetorServiceInterface) *SetorController {
 	}
 }
 
-// corpoSetor lê e valida o corpo de POST/PUT. No PUT o lojaId vem junto (o
-// front manda o mesmo objeto nos dois) mas o service ignora: setor não muda
-// de loja -- ver model.NovoSetorPayload.
-func corpoSetor(ctx *gin.Context) (model.NovoSetorPayload, bool) {
-	var input model.NovoSetorPayload
-	if err := ctx.ShouldBindJSON(&input); err != nil {
-		ctx.JSON(http.StatusBadRequest, gin.H{
-			"error":    "dados invalidos",
-			"detalhes": err.Error(),
-		})
-		return model.NovoSetorPayload{}, false
-	}
-	return input, true
-}
-
 // Cadastrar é POST /setores.
 //
 // O 422 aqui é o caso "loja inexistente, de outro tenant ou desativada": o
@@ -55,7 +39,7 @@ func (s *SetorController) Cadastrar() gin.HandlerFunc {
 
 	return func(ctx *gin.Context) {
 
-		input, ok := corpoSetor(ctx)
+		input, ok := corpoJSON[model.NovoSetorPayload](ctx)
 		if !ok {
 			return
 		}
@@ -131,14 +115,9 @@ func (s *SetorController) Listar() gin.HandlerFunc {
 			return
 		}
 
-		var lojaId *int64
-		if bruto := ctx.Query("lojaId"); bruto != "" {
-			n, err := strconv.ParseInt(bruto, 10, 64)
-			if err != nil || n < 1 {
-				ctx.JSON(http.StatusBadRequest, gin.H{"error": "lojaId inválido"})
-				return
-			}
-			lojaId = &n
+		lojaId, ok := idDeQuery(ctx, "lojaId")
+		if !ok {
+			return
 		}
 
 		setores, err := s.service.ListarSetores(ctx.Request.Context(), tenantId, lojaId)
@@ -162,7 +141,7 @@ func (s *SetorController) Atualizar() gin.HandlerFunc {
 			return
 		}
 
-		input, okCorpo := corpoSetor(ctx)
+		input, okCorpo := corpoJSON[model.NovoSetorPayload](ctx)
 		if !okCorpo {
 			return
 		}
