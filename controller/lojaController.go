@@ -9,7 +9,6 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/radaptech/sistema-OSm--Back-end/internal/helper"
 	"github.com/radaptech/sistema-OSm--Back-end/internal/model"
-	"github.com/radaptech/sistema-OSm--Back-end/middleware"
 )
 
 // A interface existe pelo mesmo motivo de LoginServiceInterface: LojaService
@@ -35,40 +34,12 @@ func NewLojaController(service LojaServiceInterface) *LojaController {
 	}
 }
 
-// tenantDaRota é o tenant do token -- todas as rotas de loja são autenticadas.
-// Ler o header X-tenant-ID aqui deixaria um administrador do tenant A cadastrar
-// loja no tenant B só trocando o header; o único endpoint que lê o header é o
-// login, antes de existir token.
-func tenantDaRota(ctx *gin.Context) (int64, bool) {
-	tenantId, ok := middleware.GetTenantIDToken(ctx)
-	if !ok {
-		ctx.JSON(http.StatusInternalServerError, gin.H{"error": "erro interno de tenant"})
-		return 0, false
-	}
-	return tenantId, true
-}
-
-// corpoLoja lê e valida o corpo de POST/PUT. Extra no JSON é ignorado pelo
-// binding -- inclusive o empresaId que o front manda hoje e que não tem coluna
-// onde cair (ver model.Loja).
-func corpoLoja(ctx *gin.Context) (model.NovaLojaPayload, bool) {
-	var input model.NovaLojaPayload
-	if err := ctx.ShouldBindJSON(&input); err != nil {
-		ctx.JSON(http.StatusBadRequest, gin.H{
-			"error":    "dados invalidos",
-			"detalhes": err.Error(),
-		})
-		return model.NovaLojaPayload{}, false
-	}
-	return input, true
-}
-
 // Cadastrar é POST /lojas.
 func (l *LojaController) Cadastrar() gin.HandlerFunc {
 
 	return func(ctx *gin.Context) {
 
-		input, ok := corpoLoja(ctx)
+		input, ok := corpoJSON[model.NovaLojaPayload](ctx)
 		if !ok {
 			return
 		}
@@ -168,7 +139,7 @@ func (l *LojaController) Atualizar() gin.HandlerFunc {
 			return
 		}
 
-		input, okCorpo := corpoLoja(ctx)
+		input, okCorpo := corpoJSON[model.NovaLojaPayload](ctx)
 		if !okCorpo {
 			return
 		}

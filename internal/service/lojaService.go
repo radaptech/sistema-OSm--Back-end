@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -34,18 +33,6 @@ func montarLoja(l repository.Loja) model.Loja {
 		EmpresaId: l.TenantID,
 		Ativa:     l.Ativa,
 	}
-}
-
-// nomeValido apara espaços e recusa o que sobrar vazio. O banco não tem CHECK
-// de nome não-vazio, e binding:"required" do Gin passa numa string de espaços
-// -- sem isto entra loja com nome em branco, que ninguém consegue selecionar
-// depois num select.
-func nomeValido(nome string) (string, error) {
-	limpo := strings.TrimSpace(nome)
-	if limpo == "" {
-		return "", fmt.Errorf("%w: nome é obrigatório", helper.ErrValidacao)
-	}
-	return limpo, nil
 }
 
 // CadastrarLoja é POST /lojas. Nome é único por tenant

@@ -271,6 +271,42 @@ func (s *UsuarioService) ListarUsuarios(ctx context.Context, tenantId int64, pag
 //
 // Senha é opcional: omitida, o hash atual fica de pé. Ela tem query própria
 // porque AtualizarUsuario não toca em senha_hash.
+// ListarTecnicos é GET /tecnicos -- a projeção somente-leitura que alimenta o
+// select de "Técnico Responsável" do Gestor. Ver database/queries/usuario.sql
+// para o porquê de não ser ListarUsuarios(perfil='tecnico').
+//
+// lojaId é o filtro que o modal manda (a loja da solicitação); usuarioId/perfil
+// são de quem chama e resolvem o escopo -- um gestor não lista os técnicos de
+// lojas que ele não enxerga. Mesmo escopoDe() de /maquinas e /preventivas.
+func (s *UsuarioService) ListarTecnicos(ctx context.Context, tenantId, usuarioId int64, perfil string, lojaId *int64) ([]model.Tecnico, error) {
+
+	repo := repository.New(s.Pool)
+
+	tecnicos, err := repo.ListarTecnicos(ctx, repository.ListarTecnicosParams{
+		TenantID:        tenantId,
+		LojaID:          lojaId,
+		EscopoUsuarioID: escopoDe(usuarioId, perfil),
+	})
+	if err != nil {
+		return nil, helper.TraduzErroPostgres(err)
+	}
+
+	// Não-nil: o front tipa Tecnico[] e null quebraria o .map do select.
+	dto := make([]model.Tecnico, 0, len(tecnicos))
+	for _, t := range tecnicos {
+		dto = append(dto, model.Tecnico{
+			Id:       t.ID,
+			Nome:     t.Nome,
+			Email:    t.Email,
+			Telefone: t.Telefone,
+			Area:     t.Area,
+			LojasIds: t.LojasIds,
+		})
+	}
+
+	return dto, nil
+}
+
 func (s *UsuarioService) AtualizarUsuario(ctx context.Context, id int64, payload model.AtualizarUsuarioPayload, tenantId int64) (model.Usuario, error) {
 
 	// Os dois payloads só diferem na senha; toda a validação de escopo é
