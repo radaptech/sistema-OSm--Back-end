@@ -52,3 +52,22 @@ type Usuario struct {
 	AcessoTotalSetores bool    `json:"acessoTotalSetores"`
 	Ativo              bool    `json:"ativo"`
 }
+
+// Tecnico é o corpo de GET /tecnicos -- espelha Tecnico no front
+// (src/tipos/tecnico.ts). É projeção sobre `usuario`, não entidade própria:
+// escrever técnico é POST/PUT /usuarios com perfil 'tecnico' (mesma tabela).
+//
+// Area é o NOME ("Refrigeração"), não o id: é o que o front exibe ao lado do
+// nome no select de Técnico Responsável ("Roberto Alves — Refrigeração"). O
+// caminho inverso (nome -> id, na escrita) é o resolverAreaTecnico.
+//
+// Sem Ativo: a listagem já filtra `ativo`, e técnico desativado não pode ser
+// escolhido para uma OS nova -- devolver o campo só criaria a dúvida.
+type Tecnico struct {
+	Id       int64   `json:"id"`
+	Nome     string  `json:"nome"`
+	Email    string  `json:"email"`
+	Telefone *string `json:"telefone,omitempty"`
+	Area     string  `json:"area"`
+	LojasIds []int64 `json:"lojasIds"`
+}

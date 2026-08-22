@@ -184,6 +184,123 @@ func (q *Queries) DesativarUsuario(ctx context.Context, arg DesativarUsuarioPara
 	return result.RowsAffected(), nil
 }
 
+const listarTecnicos = `-- name: ListarTecnicos :many
+SELECT
+    u.id,
+    u.nome,
+    u.email,
+    u.telefone,
+    a.nome AS area,
+    COALESCE(
+        array_agg(ue.loja_id) FILTER (WHERE ue.loja_id IS NOT NULL),
+        '{}'
+    )::bigint[] AS lojas_ids
+FROM usuario u
+JOIN area_tecnico a
+  ON a.tenant_id = u.tenant_id AND a.id = u.area_tecnico_id
+LEFT JOIN usuario_escopo ue
+  ON ue.usuario_id = u.id
+WHERE u.tenant_id = $1
+  AND u.perfil = 'tecnico'
+  AND u.ativo
+  AND (
+    ($2::bigint IS NULL AND $3::bigint IS NULL)
+    OR EXISTS (
+      SELECT 1
+      FROM usuario_escopo t
+      WHERE t.usuario_id = u.id
+        AND ($2::bigint IS NULL OR t.loja_id = $2)
+        AND (
+          $3::bigint IS NULL
+          OR EXISTS (
+            SELECT 1 FROM usuario_escopo c
+            WHERE c.usuario_id = $3
+              AND c.loja_id = t.loja_id
+          )
+        )
+    )
+  )
+GROUP BY u.id, u.nome, u.email, u.telefone, a.nome
+ORDER BY u.nome
+`
+
+type ListarTecnicosParams struct {
+	TenantID        int64
+	LojaID          *int64
+	EscopoUsuarioID *int64
+}
+
+type ListarTecnicosRow struct {
+	ID       int64
+	Nome     string
+	Email    string
+	Telefone *string
+	Area     string
+	LojasIds []int64
+}
+
+// GET /tecnicos -- projeção somente-leitura sobre `usuario`, não tabela
+// própria: técnico é usuário com perfil 'tecnico'. Existe separada de
+// ListarUsuarios por três motivos, e o primeiro é o que obriga:
+//
+//  1. RBAC. /usuarios inteiro é do administrador, e quem precisa desta lista é
+//     o GESTOR, no select de "Técnico Responsável" do ModalAbrirOrdemServico --
+//     ele levaria 403 na outra rota.
+//  2. Forma. O tipo Tecnico do front pede `area` como NOME ("Refrigeração") e
+//     `lojasIds`; ListarUsuarios não junta area_tecnico e é paginada, enquanto
+//     o select quer array simples.
+//  3. Escrita continua em /usuarios (mesma tabela) -- duas superfícies de
+//     escrita deixariam o mesmo e-mail entrar duas vezes.
+//
+// O JOIN com area_tecnico é INNER porque ck_usuario_area_tecnico garante
+// area_tecnico_id NOT NULL exatamente para o perfil 'tecnico'.
+//
+// lojas_ids sai de array_agg com FILTER + COALESCE: técnico sem escopo nenhum
+// (não deve existir -- o cadastro exige loja) devolveria {NULL} sem o filtro, e
+// NULL sem o COALESCE. O cast final é o que faz o sqlc gerar []int64 em vez de
+// interface{} -- mesma armadilha do `vencida` em preventiva.sql.
+//
+// Os dois filtros são EXISTS e não JOIN, mesmo motivo de ListarUsuarios: com
+// JOIN o técnico apareceria uma vez por escopo que casa.
+//
+//	loja_id           -- a loja da solicitação, mandada pelo modal do gestor.
+//	escopo_usuario_id -- quem chama (NULL = administrador, não filtra). Sem
+//	                     isto um gestor lista nome e e-mail dos técnicos de
+//	                     lojas que ele não enxerga.
+//
+// ⚠️ Os dois filtros vivem no MESMO EXISTS, sobre a mesma linha de
+// usuario_escopo, e isso é o ponto: separados, eles pediriam "atende a loja X"
+// E "divide alguma loja comigo" -- que não é a mesma coisa. Um gestor da Loja A
+// pedindo ?lojaId=B receberia o técnico que atende A e B, porque cada condição
+// passava por uma loja diferente. Tem que ser a mesma loja ligando os dois.
+// (Foi assim que a primeira versão saiu; o teste de integração pegou.)
+func (q *Queries) ListarTecnicos(ctx context.Context, arg ListarTecnicosParams) ([]ListarTecnicosRow, error) {
+	rows, err := q.db.Query(ctx, listarTecnicos, arg.TenantID, arg.LojaID, arg.EscopoUsuarioID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListarTecnicosRow
+	for rows.Next() {
+		var i ListarTecnicosRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Nome,
+			&i.Email,
+			&i.Telefone,
+			&i.Area,
+			&i.LojasIds,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listarUsuarios = `-- name: ListarUsuarios :many
 SELECT id, tenant_id, perfil, area_tecnico_id, nome, email, senha_hash, telefone, ativo, ultimo_acesso, criado_em FROM usuario
 WHERE tenant_id = $1
