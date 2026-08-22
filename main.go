@@ -1,11 +1,13 @@
 package main
 
 import (
+	"context"
 	"log"
 	"os"
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"github.com/radaptech/sistema-OSm--Back-end/bucketR2"
 	"github.com/radaptech/sistema-OSm--Back-end/config"
 	r "github.com/radaptech/sistema-OSm--Back-end/internal/router"
 	"github.com/radaptech/sistema-OSm--Back-end/middleware"
@@ -33,6 +35,9 @@ func main() {
 
 		log.Fatal(err)
 	}
+
+	ctx := context.Background()
+	bucketr2.InitR2_cloudflare(ctx)
 
 	if err := router.SetTrustedProxies(proxiesConfiaveis()); err != nil {
 

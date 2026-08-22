@@ -64,7 +64,8 @@ que o front espera (camelCase, datas `dd/mm/yyyy HH:MM:SS`, ver `config/dataBr.g
 - `middleware/` — `middJwt.go` (`AutenticacaoJwt`, lê cookie `token` ou
   `Authorization: Bearer`, valida e injeta `userId`/`user_perfil`/`user_TenantId` no
   contexto do Gin — falha fechada: claim ausente/malformada aborta com 401; as chaves
-  são as consts `UserId`/`UserPerfil`/`UserTenantId`, e `GetUserID`/`GetTenantIDToken`
+  são as consts `UserId`/`UserPerfil`/`UserTenantId`, e
+  `GetUserID`/`GetUserPerfil`/`GetTenantIDToken`
   leem tipado), `tenantId.go` (`TenantMiddleware` resolve o header `X-tenant-ID` em
   `empresa.id` via `ObterEmpresaPorSubdominio` e guarda na chave `TenantId`;
   `GetTenantID` lê — **só o login usa**, ver "Autenticação"), `perfil.go`
@@ -138,6 +139,16 @@ que o front espera (camelCase, datas `dd/mm/yyyy HH:MM:SS`, ver `config/dataBr.g
     front — `acessoTotalSetores` só é `true` quando **todos** os escopos são totais,
     senão o front marcaria o alternador e apagaria os setores da loja parcial no próximo
     save).
+  - `empresaTerceirizadaService.go` — CRUD da prestadora externa que o Técnico aciona.
+    O mais raso do pacote: sem transação (uma tabela, sem filho pra gravar junto), sem
+    escopo de acesso (não pende de loja/setor) e sem recusa por dependente no
+    `Desativar` (não tem filho; a OS que já a acionou continua apontando pra linha,
+    porque o delete é soft).
+    ⚠️ **Especialidade e telefone passam por `textoOuNil`, não por `nomeValido`**: os dois
+    são opcionais, e o formulário do front manda string vazia no campo que ninguém tocou.
+    Com `nomeValido` o cadastro inteiro passaria a exigir especialidade, com a mensagem
+    falando em "nome"; sem normalizar, o banco guarda `""` numa coluna nullable e o campo
+    volta presente e vazio (o `omitempty` não pega ponteiro para string vazia).
   - `lojaService.go` — CRUD de loja + `ListarEmpresas`. `nomeValido` (apara e recusa
     vazio; `binding:"required"` passa numa string de espaços e não há CHECK no banco) é
     compartilhado com setor. **`DesativarLoja` recusa enquanto houver setor ativo**, e a
@@ -158,6 +169,8 @@ que o front espera (camelCase, datas `dd/mm/yyyy HH:MM:SS`, ver `config/dataBr.g
     na mesma forma do `GET`, porque o front consome POST, PUT e GET pelo mesmo tipo
     `Maquina`. `AtualizarMaquina` **muda** `setor_id` (diferente de `AtualizarSetor`, que
     ignora `loja_id`): mover máquina de setor não arrasta o histórico de mais ninguém.
+    `ListarMaquinario` recebe `usuarioId`/`perfil` além do tenant e recorta pelo escopo
+    de quem chama — ver "Escopo no `WHERE`" em "Queries e repository".
   - `preventivaService.go` — CRUD de preventiva **mais** `gravarPreventivas`, função livre
     que recebe `*repository.Queries` (não o Pool) exatamente para
     `CadastrarMaquina`/`AtualizarMaquina` a chamarem de dentro da transação que já
@@ -175,16 +188,44 @@ que o front espera (camelCase, datas `dd/mm/yyyy HH:MM:SS`, ver `config/dataBr.g
   O cookie de sessão sai só de `cookieSessao(ctx, token, maxAge)` — login e logout
   passam pela mesma função porque o `Set-Cookie` de remoção só apaga se casar com o de
   criação (nome, path, `Secure`, `SameSite`). Mais `Obter`/`ListarUsuarios`/
-  `Atualizar`/`Desativar`, e os helpers de pacote `idDaRota` (`:id` malformado é **400**,
-  não 404 — `/abc` não é um id que não existe, é bug de cliente) e `tenantDaRota`.
-  `lojaController.go` e `setorController.go` seguem o mesmo molde (interface própria +
-  `corpoLoja`/`corpoSetor`).
+  `Atualizar`/`Desativar`.
+  `lojaController.go`, `setorController.go`, `maquinasController.go` e
+  `preventivaController.go` seguem o mesmo molde (uma interface própria por service,
+  pro fake do teste).
   **Mapa de erro → status**: `ErrValidacao` 400, `ErrDadoDuplicado` 409,
   `ErrConflitoIntegridade` 422, resto 500 **com o erro cru só no `log`**.
   `ErrNaoEncontrado` é **404 quando o `:id` da rota é a única coisa que pode faltar**
   (loja, setor, `GET`/`DELETE /usuarios/:id`) e **422 em `POST`/`PUT /usuarios`**, onde o
   mesmo sentinela também cobre "área técnica citada no corpo não existe" e `errors.Is`
   não distingue os dois.
+- `internal/service/helpers.go` — o que mais de um service usa e não é de nenhuma
+  entidade: `nomeValido` (apara e recusa vazio), `textoOuNil` (o irmão dele para campo
+  opcional: apara e devolve `nil`) e `escopoDe` (quem chama → filtro de escopo das
+  listagens). Não moram lá, de propósito: os `montarX` (cada um é a tradução única da sua
+  entidade), o que é por perfil (`EscopoPerfilService.go` já é o arquivo compartilhado
+  desse assunto) e `gravarPreventivas` (só se entende junto do resto de preventiva).
+- `controller/helpers.go` — o que mais de um controller faz antes de chamar o service.
+  Todos devolvem `(valor, false)` **depois de já terem escrito a resposta de erro**, então
+  o handler é sempre `x, ok := helper(ctx); if !ok { return }` e nunca escreve dois corpos.
+  - `idDaRota` — `:id` malformado é **400**, não 404 (`/abc` não é um id que não existe, é
+    bug de cliente). `idDeQuery(ctx, nome)` é o mesmo critério para `?lojaId=`/`?setorId=`/
+    `?maquinaId=`: ausente ou vazio vira `nil` sem erro, inválido é 400.
+  - `tenantDaRota` — tenant do **token**, nunca do header (ver "Autenticação").
+  - `atorDaRota` — `usuario.id` + `perfil` do token, para as listagens que filtram por
+    escopo. Mesmo motivo do anterior: aceitar do cliente deixaria um solicitante listar a
+    loja inteira mandando outro id. Claim faltando é 500 (bug de wiring), não 401.
+  - `corpoJSON[T]` — `ShouldBindJSON` das rotas sem arquivo. Campo extra é ignorado pelo
+    binding. Substituiu `corpoLoja`/`corpoSetor`, que eram a mesma função com tipos
+    diferentes; as notas de cada payload vivem na struct dele, em `internal/model`.
+  - `corpoMultipart[T]` — rotas **com** arquivo (`POST`/`PUT /maquinas` hoje, as três
+    criações de solicitação depois): JSON na parte `dados`, arquivos nas partes
+    `foto`/`video`. ⚠️ Como o corpo entra por `json.Unmarshal`, **as tags `binding` não
+    rodam sozinhas** — é por isso que a função chama `binding.Validator.ValidateStruct`
+    explicitamente. Sem essa linha, `required`/`oneof`/`min=1`/`dive` viram decoração.
+    Corpo maior que o limite responde **413**, não 400: não está malformado, está grande.
+  - Ficaram de fora de propósito: `cookieSessao` (regras do cookie de sessão, colado no
+    Login/Logout) e `resolverFoto`/`chaveDaFoto` (métodos — dependem do bucket que o
+    `MaquinaController` guarda).
 - `internal/router/router.go` — `Container` (injeção: guarda os controllers montados +
   o `*repository.Queries` que o `TenantMiddleware` precisa) e `ConfigurarRotas`. Ver
   "Rotas e rate limit".
@@ -197,15 +238,22 @@ que o front espera (camelCase, datas `dd/mm/yyyy HH:MM:SS`, ver `config/dataBr.g
   fotoUrl, bucket string) gin.HandlerFunc` faz upload multipart com `MaxBytesReader` +
   `ParseMultipartForm` (10MB, `tamanhoMaximoFoto`), key prefixada por tenant
   (`tenant/{id}/...`, lida de `middleware.GetTenantIDToken` — **500**, não 401, se a claim
-  faltar: nesse ponto o `AutenticacaoJwt` já devia ter garantido ela, então `!ok` aqui é
-  bug de wiring, não sessão inválida) e `ContentType` do header do arquivo (senão o R2
-  serve como `application/octet-stream` e o browser força download em vez de exibir).
+  `UploadFoto(ctx, tenantID, bucket, header) (string, error)` sobe o arquivo e devolve a
+  **key** — recebe o `*multipart.FileHeader` e **não** um `gin.Context`: quem decide status
+  HTTP, se a foto é obrigatória e o que fazer quando o resto falha é o handler do domínio.
+  Abre e fecha o arquivo por dentro. Key prefixada por tenant (`tenant/{id}/...`) e
+  `ContentType` do header do arquivo (senão o R2 serve como `application/octet-stream` e o
+  browser força download em vez de exibir).
   `URLLeitura(ctx, bucket, key string, ttl time.Duration) (string, error)` gera a URL
   assinada de leitura via `presignClient.PresignGetObject` — é o que resolve
   `maquina.foto_chave`/`solicitacao_anexo.chave` (guardados como key, não URL — ver
-  "R2 — storage de anexos" abaixo) num `fotoUrl`/`url` de resposta. **Ainda não está
-  wireado no router** — nenhuma rota chama `UploadFoto` nem `URLLeitura` hoje; é infra
-  pronta esperando o CRUD de `maquina`/`solicitacao_anexo`.
+  "R2 — storage de anexos" abaixo) num `fotoUrl`/`url` de resposta.
+  ⚠️ **As duas funções checam se o cliente é nil** (`s3Client`/`presignClient`, montados só
+  por `InitR2_cloudflare`): sem a guarda, um boot sem as variáveis do R2 vira **panic** de
+  nil pointer na primeira máquina com foto que alguém listar — e aí não some só a foto,
+  some a resposta inteira.
+  **Wireado em `/maquinas`** (`POST`/`PUT` sobem a foto, todas as leituras devolvem URL
+  assinada); falta o mesmo para `solicitacao_anexo`.
 
 ## Migrations
 - Criar novo par: `make migration nome_da_migration` (gera `NNNNNN_nome.up.sql` +
@@ -221,7 +269,7 @@ que o front espera (camelCase, datas `dd/mm/yyyy HH:MM:SS`, ver `config/dataBr.g
   manualmente em dev, só em produção/CI antes do deploy do binário.
 - Aplicadas até aqui: `000001` schema inicial, `000002` horas parada desde a solicitação,
   `000003` chave do R2, `000004` criticidade vira ENUM, `000005` foto só na solicitação
-  humana.
+  humana, `000006` seed de `area_tecnico`.
 - ⚠️ **Tabela e tipo dividem namespace no Postgres** — trocar uma tabela por um ENUM
   homônimo exige dropar a tabela **antes** de criar o tipo (foi o caso de `000004`).
 
@@ -309,19 +357,49 @@ administrador a ela.
   | `GET /autenticacao/sessao` | autenticada |
   | `GET·POST /usuarios`, `GET·PUT·DELETE /usuarios/:id` | administrador |
   | `GET /empresas` | administrador |
+  | `GET /tecnicos` | gestor, administrador |
   | `GET /lojas`, `GET /setores` | **qualquer perfil autenticado** |
   | `GET·PUT·DELETE /lojas/:id`, `POST /lojas` | administrador |
   | `GET·PUT·DELETE /setores/:id`, `POST /setores` | administrador |
+  | `GET /maquinas`, `GET /preventivas` | **qualquer perfil autenticado** (filtrado por escopo) |
+  | `GET·PUT·DELETE /maquinas/:id`, `POST /maquinas` | administrador |
+  | `GET·PUT·DELETE /preventivas/:id`, `POST /preventivas` | administrador |
+  | `GET /empresas-terceirizadas` | **técnico**, administrador |
+  | `GET·PUT·DELETE /empresas-terceirizadas/:id`, `POST /empresas-terceirizadas` | administrador |
 
-- ⚠️ **`/maquinas` e `/preventivas` ainda NÃO estão registradas.** Queries, models e
-  services existem e estão testados; falta controller e rota. Quando entrarem: `GET` das
-  duas é de **qualquer perfil autenticado** (o Solicitante escolhe máquina do próprio setor
-  em Nova Solicitação, e o painel do Gestor lista preventivas), escrita é só administrador
-  — mesmo corte de `/lojas`·`/setores`.
-- **As duas listagens sem `Permitir` são de propósito**: o painel do gestor agrupa por
+- **`GET /maquinas` e `GET /preventivas` são abertas mas não são amplas**: o RBAC libera
+  qualquer perfil e o **escopo é aplicado no `WHERE`** (ver "Escopo no `WHERE`" em "Queries
+  e repository"). O Solicitante escolhe máquina do próprio setor em Nova Solicitação e o
+  Gestor lista as preventivas das lojas dele — os dois chamam a mesma rota e recebem
+  recortes diferentes. `GET /maquinas/:id` e `GET /preventivas/:id` **são de
+  administrador**: a única tela que lê o registro inteiro é o formulário de edição dele.
+- **`GET /empresas-terceirizadas` é do técnico, não do gestor**: terceirizar é decisão
+  do Técnico (`front-end/CLAUDE.md` item 9), e é ele quem escolhe a empresa no
+  `ModalAcionarTerceiro`. O Gestor não consome essa lista — o nome da empresa chega
+  denormalizado na OS. **Sem escopo no `WHERE`**, diferente de `/maquinas` e
+  `/preventivas`: a entidade não pende de loja nem setor, é do tenant inteiro, e por isso
+  o service nem recebe `usuarioId`/`perfil`.
+- **`POST /preventivas` é só a preventiva avulsa** (`ModalManutencaoPreventiva`). As
+  preventivas do formulário de máquina **não passam por essa rota**: viajam dentro do
+  corpo de `POST`/`PUT /maquinas` e gravam na mesma transação da máquina
+  (`gravarPreventivas`). O controller de máquina nunca toca no `PreventivaService`.
+- **As listagens de loja e setor sem `Permitir` são de propósito**: o painel do gestor agrupa por
   loja e nomeia os blocos por setor (`acessoGestor.ts` procura o setor por id), e os
   selects em cascata de cadastro dependem das duas. Restringir a administrador deixa o
   painel do gestor sem nomes. Escrever continua só do administrador.
+- **`GET /tecnicos` é projeção somente-leitura sobre `usuario`**, não CRUD: técnico é
+  usuário com `perfil = 'tecnico'`, e escrever continua sendo `/usuarios` (duas superfícies
+  de escrita deixariam o mesmo e-mail entrar duas vezes). Existe separada de
+  `GET /usuarios?perfil=tecnico` por três motivos, sendo o primeiro o que obriga: (1) o
+  RBAC — `/usuarios` é só do administrador, e quem precisa da lista é o **Gestor**, no
+  select de "Técnico Responsável" do `ModalAbrirOrdemServico`; (2) a forma — o tipo
+  `Tecnico` do front pede `area` como **nome** e `lojasIds`, e `/usuarios` é paginada;
+  (3) a leitura não precisa de nada que o CRUD de usuário faz. Mora no `LoginController`
+  pelo mesmo motivo de `GET /empresas` morar no de loja.
+  **`GET /tecnicos/:id` não foi feito**: `servicoTecnicos.obterPorId` existe no front mas
+  não é chamado em lugar nenhum. Entra quando a tela do Administrador existir — que
+  também não existe (o `front-end/CLAUDE.md` descreve `AdministradorTecnicos`, mas não há
+  pasta, card no painel nem rota no código).
 - `GET /empresas` mora no `LojaController` porque empresa **não tem CRUD** — o tenant
   nasce pela CLI de provisionamento, e a única tela que pergunta por ela é a de loja.
 - **`TenantMiddleware` entra só em `/autenticacao/login`** — é o único endpoint que lê o
@@ -415,6 +493,29 @@ administrador a ela.
   come o `LIMIT` com repetição. As duas queries repetem o mesmo `WHERE` de propósito —
   divergir dá `total` que não bate com a página. Efeito colateral correto: administrador
   não tem escopo nenhum, então some de qualquer listagem filtrada por loja.
+- **`ListarTecnicos` (`usuario.sql`) tem o escopo com uma torção a mais**: os filtros
+  `loja_id` (a loja da solicitação, do modal) e `escopo_usuario_id` (quem chama) vivem no
+  **mesmo `EXISTS`, sobre a mesma linha de `usuario_escopo`**. Separados, eles pedem
+  "atende a loja X" **E** "divide alguma loja comigo" — que não é a mesma coisa: um gestor
+  da Loja A pedindo `?lojaId=B` receberia o técnico que atende A e B, porque cada condição
+  passava por uma loja diferente. Foi assim que a primeira versão saiu, e o teste de
+  integração pegou. `lojas_ids` sai de `array_agg ... FILTER` + `COALESCE` + cast — sem o
+  cast o sqlc gera `interface{}`, mesma armadilha do `vencida` em `preventiva.sql`.
+- **Escopo no `WHERE`, nunca no cliente (`ListarMaquinas`/`ListarPreventivas`):** as duas
+  são abertas a qualquer perfil no RBAC, então quem recorta é a query. O parâmetro é
+  `escopo_usuario_id`: **NULL não filtra** e é sempre o administrador (ele não tem linha em
+  `usuario_escopo` — `trg_usuario_escopo_nao_admin` recusa — então filtrar por escopo
+  devolveria zero justamente pra quem enxerga tudo); para os outros perfis vai o
+  `usuario.id` do token e a linha só aparece se ele alcança **a loja E o setor**. Quem
+  traduz é `escopoDe(usuarioId, perfil)` em `EscopoPerfilService.go`, e o `usuario.id`/
+  `perfil` vêm de `atorDaRota` — nunca da query string.
+  O mesmo `EXISTS` serve os três perfis porque `escopoDoPerfil` já os normaliza: o
+  solicitante tem um escopo com um setor, o técnico escopos com `acesso_total_setores`, o
+  gestor os setores marcados ou a loja inteira.
+  ⚠️ **`EXISTS` e não `JOIN`**, mesmo motivo de `ListarUsuarios`: com JOIN a máquina
+  apareceria uma vez por escopo que a alcança.
+  ⚠️ **O filtro do cliente estreita, nunca amplia**: `?lojaId=` de uma loja fora do escopo
+  devolve lista vazia, não a loja. É o que `TestEscopoDasListagens` tranca.
 - `ObterLojaParaEscrita` é o `ObterLojaPorID` com **`FOR SHARE`**, usado dentro da
   transação que cria setor: sem o lock, alguém desativa a loja entre o cheque de `ativa`
   e o `INSERT`. `FOR SHARE` e não `FOR UPDATE` porque ninguém altera a loja ali.
@@ -424,6 +525,13 @@ administrador a ela.
   `setor.sql` (`ObterSetorPorID` — `SessaoUsuario.setorNome`, já que `usuario_escopo`
   só guarda o `setor_id`; e `ObterSetoresPorIDs`, que devolve `loja_id` de cada setor
   para o service distribuir o escopo).
+- **`foto_chave` entra em `CriarMaquina` direto e em `AtualizarMaquina` como
+  `COALESCE(sqlc.narg('foto_chave'), foto_chave)`**: sem foto nova no multipart o valor
+  chega NULL e a antiga fica. NULL ali significa "não mexi", não "apague" — o front só sabe
+  *trocar* a foto, não remover (`UploadFoto` em `CadastrarMaquina.tsx`).
+  ⚠️ Trocar a foto deixa o objeto antigo **órfão no bucket**: ninguém apaga do R2. É lixo
+  barato e sem referência; se incomodar, o caminho é um `DELETE` do objeto antigo **depois**
+  do commit (nunca antes — a transação pode voltar).
 - **Leitura de máquina e preventiva traz os nomes por `JOIN`, sempre.** `ListarMaquinas`/
   `ObterMaquinaPorID` projetam `setor_nome`, `loja_id` e `loja_nome`; as de preventiva
   projetam ainda `maquina_nome`. Não é enfeite: o front tipa `setorNome`/`lojaId` como
@@ -451,11 +559,45 @@ administrador a ela.
   — senão um ciclo processado com atraso arrastaria todos os seguintes (vencida há 5 dias
   com intervalo 30 vai pra hoje+25, não hoje+30).
 
-⚠️ **`area_tecnico` não é populada por nada hoje** — nem migration de seed, nem
-`ProvisionarAdministrador`, nem CRUD. Cadastrar técnico falha com "registro não
-encontrado: área técnica ... não cadastrada neste tenant" até existir uma dessas, e o
-front exige `area` obrigatória para o perfil Técnico. É o próximo bloqueio real do
-cadastro de usuários.
+**`area_tecnico` nasce populada (migration `000006`).** Todo tenant novo ganha as cinco
+áreas que o front tipa (`areasTecnico`) por um **trigger `AFTER INSERT ON empresa`** —
+`fn_seed_area_tecnico(tenant_id)`, com `ON CONFLICT DO NOTHING`, é a lista num lugar só e
+serve o trigger e o backfill dos tenants que já existiam. Antes disso nada populava a
+tabela e cadastrar técnico falhava em **todo** tenant com "área técnica ... não cadastrada
+neste tenant" — sem técnico, o Gestor não abre OS nenhuma.
+- **Trigger e não seed na migration** porque migration roda uma vez e tenant nasce depois
+  dela (`make provisionar-admin`): só o seed deixaria todo tenant futuro travado de novo.
+- **Não virou ENUM como `nivel_criticidade`** (que tinha o mesmo sintoma): a seção 2.4 de
+  `docs/modelagem-banco-dados.md` dá uma razão explícita para esta continuar tabela — "um
+  supermercado pode querer 'Automação' onde outro quer 'Ar-condicionado'". As cinco áreas
+  são ponto de partida, não lista fechada; área inexistente continua sendo 422.
+- A migration também criou o **`uq_area_tecnico_nome (tenant_id, nome)`** que faltava (sem
+  ele o seed rodando duas vezes duplicaria a área, e `ObterAreaTecnicoPorNome` é `:one` —
+  devolveria "a primeira" das duas, calado) e **deduplica antes de criá-lo**, repontuando
+  `usuario.area_tecnico_id` para a linha sobrevivente: `UNIQUE` em coluna com duplicata é o
+  jeito clássico de a migration falhar no boot e derrubar a API.
+- Consequência nos testes: `bancoDeTeste` não precisa mais inserir área na mão — a empresa
+  do seed já nasce com elas.
+
+## O que falta no back (retomar aqui)
+
+Cadastros: **completos**. Falta o miolo do fluxo, na ordem em que o front precisa:
+
+1. **Solicitações** — `POST /solicitacoes/maquinario` e `/reparo` (multipart, use
+   `corpoMultipart[T]`), `GET /solicitacoes/minhas` (paginado), `GET /solicitacoes`,
+   `/:id`, `/resumo`, `POST /:id/abrir-os` e `/:id/rejeitar`. Junto vem o CRUD de
+   `solicitacao_anexo` (nada em `database/queries/` ainda) e o `URLLeitura` resolvendo
+   `chave` → `url` na resposta, como já é feito em máquina.
+2. **Ordem de serviço** — o ciclo de vida (`iniciar`/`pausar`/`retomar`/
+   `acionar-terceiro`/`encerrar`/`custo`), os dois relógios e a flag `finalizada`.
+   Destrava os dois cards mortos do painel do Administrador.
+3. **Indicadores** (`GET /indicadores/maquinas/:id`) e o **job de preventiva vencida**
+   (ver seção abaixo).
+
+Listagem nova que precise recortar por escopo usa `atorDaRota` no controller +
+`escopoDe(usuarioId, perfil)` no service, com o `EXISTS` no `WHERE` — ver "Escopo no
+`WHERE`" em "Queries e repository". Rota com arquivo usa `corpoMultipart`, sem arquivo usa
+`corpoJSON`.
 
 ## Abertura automática de solicitação por preventiva (a fazer)
 Ao vencer a `proxima_data` de uma preventiva **ativa**, o sistema abre uma **Solicitação**
@@ -552,6 +694,20 @@ depois, quando o Gestor aprova com técnico + urgência: criar OS direto pularia
   - `controller/lojaController_test.go` e `setorController_test.go` — mesmo molde. O de
     setor cobre `?lojaId=` separado (ausente/vazio → `nil` no service, inválido → 400 sem
     tocar no banco): é esse filtro que faz o select em cascata mostrar só a loja escolhida.
+  - `controller/maquinasController_test.go` — além do mapa erro → status, cobre o que só
+    existe aqui: o corpo **multipart** virando struct (`serie` → `NumeroSerie` é o campo que
+    sumiria calado, porque o nome do front não bate), os `json:"-"` barrando derivado vindo
+    do cliente, os 8 corpos que o `ValidateStruct` recusa **sem chegar no service**, e a
+    foto quando o R2 não está configurado — upload que falha é 500 e a máquina não é criada,
+    assinatura que falha é 200 sem foto, e a chave crua **não aparece na resposta**.
+  - `controller/empresaTerceirizadaController_test.go` — mapa erro → status e o corpo:
+    os campos opcionais podem vir vazios, nulos ou ausentes e **nenhum dos três é erro de
+    binding** (quem normaliza é o `textoOuNil` do service). Nome só de espaços é 400.
+  - `controller/preventivaController_test.go` — o mapa erro → status e a assimetria do
+    `maquinaId`: obrigatório no POST (cheque do controller, não tag — a struct é
+    compartilhada com o corpo da máquina), ignorado no PUT.
+  - **Os dois têm o teste "ator vem do token"**: `usuario.id`/`perfil` chegando da query em
+    vez do JWT não muda status nenhum — a listagem responde 200 com dados demais.
   - `middleware/perfil_test.go` — `Permitir` com um perfil, vários, nenhum, e o caso de
     falha fechada (contexto sem perfil **nega**, protege contra montar o middleware na
     ordem errada).
@@ -563,7 +719,8 @@ depois, quando o Gestor aprova com técnico + urgência: criar OS direto pularia
   - `loginService_test.go` — unitário, sem banco: tabela cobrindo `validarEscopo` +
     `escopoDoPerfil` nos 4 perfis.
   - `loginIntegracao_test.go`, `lojaIntegracao_test.go`, `setorIntegracao_test.go`,
-    `maquinarioIntegracao_test.go`, `preventivaIntegracao_test.go` —
+    `maquinarioIntegracao_test.go`, `preventivaIntegracao_test.go`,
+    `escopoListagemIntegracao_test.go` —
     integração de verdade contra Postgres. `bancoDeTeste` (em `loginIntegracao_test.go`,
     compartilhado) cria um banco descartável (`teste_<nome do teste>_<pid>`), aplica as
     migrations nele e dropa no fim; o seed é criado pelos próprios services, então o
@@ -572,6 +729,15 @@ depois, quando o Gestor aprova com técnico + urgência: criar OS direto pularia
     `DEFERRABLE` que só disparam no commit (gestor virando administrador precisa perder o
     escopo junto), unicidade por tenant/loja, e `ErrNoRows` virando `ErrNaoEncontrado` em
     vez de 500.
+  - `TestListarTecnicos` (no mesmo `escopoListagemIntegracao_test.go`) cobre o que só o
+    banco prova em `/tecnicos`: `area` vindo do JOIN, `lojasIds` do `array_agg`, o
+    `?lojaId=`, o gestor não enxergando técnico de loja fora do escopo e o técnico
+    desativado sumindo.
+  - **`escopoListagemIntegracao_test.go` é o que prova o `EXISTS` do escopo**: monta um
+    tenant com duas lojas, três setores e uma máquina em cada, e confere o recorte dos
+    cinco perfis mais os dois casos de contorno (`?lojaId=`/`?setorId=` fora do escopo
+    devolvem vazio). Falha aqui é silenciosa em produção — responde 200 com máquina demais
+    e nenhuma tela reclama.
   - **Teste de escrita transacional confere o banco, não o retorno.** Em
     `maquinarioIntegracao_test.go` a máquina criada é localizada pela *listagem*, não pelo
     struct devolvido: um `CadastrarMaquina` sem `tx.Commit` devolvia a linha com id
@@ -619,6 +785,45 @@ Postgres + segunda API 24/7, dobrando o consumo em cima de um crédito de $5.
 é o ambiente de teste: mesma infra, mesmo código, banco ainda descartável. Suba,
 provisione um tenant de teste (`make provisionar-admin`), exercite os fluxos, apague o
 tenant, entregue.
+
+### Estado em 22/08/2026 — pronto para subir, com uma condição
+
+Todo o CRUD do Administrador está de pé e **validado pelo navegador contra a API real**
+(não só por curl): login/cookie, lojas, setores em cascata, os quatro perfis de usuário,
+máquina com foto subindo pro R2 e voltando assinada no `<img>`, preventiva, terceirizada.
+Ver "Verificação pelo navegador" em `../front-end/CLAUDE.md` para os bugs que essa
+passagem encontrou.
+
+**A condição é o backup.** Enquanto não há dado dentro ele é opcional; no minuto em que o
+admin cadastrar a primeira loja, passa a ser a diferença entre um susto e recomeçar do
+zero (Hobby não tem PITR). `pg_dump` agendado pro R2 **com um restore ensaiado uma vez**.
+Ainda não existe — é o único bloqueio real para entregar o acesso.
+
+**Ordem de execução do primeiro deploy:**
+
+1. Variáveis no serviço da API: `DB_*` (host **interno** `*.railway.internal`),
+   `DB_SSLMODE`, **`JWT_SECRET` novo** (`openssl rand -base64 64` — não reaproveitar o do
+   `.env` local, que já circulou), `TRUSTED_PROXIES` com o endereço do proxy do Railway, e
+   os quatro `R2_*` (sem eles o CRUD funciona e só o upload de foto responde 500 — a
+   guarda de nil em `bucketR2` evita o panic).
+2. ⚠️ **A URL da API é congelada no BUILD do front**, não em runtime: o `define` do
+   `vite.config.ts` resolve `process.env.REACT_APP_URL_API` em build time. Setar a
+   variável só no runtime do serviço não adianta — ela precisa existir no `vite build`,
+   senão o bundle sai com o fallback compilado dentro. `VITE_USE_MOCKS` ausente ou `false`.
+3. Subir a API primeiro e conferir o boot (as migrations rodam sozinhas; `000006` cria
+   trigger + constraint). Falha aqui = API não sobe, com restart automático virando crash
+   loop — tenha o rollback do Railway à mão.
+4. `provisionar-admin` contra o banco de produção (`railway run`), com o subdomínio real.
+5. Só então apontar o DNS do front.
+
+**Front e API sob o mesmo domínio registrável** (`*.radaptech.com.br` nos dois, ex:
+`app.` + `api.`) — decisão fechada. O cookie é `SameSite=Lax`: em domínios registráveis
+diferentes o login responde 200 e o navegador **descarta o cookie**, sem erro visível. O
+CORS (`middleware/cors.go`) também só libera `radaptech.com.br` e `localhost`.
+
+**Aceite consciente antes de entregar o acesso:** os cards "Custos Pendentes" e "OS
+Finalizadas" do painel do Administrador chamam `/ordens-servico`, que **não existe** — o
+admin clica e recebe toast de erro. Esconder os dois é mais barato que explicar.
 
 ### Antes de entregar pro admin
 - **Backup com restore ensaiado.** `pg_dump` agendado mandando pro R2 (Hobby não tem
@@ -677,11 +882,13 @@ CRUD que os usa. Decisões já fechadas, não reabrir sem motivo novo:
 content-type/extensão também não existe — `UploadFoto` aceita qualquer arquivo enviado no
 campo `foto`.
 
-⚠️ **`Maquinario.FotoUrl` hoje devolve a chave crua**, não a URL assinada: o
-`MontarListaMaquinarios` copia `foto_chave` direto. O nome do campo já está certo
-(`fotoUrl`, o que o front espera) e a coluna é sempre `NULL` por enquanto — nada faz
-upload. Mas na hora de ligar o `UploadFoto` é aí que o `URLLeitura` tem que entrar, senão
-a chave vaza pro cliente.
+⚠️ **`MontarListaMaquinarios` copia `foto_chave` direto para `FotoUrl`** — ou seja, o
+service devolve a **chave**, não a URL. Quem troca é o controller, em `resolverFoto`, nos
+quatro caminhos que respondem uma máquina (POST, PUT, GET lista, GET por id). Falhar a
+assinatura **não vira 500**: a máquina já está no banco, e erro depois do commit faria o
+front mostrar falha para um cadastro que existe — some só a foto (`fotoUrl` é opcional no
+tipo do front). O que não pode, em hipótese alguma, é a chave crua sair na resposta; há
+teste trancando isso.
 
 ## Regras herdadas do contrato com o front (não reinvente)
 - **401 é só "sem sessão"**; fora de escopo/perfil errado é sempre **403** — 401 fora de
@@ -692,13 +899,14 @@ a chave vaza pro cliente.
 - **Multi-tenant por subdomínio**: header `X-tenant-ID`, tenant nunca vem por rota nem
   por corpo.
 - **Empresa É o tenant** (decisão fechada). `loja.tenant_id` referencia `empresa (id)`
-  direto, não existe coluna `empresa_id` nem tabela intermediária, e o front tipa a
-  "Hierarquia Tenant > Empresa > Loja > Setor" como se houvesse. Consequências:
+  direto, não existe coluna `empresa_id` nem tabela intermediária — o front já tipa a
+  hierarquia como "Tenant = Empresa > Loja > Setor". Consequências:
   `GET /empresas` devolve **uma lista de um item só** (a empresa do tenant autenticado,
   `id` = `tenant_id`), e `Loja.empresaId` é o `tenant_id` da própria linha — campo
-  derivado, não coluna. O front precisa dele porque filtra "lojas já cadastradas dessa
-  empresa" comparando com o valor do select. **`empresaId` no corpo de `POST/PUT /lojas`
-  é ignorado**: como empresa = tenant, aceitá-lo do cliente seria aceitar o tenant do
+  derivado, não coluna, que o front usa só para exibir o nome da empresa. **O front já
+  não manda `empresaId`**: `NovaLojaPayload` (lá) perdeu o campo e o select de empresa em
+  `CadastrarLoja` virou campo somente leitura, já que a lista sempre teve um item só.
+  Mesmo assim, **`empresaId` no corpo de `POST/PUT /lojas` continua ignorado aqui**: como empresa = tenant, aceitá-lo do cliente seria aceitar o tenant do
   corpo — o mesmo buraco do `X-tenant-ID` em rota autenticada, por outra porta.
 - **Escopo (loja/setor/técnico) é sempre filtrado no `WHERE` do servidor**, nunca
   devolvido inteiro pro cliente filtrar.
