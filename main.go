@@ -20,6 +20,11 @@ func main() {
 		return
 	}
 
+	if len(os.Args) > 1 && os.Args[1] == "backup-banco" {
+		executarBackupBanco(os.Args[2:])
+		return
+	}
+
 	router := gin.Default()
 	postgressConnection := config.ConnPostgresql{}
 

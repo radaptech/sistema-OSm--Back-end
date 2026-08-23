@@ -7,4 +7,10 @@ migration:
 # rodar. Uso:
 #   make provisionar-admin ARGS="-subdominio=cooprata -empresa='Cooprata' -nome='Davi' -email=admin@cooprata.com -senha=SENHA_FORTE"
 provisionar-admin:
-	@go run . provisionar-admin $(ARGS) 
+	@go run . provisionar-admin $(ARGS)
+
+# Despeja o banco inteiro e sobe pro R2 (backups/<timestamp>.dump). Requer
+# R2_BUCKET_NAME_BACKUPS no .env, além das outras R2_* já usadas por
+# UploadFoto. Em produção quem chama isto é o Railway Cron -- ver CLAUDE.md.
+backup-banco:
+	@go run . backup-banco

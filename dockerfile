@@ -2,8 +2,10 @@ FROM golang:1.26.5-alpine
 
 WORKDIR /app
 
-# Instala git e as ferramentas essenciais de compilação
-RUN apk add --no-cache git build-base
+# Instala git, ferramentas essenciais de compilação e o pg_dump (versão 16,
+# pareada com o Postgres do projeto -- pg_dump precisa ser da mesma major
+# version do servidor, ou mais nova) para o subcomando backup-banco.
+RUN apk add --no-cache git build-base postgresql16-client
 
 # Instala o CompileDaemon
 RUN go install github.com/githubnemo/CompileDaemon@latest

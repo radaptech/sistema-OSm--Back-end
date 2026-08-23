@@ -3,6 +3,7 @@ package bucketr2
 import (
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"mime/multipart"
 	"os"
@@ -90,6 +91,35 @@ func UploadFoto(ctx context.Context, tenantID int64, bucket string, header *mult
 	}
 
 	return objkey, nil
+}
+
+// UploadArquivo sobe um conteúdo já em mãos (io.Reader), sem passar por
+// multipart.FileHeader -- usado por quem não recebeu o arquivo numa requisição
+// HTTP, como o dump do backup (cli_backup_banco.go). A key vem pronta do
+// chamador: diferente de UploadFoto, aqui não existe tenant nem timestamp
+// implícito, porque quem precisa dessa forma varia por caso de uso.
+func UploadArquivo(ctx context.Context, bucket, key string, corpo io.Reader, contentType string) error {
+
+	if s3Client == nil {
+		return fmt.Errorf("R2 não inicializado")
+	}
+
+	if bucket == "" {
+		return fmt.Errorf("bucket do R2 não configurado")
+	}
+
+	_, err := s3Client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket:      aws.String(bucket),
+		Key:         aws.String(key),
+		Body:        corpo,
+		ContentType: aws.String(contentType),
+	})
+	if err != nil {
+		log.Printf("erro ao salvar arquivo no r2 bucket=%s key=%s: %v", bucket, key, err)
+		return fmt.Errorf("erro ao salvar no R2")
+	}
+
+	return nil
 }
 
 func URLLeitura(ctx context.Context, bucket, key string, ttl time.Duration) (string, error) {

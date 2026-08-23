@@ -21,8 +21,9 @@ completo e os contratos já fechados com o front.
   meio — `pgx`/`sqlc` conectam sem ajuste de prepared statements. Aponte
   `DB_SERVER`/`DB_PORT`/... pras variáveis do plugin de Postgres e use o host **interno**
   (`*.railway.internal`, rede privada IPv6), não o proxy público.
-  ⚠️ **Hobby não tem PITR**: backup é `pg_dump` agendado mandando pro R2, com restore
-  ensaiado — não existe rede de proteção gerenciada aqui. Local: Docker Compose
+  ⚠️ **Hobby não tem PITR**: backup é `pg_dump` agendado mandando pro R2 (subcomando
+  `backup-banco`, ver "Backup do banco" abaixo), com restore ensaiado — não existe rede
+  de proteção gerenciada aqui. Local: Docker Compose
   (`postgres_container-sistema-OS`, `api_sistema-OS` com hot-reload via CompileDaemon,
   `pgadmin_container-sistema-OS`).
 
@@ -285,6 +286,52 @@ Implementado em `provisionamento.go` na raiz (`package main`, `ProvisionarAdmini
 SQL cru — não passa pelo `repository`) + `cli_provisionar_admin.go`. Idempotente por
 tenant: rodar de novo com o mesmo `--subdominio` não recria a empresa, só adiciona outro
 administrador a ela.
+
+## Backup do banco (`backup-banco`)
+Mesmo padrão do `provisionar-admin`: subcomando de CLI, fora da API HTTP, despachado por
+`main.go` antes do servidor subir. Despeja o banco inteiro (`pg_dump --format=custom
+--no-owner --no-privileges`, num arquivo temporário — não em pipe direto, o SDK da AWS
+lida melhor com `io.ReadSeeker` do que com um reader sem seek) e sobe pro R2 com
+`bucketR2.UploadArquivo` (genérico, `io.Reader` + key prontos — diferente de `UploadFoto`,
+que resolve o upload de dentro de uma requisição HTTP multipart).
+
+```
+make backup-banco
+```
+
+Implementado em `cli_backup_banco.go` na raiz. Requer `R2_BUCKET_NAME_BACKUPS` no `.env`
+(reaproveita as outras três `R2_*` já usadas pelo upload de foto) — **o bucket precisa
+existir no Cloudflare antes**, criado manualmente no dashboard: `PutObject` não cria
+bucket, só grava dentro de um que já existe (testado local: erro limpo `NoSuchBucket`
+contra um nome ainda não criado — o resto do pipeline, pg_dump + upload, roda certo).
+`--no-owner --no-privileges` existem por causa do restore: o banco de teste ("restore
+ensaiado") normalmente tem um owner diferente do de produção, e sem essas duas flags o
+`pg_restore` para em `ALTER OWNER`/`GRANT` pra um role que não existe no destino —
+**testado** localmente (dump → `CREATE DATABASE` descartável → `pg_restore --no-owner
+--no-privileges` → contagem de linhas batendo em `empresa`/`maquina`/`preventiva` →
+`DROP DATABASE`), sem erro nenhum do `pg_restore`.
+
+Chave do objeto: `backups/<timestamp UTC>.dump` (`20060102-150405`) — sem prefixo de
+tenant, porque é o banco inteiro, todos os tenants juntos (Postgres do Railway é uma
+instância só, sem um banco por tenant).
+
+**Agendamento é Railway Cron, não `pg_cron`** — mesmo motivo do job de preventiva vencida
+(ver "Abertura automática de solicitação por preventiva" nesse arquivo): Hobby não libera
+`shared_preload_libraries`. Ao configurar o Cron Job no Railway:
+- Aponte pro mesmo repo/imagem da API, com **Custom Start Command** rodando
+  `./main backup-banco` (não `go run .` — o binário já compilado é o que o
+  `ENTRYPOINT` do `dockerfile` gera).
+- ⚠️ **Não testado contra o Railway de verdade.** O `ENTRYPOINT` do `dockerfile` hoje é
+  fixo em `CompileDaemon ... -command=./main` (ferramenta de hot-reload, pensada pro
+  Compose local) — não é garantido que o Custom Start Command do Cron Job substitua esse
+  `ENTRYPOINT` em vez de virar argumento dele. Se o Cron Job não rodar o comando certo,
+  confirme isso primeiro: pode precisar de uma imagem/Dockerfile separado só pro Cron,
+  sem o `CompileDaemon` no meio.
+- Variáveis do serviço: as mesmas `DB_*`/`DB_SSLMODE` da API (host interno
+  `*.railway.internal`) e as quatro `R2_*` (as três de sempre + `R2_BUCKET_NAME_BACKUPS`).
+- Frequência: diária é o ponto de partida razoável — não existe ainda rotação/expiração
+  de backup antigo (o bucket cresce um `.dump` por execução, sem limpeza automática); se
+  o custo de armazenamento incomodar, é o próximo passo, não um bloqueio para começar.
 
 ## Autenticação (JWT)
 - `auth.GerarJwt(id, tenantId int64, perfil string)` assina um HS256 com `JWT_SECRET`
@@ -796,8 +843,17 @@ passagem encontrou.
 
 **A condição é o backup.** Enquanto não há dado dentro ele é opcional; no minuto em que o
 admin cadastrar a primeira loja, passa a ser a diferença entre um susto e recomeçar do
-zero (Hobby não tem PITR). `pg_dump` agendado pro R2 **com um restore ensaiado uma vez**.
-Ainda não existe — é o único bloqueio real para entregar o acesso.
+zero (Hobby não tem PITR).
+
+**Resolvido em código (23/08/2026), falta só o agendamento em produção.** O subcomando
+`backup-banco` (ver "Backup do banco" acima) faz `pg_dump` + upload pro R2, testado local
+de ponta a ponta — inclusive o restore (`pg_restore` contra banco descartável, contagem
+de linhas batendo). O que falta pra fechar o bloqueio: (1) criar o bucket
+`R2_BUCKET_NAME_BACKUPS` no Cloudflare — `PutObject` não cria bucket sozinho; (2)
+configurar o Cron Job no Railway apontando pro comando (⚠️ não testado contra Railway de
+verdade — ver a nota sobre o `ENTRYPOINT` do `dockerfile` na seção do comando); (3) rodar
+o restore ensaiado **uma vez contra o dump que sai do R2 de produção**, não só contra o
+teste local.
 
 **Ordem de execução do primeiro deploy:**
 
@@ -829,9 +885,10 @@ o gesto no front é um `git revert` do commit que os removeu — não recriar os
 Deixa de ser aceite consciente para entregar o acesso.
 
 ### Antes de entregar pro admin
-- **Backup com restore ensaiado.** `pg_dump` agendado mandando pro R2 (Hobby não tem
-  PITR — ver "Stack"). Faça o caminho de volta pelo menos uma vez: dump → restaura em
-  banco novo → confere. Backup nunca testado não é backup.
+- **Backup com restore ensaiado.** O mecanismo (`backup-banco`, `pg_dump` → R2) está
+  pronto e testado local — falta o bucket no Cloudflare, o Cron Job no Railway e um
+  restore ensaiado **contra o dump real de produção**, não só o local. Backup nunca
+  testado com o dump de verdade não é backup.
 - **A partir daqui, toda migration é migration com dado dentro.** A regra de testar
   `up`+`down` num Postgres descartável (ver "Migrations") sobe de nível: teste contra um
   **restore do dump de produção**, não contra banco vazio. O que passa no vazio e quebra
