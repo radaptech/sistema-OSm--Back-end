@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [master, dev]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    # O teste de integração dá t.Skip sem Postgres alcançável -- sem este
+    # service o CI passaria verde sem ter rodado a metade que importa.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      TEST_DB_DSN: postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable
+      JWT_SECRET: segredo-de-ci-nao-usar-em-producao
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: gofmt
+        run: test -z "$(gofmt -l .)" || (gofmt -l . && exit 1)
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test
+        run: go test -race ./...

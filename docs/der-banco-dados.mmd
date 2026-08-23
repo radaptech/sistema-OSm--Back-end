@@ -1,8 +1,21 @@
 erDiagram
     %% ==========================================================
-    %% Solicitacao OS -- DER revisado (revisao 3)
+    %% Solicitacao OS -- DER revisado (revisao 4)
     %% Fonte: /src/tipos, /src/servicos e as regras ja implementadas nas telas.
     %% ---
+    %% Revisao 4: terceirizar deixou de ser um tipo de pedido e virou um
+    %% desfecho da OS, decidido pelo Tecnico no meio da execucao. Efeitos:
+    %%   1. solicitacao_os.tipo passa a usar o ENUM tipo_solicitacao (2 valores);
+    %%      tipo_os (3 valores) fica so na OS e nas filhas dela.
+    %%   2. ordem_servico.tipo deixa de ser imutavel: acionar-terceiro promove
+    %%      maquinario/reparo -> terceiros. A FK composta (solicitacao_id, tipo)
+    %%      cai (secao 5.2 de modelagem-banco-dados.md).
+    %%   3. Toda OS tem tecnico e urgencia, inclusive a terceirizada, e toda OS
+    %%      passa por os_encerramento -- quem encerra continua sendo o Tecnico.
+    %%   4. tipo_defeito virou "Tipo de OS" (Predial | Corretiva), saiu da
+    %%      solicitacao e passou a ser gravado no encerramento, por quem executou.
+    %%   5. ordem_servico.afeta_producao governa o relogio de maquina parada.
+    %%   6. A rejeicao do Gestor ganhou motivo, autor e instante.
     %% Revisao 3: PKs/FKs de entidade de negocio trocaram de uuid para bigint
     %% (identity/serial), para bater com os tipos reais do front (id: number
     %% em todo /src/tipos -- nenhuma tela trata id como string). O ganho de
@@ -13,15 +26,17 @@ erDiagram
     %% ---
     %% Tipos ENUM nativos usados abaixo (listas que so mudam com deploy):
     %%   perfil_usuario     solicitante | tecnico | gestor | administrador
+    %%   tipo_solicitacao   maquinario | reparo
     %%   tipo_os            maquinario | terceiros | reparo
+    %%   tipo_defeito       Predial | Corretiva
     %%   origem_solicitacao solicitante | preventiva
     %%   status_solicitacao Pendente | Convertida | Rejeitada
     %%   status_os          Aberta | Em Andamento | Pausada | Concluida
-    %%   marcador_impacto   Afeta Producao | Parada Parcial | Retrabalho
+    %%   marcador_impacto   Afeta Producao
     %%   tipo_anexo         foto | video
     %% ---
     %% Continuam como tabela de dominio (vocabulario do cliente, cadastravel):
-    %%   tipo_defeito, area_tecnico, nivel_criticidade, nivel_urgencia
+    %%   area_tecnico, nivel_criticidade, nivel_urgencia
     %% ==========================================================
 
     %% ==========================================================
@@ -162,41 +177,46 @@ erDiagram
     }
 
     %% ==========================================================
-    %% Solicitacao de OS -- serve os tres tipos
-    %% maquinario e terceiros: exigem maquina_id e tipo_defeito_id
-    %% reparo:                 exige item_descricao (texto livre), sem maquina
+    %% Solicitacao de OS -- so os dois tipos que o Solicitante abre
+    %% maquinario: exige maquina_id
+    %% reparo:     exige item_descricao (texto livre), sem maquina
+    %% ---
+    %% Nao existe solicitacao "de terceiros": terceirizar e decisao do Tecnico
+    %% depois da OS aberta (ver ordem_servico.empresa_terceirizada_id).
+    %% A classificacao Predial/Corretiva tambem nao esta aqui -- quem relata o
+    %% problema nao classifica o servico (ver os_encerramento.tipo_defeito).
     %% ==========================================================
     maquina ||--o{ solicitacao_os : "origina"
+    setor ||--o{ solicitacao_os : "localiza"
     usuario ||--o{ solicitacao_os : "solicita"
-    tipo_defeito ||--o{ solicitacao_os : "categoriza"
+    usuario ||--o{ solicitacao_os : "rejeita"
     preventiva ||--o{ solicitacao_os : "dispara"
     solicitacao_os ||--o{ solicitacao_impacto : "informa"
     solicitacao_os ||--o{ solicitacao_anexo : "evidencia"
 
-    tipo_defeito {
-        smallint id PK
-        bigint tenant_id FK "empresa.id"
-        text nome "Mecanico Eletrico Hidraulico Pneumatico"
-    }
-
     solicitacao_os {
         bigint id PK
         bigint tenant_id FK "empresa.id"
-        tipo_os tipo "ENUM maquinario terceiros reparo"
+        tipo_solicitacao tipo "ENUM maquinario reparo"
         bigint maquina_id FK "NULL somente se tipo reparo"
         text item_descricao "obrigatorio somente se tipo reparo"
+        bigint setor_id FK "onde o problema esta, o reparo nao tem maquina"
         bigint solicitante_id FK "NULL se origem preventiva"
         bigint preventiva_id FK "NULL se origem solicitante"
-        smallint tipo_defeito_id FK "NULL no reparo"
         status_solicitacao status "ENUM Pendente Convertida Rejeitada"
         origem_solicitacao origem "ENUM solicitante preventiva"
         text descricao
-        timestamptz criado_em
+        text motivo_rejeicao "obrigatorio se status Rejeitada"
+        bigint rejeitado_por_id FK "usuario perfil gestor"
+        timestamptz rejeitada_em
+        timestamptz criado_em "inicio do relogio de horas parada, a maquina parou aqui"
     }
 
+    %% Marcador unico hoje (Afeta Producao), mas associativa e nao boolean: o
+    %% contrato ja troca uma lista (impactos) e um marcador novo nao mexe na tabela.
     solicitacao_impacto {
         bigint solicitacao_id PK "FK solicitacao_os"
-        marcador_impacto marcador PK "ENUM 3 marcadores"
+        marcador_impacto marcador PK "ENUM Afeta Producao"
     }
 
     %% Foto do defeito obrigatoria e video opcional. Tabela em vez de duas
@@ -213,11 +233,16 @@ erDiagram
 
     %% ==========================================================
     %% Ordem de Servico e seu ciclo de vida
-    %% maquinario/reparo: tecnico interno + urgencia, passa por os_encerramento
-    %% terceiros:         empresa terceirizada, nasce Concluida, sem encerramento
+    %% Toda OS tem tecnico responsavel e urgencia, e toda OS passa pelo mesmo
+    %% ciclo (iniciar / pausar / retomar / encerrar). O tipo comeca igual ao da
+    %% solicitacao e vira 'terceiros' quando o Tecnico aciona uma empresa
+    %% externa -- acionar nao encerra nada e nao tira a OS dele.
     %% ---
-    %% O par (id, tipo) e propagado por FK composta em toda a cadeia,
+    %% O par (id, tipo) e propagado por FK composta da OS para as filhas,
     %% para que cada CHECK local enxergue o tipo sem consultar a tabela pai.
+    %% Da solicitacao para a OS a propagacao caiu na revisao 4: os dominios
+    %% passaram a ser diferentes (tipo_solicitacao x tipo_os) e o valor da OS
+    %% deixou de ser imutavel.
     %% ==========================================================
     solicitacao_os ||--o| ordem_servico : "convertida em"
     nivel_urgencia ||--o{ ordem_servico : "prioriza"
@@ -241,14 +266,16 @@ erDiagram
         bigint id PK
         bigint tenant_id FK "empresa.id"
         bigint solicitacao_id FK "UNIQUE um para um"
-        tipo_os tipo "herdado da solicitacao via FK composta"
-        bigint tecnico_id FK "NULL se tipo terceiros"
-        bigint empresa_terceirizada_id FK "preenchido so no tipo terceiros"
+        tipo_os tipo "nasce igual ao da solicitacao, vira terceiros ao acionar"
+        bigint tecnico_id FK "sempre preenchido, toda OS passa pelo Tecnico"
+        smallint urgencia_id FK "sempre preenchida, definida na abertura"
+        bigint empresa_terceirizada_id FK "NOT NULL se e so se tipo terceiros"
+        timestamptz terceiro_acionado_em "quando o Tecnico encaminhou"
         bigint aberta_por_id FK "usuario perfil gestor"
-        smallint urgencia_id FK "NULL se tipo terceiros"
+        boolean afeta_producao "copiado do marcador da solicitacao"
         status_os status "ENUM Aberta EmAndamento Pausada Concluida"
-        timestamptz aberta_em
-        timestamptz iniciada_em "NULL ate iniciar atendimento"
+        timestamptz aberta_em "quando o Gestor abriu, NAO e o inicio de horas parada"
+        timestamptz iniciada_em "NULL ate iniciar atendimento, inicio de horas trabalhadas"
         timestamptz criado_em
     }
 
@@ -263,12 +290,15 @@ erDiagram
         timestamptz retomada_em "NULL enquanto pausada"
     }
 
-    %% Registro de execucao do Tecnico. Nunca existe para tipo terceiros.
+    %% Registro de execucao do Tecnico. Existe para os tres tipos: mesmo a OS
+    %% terceirizada e encerrada por ele, que recebe o servico da empresa.
+    %% E aqui que a OS e classificada como Predial ou Corretiva.
     os_encerramento {
         bigint id PK
         bigint tenant_id FK "empresa.id"
         bigint ordem_servico_id FK "UNIQUE um para um"
-        tipo_os tipo FK "CHECK nunca terceiros"
+        tipo_os tipo FK "par com ordem_servico"
+        tipo_defeito tipo_defeito "ENUM Predial Corretiva, exibido como Tipo de OS"
         bigint encerrado_por_id FK "usuario perfil tecnico"
         timestamptz data_fim
         text defeito_constatado
@@ -277,16 +307,19 @@ erDiagram
         timestamptz criado_em
     }
 
-    %% Lancamento financeiro, separado da execucao: serve os tres tipos e
-    %% registra quem mexeu no valor. Sua existencia e o que torna a OS "finalizada".
+    %% Lancamento financeiro, separado da execucao: a linha nasce no encerramento
+    %% (o Tecnico informa os valores) e o Administrador corrige depois em Custos
+    %% Pendentes. Sua existencia e o que torna a OS "finalizada".
     os_custo {
         bigint id PK
         bigint tenant_id FK "empresa.id"
         bigint ordem_servico_id FK "UNIQUE um para um"
         tipo_os tipo FK "par com ordem_servico"
-        numeric custo_hora_tecnico "NULL se tipo terceiros"
+        numeric custo_hora_tecnico "so no tipo maquinario"
         numeric custo_manutencao "CHECK nao negativo"
-        text descricao_servico "obrigatorio so no tipo terceiros"
+        text numero_nota_fiscal "so no tipo terceiros"
+        text serie_nota_fiscal "so no tipo terceiros"
+        text descricao_servico_terceiro "so no tipo terceiros"
         bigint lancado_por_id FK
         timestamptz lancado_em
     }

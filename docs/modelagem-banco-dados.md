@@ -1,4 +1,4 @@
-# Modelagem do Banco de Dados — Revisão 3
+# Modelagem do Banco de Dados — Revisão 4
 
 Documento gerado a partir da revisão do código do front-end (`/src/tipos`, `/src/servicos`,
 `/src/paginas`) comparado ao modelo da revisão anterior.
@@ -6,12 +6,23 @@ Documento gerado a partir da revisão do código do front-end (`/src/tipos`, `/s
 - **Revisão 1** (03/08/2026): comparou o DER original com a interface e reescreveu o modelo — 21 entidades.
 - **Revisão 2** (08/08/2026): incorpora os três tipos de OS, as empresas
   terceirizadas, o perfil Administrador e a evidência visual do defeito — **20 tabelas + 7 tipos ENUM**.
-- **Revisão 3** (10/08/2026, este documento): dois ajustes puxados pelo front, sem mudança de
+- **Revisão 3** (10/08/2026): dois ajustes puxados pelo front, sem mudança de
   forma do modelo — **PKs/FKs de negócio trocam de `uuid` para `bigint`** (seção 3.12) e o
   **front para de tratar setor como união estática** e passa a referenciá-lo por id em toda
   parte (`setorId`/`setorNome`, no mesmo padrão de `lojaId`/`lojaNome`) — o banco já modelava
   `setor` como tabela desde a revisão 1; era só o front que ainda não confiava nisso (ponto 3
   da seção 6, agora resolvido).
+- **Revisão 4** (12/08/2026, este documento): **terceirizar deixou de ser um tipo de pedido e
+  virou um desfecho da OS**, decidido pelo Técnico no meio da execução. É a maior mudança de
+  forma desde a revisão 2 e desmonta três decisões antigas: a solicitação passa a ter só dois
+  tipos, o tipo da OS deixa de ser imutável (e com ele cai a FK composta entre solicitação e
+  OS), e o encerramento passa a existir para todos os tipos. Junto vieram a classificação
+  **Predial/Corretiva** no encerramento, a flag **`afeta_producao`** governando o relógio de
+  máquina parada, e a rejeição do Gestor com motivo — **19 tabelas + 9 tipos ENUM** (seção 1.4).
+- **Revisão 4.1** (14/08/2026): correção de **fórmula**, sem mudança de forma — o relógio de
+  máquina parada passa a começar em `solicitacao_os.criado_em`, e não em `ordem_servico.aberta_em`
+  (seção 4). Continuam **19 tabelas + 9 tipos ENUM**: nenhuma coluna nasce ou muda, só a view
+  `vw_os_horas` ganha um join e o contrato passa a devolver `dataSolicitacao` na OS.
 
 O diagrama em si está em [`der-banco-dados.mmd`](./der-banco-dados.mmd) (Mermaid, pronto para colar
 em <https://mermaid.live>), com [`.svg`](./der-banco-dados.svg) e [`.png`](./der-banco-dados.png)
@@ -35,14 +46,14 @@ npm run docs:der
 
 | # | Tema | Revisão 1 | O que a interface exige hoje |
 |---|---|---|---|
-| 1 | **Tipo de OS** | Uma única natureza de OS: máquina cadastrada, técnico do quadro, urgência. Todas as colunas obrigatórias para todos. | `tipo_os` (`maquinario` / `terceiros` / `reparo`) em **`solicitacao_os` e `ordem_servico`**. O tipo decide quais colunas são obrigatórias e quais são proibidas. Ver `/src/tipos/ordemServico.ts`, `servicoReparos.ts`, `servicoOSTerceiros.ts`. |
-| 2 | **Empresa terceirizada** | Não existe. Toda OS aponta para um `tecnico_id`. | Nova tabela `empresa_terceirizada` (cadastro do Administrador, sem vínculo de loja) e FK na OS **mutuamente exclusiva** com `tecnico_id`. Ver `/src/tipos/empresaTerceirizada.ts`, `ModalAprovarOSTerceiros.tsx`. |
+| 1 | **Tipo de OS** | Uma única natureza de OS: máquina cadastrada, técnico do quadro, urgência. Todas as colunas obrigatórias para todos. | `tipo_os` (`maquinario` / `terceiros` / `reparo`) em **`solicitacao_os` e `ordem_servico`**. O tipo decide quais colunas são obrigatórias e quais são proibidas. Ver `/src/tipos/ordemServico.ts`, `servicoReparos.ts`. **→ revisto na revisão 4 (1.4.1): a solicitação ficou com dois tipos e o da OS virou mutável.** |
+| 2 | **Empresa terceirizada** | Não existe. Toda OS aponta para um `tecnico_id`. | Nova tabela `empresa_terceirizada` (cadastro do Administrador, sem vínculo de loja) e FK na OS. Ver `/src/tipos/empresaTerceirizada.ts`. **→ revisto na revisão 4 (1.4.2): deixou de ser mutuamente exclusiva com `tecnico_id` — a OS terceirizada continua com o Técnico.** |
 | 3 | **Pequeno Reparo sem máquina** | `solicitacao_os.maquina_id` `NOT NULL`. | O Solicitante digita o item na hora ("Lâmpada de LED"): `maquina_id` vira nullable e entra `item_descricao`, amarrados por CHECK. Ver `/src/tipos/reparo.ts`, `NovaSolicitacaoReparo.tsx`. |
 | 4 | **4º perfil: Administrador** | Três perfis, todos delimitados por loja/setor. | `administrador` enxerga o tenant inteiro e é dono de todos os cadastros. Modelado como **zero linhas em `usuario_escopo`** — a ausência de escopo é o que significa acesso total. Ver `/src/tipos/autenticacao.ts`, `RotaProtegida.tsx`. |
 | 5 | **Identificação da máquina** | `maquina.tag` com `UNIQUE (tenant_id, tag)`. | `numero_patrimonio` (do cliente, sempre existe) e `numero_serie` (do fabricante, pode faltar). Duas identidades de origens diferentes, com regras de unicidade diferentes. Ver `/src/tipos/maquina.ts`, `CadastrarMaquina.tsx`. |
 | 6 | **Evidência visual do defeito** | Nenhum lugar para arquivo — a solicitação era só texto. | Foto **obrigatória** (bloqueia o envio) e vídeo opcional, capturados pela câmera do celular. Nova tabela `solicitacao_anexo`. Ver `UploadFoto.tsx`, `UploadVideo.tsx`. |
 | 7 | **Custo** | Uma coluna `custo` em `os_encerramento`, preenchida pelo Técnico. | `custo_hora_tecnico` + `custo_manutencao` na nova tabela `os_custo`, com `lancado_por_id` / `lancado_em` — o Técnico informa, o Administrador revisa em Custos Pendentes. Ver `ModalEncerrarOrdemServico.tsx`, `AdministradorCustosPendentes.tsx`. |
-| 8 | **Encerramento não é universal** | Toda OS concluída tinha um `os_encerramento` 1:1. | OS Terceiros **nasce** `Concluída` na aprovação do Gestor e nunca passa por Técnico — não há defeito constatado nem causa raiz. `os_encerramento` só existe para `maquinario` e `reparo`. Ver `servicoSolicitacoes.aprovarTerceiros`. |
+| 8 | **Encerramento não é universal** | Toda OS concluída tinha um `os_encerramento` 1:1. | OS Terceiros **nascia** `Concluída` na aprovação do Gestor e nunca passava por Técnico. **→ desfeito na revisão 4 (1.4.3): voltou a ser universal — toda OS é encerrada pelo Técnico, inclusive a terceirizada.** |
 
 ### 1.2 O que se manteve da revisão 1
 
@@ -57,15 +68,101 @@ npm run docs:der
 
 ### 1.3 Contagem
 
-| | Revisão 1 | Revisão 2 |
-|---|---|---|
-| Tabelas de negócio | 13 | 16 |
-| Tabelas de domínio (lookup) | 8 | 4 |
-| **Total de tabelas** | **21** | **20** |
-| Tipos `ENUM` nativos | 0 | 7 |
+| | Revisão 1 | Revisão 2 | Revisão 4 |
+|---|---|---|---|
+| Tabelas de negócio | 13 | 16 | 16 |
+| Tabelas de domínio (lookup) | 8 | 4 | 3 |
+| **Total de tabelas** | **21** | **20** | **19** |
+| Tipos `ENUM` nativos | 0 | 7 | 9 |
 
-Tabelas novas: `empresa_terceirizada`, `solicitacao_anexo`, `os_custo`.
-Tabelas que viraram `ENUM`: `perfil_usuario`, `status_solicitacao`, `status_os`, `marcador_impacto`.
+Tabelas novas na revisão 2: `empresa_terceirizada`, `solicitacao_anexo`, `os_custo`.
+Tabelas que viraram `ENUM` na revisão 2: `perfil_usuario`, `status_solicitacao`, `status_os`,
+`marcador_impacto`.
+Na revisão 4, `tipo_defeito` deixa de ser tabela de domínio e vira `ENUM` de dois valores
+(1.4.4), e entra o `ENUM` `tipo_solicitacao` (1.4.1). Nenhuma tabela nova.
+
+### 1.4 Mudanças estruturais da revisão 4
+
+Todas saem de uma única decisão de negócio: **quem decide terceirizar é o Técnico, olhando a
+máquina — não o Solicitante, ao relatar o problema, nem o Gestor, ao aprovar.** O Solicitante
+descreve o que está quebrado; classificar e encaminhar é de quem executa.
+
+#### 1.4.1 `terceiros` sai da solicitação: dois ENUM em vez de um
+
+`solicitacao_os.tipo` passa a usar o novo `tipo_solicitacao` (`maquinario` | `reparo`).
+`tipo_os` (três valores) continua existindo, mas só em `ordem_servico` e nas filhas dela.
+
+A consequência pesada é que **`ordem_servico.tipo` deixou de ser imutável**: a OS nasce com o
+tipo da solicitação e é *promovida* a `terceiros` quando o Técnico aciona uma empresa. Com
+isso cai a FK composta `(solicitacao_id, tipo) → solicitacao_os (id, tipo)` da revisão 2 —
+ela exigia domínios iguais e valor fixo, e agora nenhuma das duas coisas vale. As FKs
+compostas **de dentro da OS para baixo** (`os_custo`, `os_encerramento`) continuam, com
+`ON UPDATE CASCADE` (seção 5.2).
+
+#### 1.4.2 A OS terceirizada continua com o Técnico
+
+`empresa_terceirizada_id` deixa de ser mutuamente exclusiva com `tecnico_id`. Agora:
+
+- `tecnico_id` e `urgencia_id` são **obrigatórios em toda OS** — inclusive a terceirizada;
+- `empresa_terceirizada_id` é preenchida **se e somente se** `tipo = 'terceiros'`;
+- entra `terceiro_acionado_em`, o instante do encaminhamento (não exposto no contrato hoje,
+  mas é a única forma de responder "quando isso saiu da mão do time interno").
+
+Acionar não muda status: se o atendimento vai demorar, o caminho continua sendo **pausar** com
+o motivo — a espera não conta como hora trabalhada, e a máquina parada segue contando.
+
+#### 1.4.3 Encerramento volta a ser universal
+
+`os_encerramento` existe para os três tipos e o CHECK `tipo <> 'terceiros'` some. Quem recebe
+o serviço da empresa é o Técnico, e é ele quem sabe escrever defeito constatado, causa raiz e
+solução. Some junto a gambiarra registrada em 2.3 (o Administrador digitando a "Descrição do
+Serviço Realizado" no lugar do `solucao`).
+
+#### 1.4.4 `tipo_defeito` vira "Tipo de OS" e muda de lugar
+
+Era uma tabela de domínio (`Mecânico`, `Elétrico`, `Hidráulico`, …) referenciada pela
+**solicitação**. Virou um `ENUM` de dois valores — `Predial` | `Corretiva` — gravado no
+**encerramento**, por quem executou. Duas mudanças em uma:
+
+- **de lugar:** o Solicitante não distingue predial de corretiva; ele relata o problema. A
+  classificação é fato de execução, não de abertura;
+- **de forma:** com dois valores fechados que só mudam com deploy (o gráfico de rosca do
+  Painel de Indicadores tem uma cor por valor), a regra da seção 2.4 manda `ENUM`, não tabela.
+
+> O campo continua se chamando `tipo_defeito` no contrato e no banco, embora a interface o
+> rotule "Tipo de OS": renomear exigiria mudança simultânea nas duas pontas, sem ganho.
+
+#### 1.4.5 `afeta_producao`: só conta parada quem parou
+
+O marcador `Afeta Produção` (único sobrevivente de `marcador_impacto`, que tinha três) deixou
+de ser informativo: é ele que liga o relógio de máquina parada. `ordem_servico.afeta_producao`
+copia a decisão da solicitação no momento da abertura, e **`horas_parada` só é calculada
+quando a flag é verdadeira** (seção 4) — nas demais a API omite o campo e a tela escreve "Não
+se aplica", nunca `0h`, que sugeriria uma parada instantânea.
+
+A cópia é deliberada: a OS não deve mudar de comportamento se alguém editar a solicitação
+depois.
+
+> **Ajuste da revisão 4.1:** a segunda justificativa que estava aqui — "e o cálculo de horas não
+> deveria precisar de join com a origem" — caiu junto com a mudança da seção 4: o relógio de parada
+> agora **começa** em `solicitacao_os.criado_em`, então o join com a origem passou a ser necessário
+> de qualquer jeito. A flag continua copiada, mas por outro motivo: `afeta_producao` é uma **decisão
+> editável** (alguém pode corrigir o marcador da solicitação depois), enquanto `criado_em` é um
+> **instante imutável** — copiar o primeiro congela a regra, ler o segundo por join é sempre seguro.
+
+#### 1.4.6 Rejeição com motivo, autor e instante
+
+`solicitacao_os` ganha `motivo_rejeicao`, `rejeitado_por_id` e `rejeitada_em`, amarrados por
+CHECK ao `status = 'Rejeitada'` (seção 5.3). O status já existia desde a revisão 1, mas sem
+lugar para o texto — e rejeitar em silêncio devolve o Solicitante ao ponto de partida: ele
+reabre o mesmo pedido e a fila do Gestor nunca esvazia.
+
+#### 1.4.7 `solicitacao_os.setor_id`: lacuna herdada, fechada aqui
+
+Toda listagem do Gestor agrupa por Loja e Setor, mas o Pequeno Reparo não tem máquina — e era
+da máquina que o setor vinha. A solicitação passa a carregar `setor_id` próprio: copiado do
+setor da máquina no Maquinário, e do escopo do Solicitante no Reparo. Além de fechar o buraco,
+o snapshot preserva o histórico se o Solicitante for movido de setor depois.
 
 ---
 
@@ -102,22 +199,33 @@ Separar deixa `os_custo` servir os três tipos sem coluna nullable por tipo, e m
 `lancado_por_id` / `lancado_em` respondem quem mexeu no valor, pergunta que sempre aparece quando o
 número vai para um relatório.
 
-Para OS Terceiros, a "Descrição do Serviço Realizado" que o Administrador digita vive em
-`os_custo.descricao_servico` — mesmo ator, mesmo momento, mesmo formulário. Isso substitui a gambiarra
-atual do front, que reaproveita o campo `solucao` da OS para esse texto.
+> **Ajustado na revisão 4.** A separação continua, mas os dois momentos deixaram de ser
+> sequenciais: o Técnico já informa `custo_manutencao` (e `custo_hora_tecnico`, só no
+> Maquinário) **no encerramento**, então a linha de `os_custo` nasce na mesma transação, com
+> `lancado_por_id` = técnico. O Administrador entra depois só para **corrigir** — tipicamente
+> conferindo o valor contra a nota fiscal da empresa terceirizada, e por isso `os_custo` ganhou
+> `numero_nota_fiscal`, `serie_nota_fiscal` e `descricao_servico_terceiro` (os três só válidos
+> em `tipo = 'terceiros'`, e todos opcionais). O antigo `descricao_servico` **obrigatório** em
+> terceiros morreu com a gambiarra que ele resolvia: agora existe `os_encerramento.solucao`
+> para todo tipo, escrito pelo Técnico (1.4.3).
+>
+> Efeito colateral a assumir: como o custo nasce junto do encerramento, `vw_os_custo_pendente`
+> quase sempre vem vazia. A tela "Custos Pendentes" do Administrador por isso lista **toda OS
+> `Concluída`**, com ou sem custo — ela é a fila de conferência, não a de digitação (seção 4).
 
 ### 2.4 `ENUM` no que é regra de código, tabela no que o cliente cadastra
 
-**Viraram `ENUM` nativo:** `perfil_usuario`, `tipo_os`, `origem_solicitacao`, `status_solicitacao`,
-`status_os`, `marcador_impacto`, `tipo_anexo`.
+**Viraram `ENUM` nativo:** `perfil_usuario`, `tipo_solicitacao`, `tipo_os`, `tipo_defeito`,
+`origem_solicitacao`, `status_solicitacao`, `status_os`, `marcador_impacto`, `tipo_anexo`.
+(`tipo_solicitacao` e `tipo_defeito` entraram na revisão 4 — ver 1.4.1 e 1.4.4.)
 
 Nenhum deles ganha um valor novo sem alguém escrever código que o trate — então virar `INSERT` seria
 uma flexibilidade falsa, que só serve para inserir valor que a aplicação não entende.
 
-**Continuam tabela:** `tipo_defeito`, `area_tecnico`, `nivel_criticidade`, `nivel_urgencia`. São
+**Continuam tabela:** `area_tecnico`, `nivel_criticidade`, `nivel_urgencia`. São
 vocabulário do cliente: um supermercado pode querer "Automação" onde outro quer "Ar-condicionado".
 
-**Resultado:** nove listas de domínio caem para quatro tabelas, some um JOIN de toda listagem quente,
+**Resultado:** nove listas de domínio caem para três tabelas, some um JOIN de toda listagem quente,
 e uma limitação registrada na revisão 1 desaparece — o CHECK de "área de atuação é obrigatória para
 técnico" precisava de subquery (que `CHECK` não aceita) e agora é uma expressão simples:
 
@@ -126,8 +234,10 @@ ALTER TABLE usuario ADD CONSTRAINT ck_usuario_area_tecnico
   CHECK ((perfil = 'tecnico') = (area_tecnico_id IS NOT NULL));
 ```
 
-**Contrapartida assumida:** um 4º marcador de impacto passa a ser `ALTER TYPE` + deploy, não `INSERT`.
-Aceitável, porque um marcador novo exige código no front para exibi-lo de qualquer forma.
+**Contrapartida assumida:** um marcador de impacto novo passa a ser `ALTER TYPE` + deploy, não
+`INSERT`. Aceitável, porque um marcador novo exige código no front para exibi-lo de qualquer forma —
+e a revisão 4 mostrou que o movimento tende a ser o contrário: `marcador_impacto` **encolheu** de
+três valores para um (`Afeta Produção`), porque os outros dois não mudavam decisão nenhuma.
 
 ---
 
@@ -167,7 +277,7 @@ vezes, só a última sobrevive.
 
 `os_pausa` (`motivo`, `pausada_em`, `retomada_em`, `status_anterior`) preserva as três — e é o que
 torna possível calcular MTTR e horas de parada corretamente no Painel de Indicadores (item 8 do
-CLAUDE.md), hoje gerado por mock.
+CLAUDE.md).
 
 > O campo `dataPausa`, adicionado ao front nesta mesma leva, já era previsto aqui como
 > `os_pausa.pausada_em` desde a revisão 1.
@@ -183,11 +293,19 @@ deles criaria uma OS finalizada sem custo.
 
 ### 3.5 `tipo` repetido é denormalização deliberada
 
-O tipo desce da solicitação para a OS e dela para `os_custo` e `os_encerramento`. É a única
-denormalização deliberada do modelo, e cada salto é travado por FK composta (seção 5.2).
+O tipo desce da OS para `os_custo` e `os_encerramento`, e cada salto é travado por FK composta
+(seção 5.2). Sem ela, "custo hora técnico só existe em maquinário" e "nota fiscal só existe em
+terceiros" virariam trigger — um `CHECK` não enxerga a tabela pai. A FK composta faz o próprio
+PostgreSQL garantir que a cópia nunca diverge.
 
-Sem ela, "terceiros não tem técnico" e "terceiros não tem encerramento" virariam trigger — um `CHECK`
-não enxerga a tabela pai. A FK composta faz o próprio PostgreSQL garantir que a cópia nunca diverge.
+> **Revisão 4:** o salto **de fora para dentro** (solicitação → OS) foi cortado. Os dois lados
+> deixaram de compartilhar domínio (`tipo_solicitacao` × `tipo_os`) e o valor da OS deixou de ser
+> imutável, então a FK composta ali não tinha mais o que garantir — ver 1.4.1. Dentro da OS a
+> cadeia continua, agora com `ON UPDATE CASCADE`, porque o `tipo` do pai pode mudar (`maquinario`
+> → `terceiros`) enquanto a OS ainda está aberta.
+>
+> A denormalização de `afeta_producao` (1.4.5) segue outra lógica: é **snapshot**, não cópia
+> sincronizada. Editar a solicitação depois não deve mudar como a OS conta horas.
 
 ### 3.6 Patrimônio e série têm regras diferentes
 
@@ -196,14 +314,12 @@ válido só quando preenchido — a série vem do fabricante e falta em equipame
 
 ### 3.7 Técnico continua sendo `usuario`
 
-O front mantém `USUARIOS_MOCK` e `TECNICOS_MOCK` separados. No banco é uma tabela só, com
+O front tem dois serviços (`servicoUsuarios`, `servicoTecnicos`), mas no banco é uma tabela só, com
 `perfil = 'tecnico'` e `area_tecnico_id` preenchido.
 
-A separação é conveniência do mock, não regra de negócio. Duplicar login e e-mail em duas tabelas
-abriria a porta para o mesmo e-mail existir duas vezes no mesmo tenant.
-
-> Consequência: o roteamento interno de `servicoUsuarios.criar` para `servicoTecnicos` (CLAUDE.md
-> item 7) some na integração real — vira um `INSERT` só, com `perfil` diferente.
+A separação é de leitura, não de escrita: `GET /tecnicos` é **projeção somente-leitura** para o
+select de Técnico Responsável, e todo `INSERT`/`UPDATE`/`DELETE` de técnico passa por `/usuarios`.
+Duas superfícies de escrita abririam a porta para o mesmo e-mail existir duas vezes no mesmo tenant.
 
 ### 3.8 Escopo de acesso unificado para os quatro perfis
 
@@ -227,15 +343,24 @@ três telefones que envelhecem em ritmos diferentes.
 
 ### 3.10 Anexo aponta para chave, não para URL
 
-`solicitacao_anexo.url` guarda a chave do objeto no storage, não um endereço assinado. A URL de
-acesso é gerada na leitura, porque link assinado expira — persistido, o banco acumula endereços que
-param de funcionar sem nada indicar que quebraram.
+`solicitacao_anexo.chave` (e `maquina.foto_chave`, mesmo motivo) guarda a chave do objeto no R2, não
+um endereço assinado. A URL de acesso é gerada na leitura (`bucketR2.URLLeitura`), porque link
+assinado expira — persistido, o banco acumula endereços que param de funcionar sem nada indicar que
+quebraram. Sem coluna `bucket`: cada tipo de anexo já sobe pra um bucket fixo, escolhido no código
+que registra a rota (`bucketR2.UploadFoto(url, bucket)`), não varia por linha — guardar isso no banco
+seria flexibilidade que nada no contrato pede.
 
 ### 3.11 Impactos como N:N
 
 `solicitacao_impacto` continua sendo a associativa (uma linha por marcador por solicitação), casando
-com o array já usado no front (`impactos: MarcadorImpacto[]`). O que mudou é que o marcador deixou de
-ser FK para uma tabela de domínio e passou a ser coluna `ENUM` (seção 2.4).
+com o array já usado no front (`impactos: MarcadorImpacto[]`). O que mudou na revisão 2 é que o
+marcador deixou de ser FK para uma tabela de domínio e passou a ser coluna `ENUM` (seção 2.4).
+
+> **Revisão 4:** sobrou **um** marcador (`Afeta Produção`) e ele deixou de ser informativo — é o que
+> liga o relógio de máquina parada (1.4.5). Com um valor só, a associativa poderia virar um `boolean`
+> em `solicitacao_os`; foi mantida porque o contrato troca uma lista e um marcador novo não mexeria
+> em tabela nem em payload. A decisão que realmente importa está do outro lado: a OS **não** consulta
+> esta tabela para calcular horas — ela carrega `afeta_producao` como snapshot.
 
 ### 3.12 Convenções gerais
 
@@ -266,9 +391,14 @@ Três números aparecem em tela e nenhum deles é coluna.
 
 | Grandeza | Fórmula | Onde aparece |
 |---|---|---|
-| `horas_parada` | `data_fim − ordem_servico.aberta_em` | Indicadores, encerramento |
+| `horas_parada` | `data_fim − solicitacao_os.criado_em`, **só se `afeta_producao`** | Indicadores, encerramento |
 | `horas_trabalhadas` | `(data_fim − iniciada_em) − Σ pausas posteriores a iniciada_em` | Card do Gestor, encerramento |
 | `custo_total` | `COALESCE(custo_hora_tecnico, 0) + custo_manutencao` | Detalhes da OS, indicadores |
+
+**Por que `horas_parada` pode ser `NULL`:** com `afeta_producao = false` a máquina seguiu operando
+durante o atendimento — não houve parada para medir. O valor correto é a ausência do número, não
+zero: `0h` seria uma parada que começou e terminou no mesmo instante, coisa que não aconteceu. A API
+omite o campo e a tela escreve "Não se aplica" (1.4.5).
 
 **Por que só as pausas posteriores a `iniciada_em`:** uma pausa dada com a OS ainda `Aberta` não
 interrompe trabalho nenhum — a sessão de trabalho só existe depois de "Iniciar Atendimento". Como
@@ -278,18 +408,34 @@ de trabalho.
 **Por que `horas_parada` não desconta pausas:** a máquina continua parada mesmo enquanto o técnico
 espera uma peça. São dois relógios independentes (CLAUDE.md item 9).
 
+**Por que o relógio começa na solicitação, e não na abertura da OS (revisão 4.1):** a máquina parou
+quando o Solicitante relatou o problema, não quando o Gestor achou tempo de aprovar. Medindo a
+partir de `aberta_em`, toda a espera na fila do Gestor sumia do indicador — justamente o pedaço que
+o cliente pode encurtar, e o único que a operação controla. Pior: quanto mais devagar o Gestor
+aprovasse, melhor ficaria o número. O contrato passa a devolver esse instante na OS
+(`dataSolicitacao`, denormalizado do join), para que a tela consiga explicar de onde vem o total.
+
+> **Migração:** OS encerradas antes da mudança não guardam nada de errado — `horas_parada` nunca
+> foi coluna, então o novo valor sai da view no próximo SELECT, retroativo por construção. O que
+> muda são os indicadores históricos, que sobem. Se a comparação com números já divulgados
+> importar, a saída é a de sempre: recortar o gráfico por data, não congelar a fórmula.
+
 ```sql
 -- Horas de uma OS encerrada: nenhuma das duas é coluna.
 CREATE VIEW vw_os_horas AS
 SELECT os.id AS ordem_servico_id,
-       EXTRACT(EPOCH FROM (e.data_fim - os.aberta_em)) / 3600 AS horas_parada,
+       -- Parada conta desde o pedido do Solicitante: a espera na fila do Gestor é parada real.
+       CASE WHEN os.afeta_producao
+            THEN EXTRACT(EPOCH FROM (e.data_fim - s.criado_em)) / 3600
+       END AS horas_parada,
        EXTRACT(EPOCH FROM (e.data_fim - os.iniciada_em)) / 3600
          - COALESCE((SELECT SUM(EXTRACT(EPOCH FROM (p.retomada_em - p.pausada_em))) / 3600
                        FROM os_pausa p
                       WHERE p.ordem_servico_id = os.id
                         AND p.pausada_em >= os.iniciada_em), 0) AS horas_trabalhadas
   FROM ordem_servico os
-  JOIN os_encerramento e ON e.ordem_servico_id = os.id;
+  JOIN os_encerramento e ON e.ordem_servico_id = os.id
+  JOIN solicitacao_os s ON s.id = os.solicitacao_id;
 
 -- "OS Finalizada" do Gestor, do Técnico e do Administrador: estado derivado, não um status.
 CREATE VIEW vw_os_finalizada AS
@@ -299,17 +445,24 @@ SELECT os.*,
   JOIN os_custo c ON c.ordem_servico_id = os.id
  WHERE os.status = 'Concluída';
 
--- O complemento exato: a tela "Custos Pendentes" do Administrador.
-CREATE VIEW vw_os_custo_pendente AS
+-- Custo ainda não lançado. Desde a revisão 4 é caso raro (o Técnico informa os valores no
+-- encerramento), mas continua sendo a resposta certa para "que OS está sem custo?".
+CREATE VIEW vw_os_custo_sem_lancamento AS
 SELECT os.*
   FROM ordem_servico os
  WHERE os.status = 'Concluída'
    AND NOT EXISTS (SELECT 1 FROM os_custo c WHERE c.ordem_servico_id = os.id);
 ```
 
-> **Nota sobre indicadores:** `servicoIndicadores` hoje gera MTTR/MTBF/custo mockados e
-> determinísticos, desligados dos fechamentos reais (CLAUDE.md item 8). Estas views são o alvo para
-> onde ele deve apontar na integração.
+> **A tela "Custos Pendentes" não usa a view acima.** Ela lista **toda** OS `Concluída`
+> (`GET /ordens-servico?status=Concluída`), com ou sem custo lançado, porque virou fila de
+> **conferência**: o valor já veio do Técnico e o Administrador confere contra a nota fiscal
+> (seção 2.3). A view fica para relatório e alerta operacional.
+
+> **Nota sobre indicadores:** `GET /indicadores/maquinas/:id` calcula MTTR/MTBF/custo a partir do
+> histórico real de OS encerradas. Estas views são a base para esse cálculo — e o gráfico de rosca
+> agrupa por `os_encerramento.tipo_defeito` (`Predial` / `Corretiva`), não mais por um tipo de
+> defeito informado na abertura (1.4.4).
 
 ---
 
@@ -322,53 +475,71 @@ segundo cliente da API furam todas elas.
 
 ```sql
 CREATE TYPE perfil_usuario     AS ENUM ('solicitante','tecnico','gestor','administrador');
+CREATE TYPE tipo_solicitacao   AS ENUM ('maquinario','reparo');
 CREATE TYPE tipo_os            AS ENUM ('maquinario','terceiros','reparo');
+CREATE TYPE tipo_defeito       AS ENUM ('Predial','Corretiva');
 CREATE TYPE origem_solicitacao AS ENUM ('solicitante','preventiva');
 CREATE TYPE status_solicitacao AS ENUM ('Pendente','Convertida','Rejeitada');
 CREATE TYPE status_os          AS ENUM ('Aberta','Em Andamento','Pausada','Concluída');
-CREATE TYPE marcador_impacto   AS ENUM ('Afeta Produção','Parada Parcial','Retrabalho');
+CREATE TYPE marcador_impacto   AS ENUM ('Afeta Produção');
 CREATE TYPE tipo_anexo         AS ENUM ('foto','video');
 ```
 
-### 5.2 Coerência dos três tipos de OS
+> `tipo_solicitacao` e `tipo_os` são dois tipos de propósito, e não um só reaproveitado: só a OS
+> pode ser `terceiros`. Um `CHECK (tipo <> 'terceiros')` na solicitação resolveria hoje, mas
+> deixaria o valor proibido visível em todo select gerado a partir do domínio.
+
+### 5.2 Coerência dos tipos (revista na revisão 4)
 
 ```sql
--- Reparo não tem máquina cadastrada nem tipo de defeito; os outros dois exigem ambos.
+-- Reparo não tem máquina cadastrada; Maquinário exige a FK e proíbe o texto livre.
+-- Setor é obrigatório nos dois: no Maquinário vem da máquina, no Reparo do escopo
+-- do Solicitante (1.4.7).
 ALTER TABLE solicitacao_os ADD CONSTRAINT ck_solicitacao_alvo CHECK (
-  (tipo =  'reparo' AND maquina_id IS NULL     AND item_descricao IS NOT NULL
-                    AND tipo_defeito_id IS NULL) OR
-  (tipo <> 'reparo' AND maquina_id IS NOT NULL AND item_descricao IS NULL
-                    AND tipo_defeito_id IS NOT NULL));
+  (tipo = 'reparo'     AND maquina_id IS NULL     AND item_descricao IS NOT NULL) OR
+  (tipo = 'maquinario' AND maquina_id IS NOT NULL AND item_descricao IS NULL));
 
--- Ou técnico interno com urgência, ou empresa terceirizada. Nunca os dois, nunca nenhum.
+-- Toda OS tem técnico e urgência. A empresa terceirizada existe se e somente se o
+-- Técnico acionou uma -- o que é exatamente o que 'terceiros' significa.
 ALTER TABLE ordem_servico ADD CONSTRAINT ck_os_executor CHECK (
-  (tipo =  'terceiros' AND empresa_terceirizada_id IS NOT NULL
-                       AND tecnico_id IS NULL     AND urgencia_id IS NULL) OR
-  (tipo <> 'terceiros' AND empresa_terceirizada_id IS NULL
-                       AND tecnico_id IS NOT NULL AND urgencia_id IS NOT NULL));
+  tecnico_id IS NOT NULL AND urgencia_id IS NOT NULL AND
+  ((tipo = 'terceiros') = (empresa_terceirizada_id IS NOT NULL)) AND
+  ((empresa_terceirizada_id IS NOT NULL) = (terceiro_acionado_em IS NOT NULL)));
 
--- O tipo se propaga por FK composta em toda a cadeia, sem trigger: a solicitação expõe
--- o par (id, tipo), a OS referencia o par inteiro, e as filhas da OS fazem o mesmo.
--- Assim um CHECK local já enxerga o tipo e não precisa consultar a tabela pai.
-ALTER TABLE solicitacao_os  ADD CONSTRAINT uq_solicitacao_tipo UNIQUE (id, tipo);
-ALTER TABLE ordem_servico   ADD CONSTRAINT fk_os_solicitacao_tipo
-  FOREIGN KEY (solicitacao_id, tipo) REFERENCES solicitacao_os (id, tipo);
-
+-- Dentro da OS o tipo continua se propagando por FK composta, sem trigger: a OS expõe
+-- o par (id, tipo) e as filhas referenciam o par inteiro, então um CHECK local enxerga
+-- o tipo sem consultar a tabela pai. ON UPDATE CASCADE porque o tipo da OS pode ser
+-- promovido a 'terceiros' enquanto ela está aberta (1.4.1).
 ALTER TABLE ordem_servico   ADD CONSTRAINT uq_os_tipo UNIQUE (id, tipo);
 ALTER TABLE os_custo        ADD CONSTRAINT fk_custo_os_tipo
-  FOREIGN KEY (ordem_servico_id, tipo) REFERENCES ordem_servico (id, tipo);
+  FOREIGN KEY (ordem_servico_id, tipo) REFERENCES ordem_servico (id, tipo)
+  ON UPDATE CASCADE;
 ALTER TABLE os_encerramento ADD CONSTRAINT fk_encerramento_os_tipo
-  FOREIGN KEY (ordem_servico_id, tipo) REFERENCES ordem_servico (id, tipo);
+  FOREIGN KEY (ordem_servico_id, tipo) REFERENCES ordem_servico (id, tipo)
+  ON UPDATE CASCADE;
 
--- Terceiros nunca passa por técnico: não existe encerramento para esse tipo.
-ALTER TABLE os_encerramento ADD CONSTRAINT ck_encerramento_sem_terceiros
-  CHECK (tipo <> 'terceiros');
+-- A OS nasce com o tipo da solicitação e só pode ser promovida a 'terceiros'.
+-- CHECK não vê o valor anterior: isto é uma trigger BEFORE UPDATE.
+CREATE OR REPLACE FUNCTION trg_os_tipo_promocao() RETURNS trigger AS $$
+BEGIN
+  IF NEW.tipo <> OLD.tipo AND NEW.tipo <> 'terceiros' THEN
+    RAISE EXCEPTION 'tipo da OS só muda para terceiros (era %, tentou %)', OLD.tipo, NEW.tipo;
+  END IF;
+  RETURN NEW;
+END $$ LANGUAGE plpgsql;
 
--- Terceiros: o Administrador registra o que a empresa fez, e não há custo hora de técnico.
+-- Custo hora do técnico só existe no Maquinário: em 'terceiros' quem trabalhou foi a
+-- empresa, e em 'reparo' o serviço não cobra hora técnica. Dados da nota fiscal, o
+-- espelho disso: só em 'terceiros'.
 ALTER TABLE os_custo ADD CONSTRAINT ck_custo_por_tipo CHECK (
-  (tipo =  'terceiros' AND custo_hora_tecnico IS NULL AND descricao_servico IS NOT NULL) OR
-  (tipo <> 'terceiros' AND descricao_servico IS NULL));
+  (tipo = 'maquinario' OR custo_hora_tecnico IS NULL) AND
+  (tipo = 'terceiros'  OR (numero_nota_fiscal IS NULL AND serie_nota_fiscal IS NULL
+                           AND descricao_servico_terceiro IS NULL)));
 ```
+
+> **O que saiu daqui na revisão 4:** a FK composta `(solicitacao_id, tipo)` entre OS e
+> solicitação (domínios diferentes, valor mutável — 1.4.1) e o
+> `ck_encerramento_sem_terceiros` (toda OS é encerrada pelo Técnico — 1.4.3).
 
 ### 5.3 Cardinalidades, unicidade e coerência de tenant
 
@@ -391,6 +562,11 @@ CREATE UNIQUE INDEX uq_preventiva_pendente ON solicitacao_os (preventiva_id)
 ALTER TABLE solicitacao_os ADD CONSTRAINT ck_origem CHECK (
   ((origem = 'preventiva')  = (preventiva_id  IS NOT NULL)) AND
   ((origem = 'solicitante') = (solicitante_id IS NOT NULL)));
+
+-- Rejeição carrega motivo, autor e instante -- os três juntos ou nenhum (1.4.6).
+ALTER TABLE solicitacao_os ADD CONSTRAINT ck_rejeicao CHECK (
+  (status = 'Rejeitada') = (motivo_rejeicao IS NOT NULL AND rejeitado_por_id IS NOT NULL
+                            AND rejeitada_em IS NOT NULL));
 
 -- Área de atuação: obrigatória para técnico, proibida para os demais perfis.
 ALTER TABLE usuario ADD CONSTRAINT ck_usuario_area_tecnico
@@ -460,17 +636,22 @@ garantindo o corte no banco e não só na aplicação.
 > **Resolvido na revisão 3:** PKs/FKs de negócio viram `bigint` (seção 3.12) e o front alinha
 > `setor` ao modelo — era o único lado ainda tratando setor como união estática (ponto 3 abaixo,
 > mantido riscado por registro histórico).
+> **Resolvido na revisão 4:** terceirização vira desfecho da OS e não tipo de pedido, o setor
+> passa a ser coluna da solicitação (ponto 6 abaixo) e a rejeição ganha motivo (seção 1.4).
 
-1. **Storage real dos anexos.**
-   Hoje foto e vídeo viram `blob:` do navegador via `URL.createObjectURL` — somem ao recarregar a
-   página. Em produção precisam de bucket (S3, MinIO, R2), e aí `solicitacao_anexo` ganha `bucket` e
-   `chave` no lugar de uma `url` solta. Vale também definir política de retenção: foto de OS de 2019
-   continua ocupando espaço.
+1. ~~**Storage real dos anexos.**~~ **Resolvido na migration `000003` — sem coluna `bucket`.**
+   `solicitacao_anexo.url` virou `chave` e `maquina.foto_url` virou `foto_chave` (seção 3.10):
+   R2 real (Cloudflare) no lugar do `blob:` do navegador, chave prefixada por tenant
+   (`bucketR2.UploadFoto`), URL assinada gerada na leitura (`bucketR2.URLLeitura`). Sem coluna
+   `bucket`: o bucket de cada tipo de anexo é fixo no código que registra a rota, não varia por
+   linha. Falta política de retenção: foto de OS de 2019 continua ocupando espaço — ainda em aberto.
 
-2. **Histórico de lançamento de custo.**
+2. **Histórico de lançamento de custo.** *(mais urgente desde a revisão 4)*
    `os_custo` é 1:1 com a OS e guarda quem lançou e quando — mas se o Administrador corrigir o valor,
-   o anterior se perde. Se o número for para relatório contábil, vale `os_custo_historico` em
-   append-only, com a linha vigente sendo a mais recente.
+   o anterior se perde. Isso deixou de ser hipótese: agora a linha **nasce** com o valor do Técnico e
+   o fluxo normal é o Administrador editá-la contra a nota fiscal (seção 2.3), então o valor
+   original é sobrescrito em toda OS terceirizada. Se o número for para relatório contábil, vale
+   `os_custo_historico` em append-only, com a linha vigente sendo a mais recente.
 
 3. ~~**`setor` dinâmico vs. enum estático.**~~ **Resolvido na revisão 3.**
    O banco sempre modelou setor como tabela — era o front que ainda validava `setor` contra a união
@@ -488,5 +669,14 @@ garantindo o corte no banco e não só na aplicação.
 
 5. **Empresa terceirizada por loja.**
    Modelada como cadastro do tenant, sem vínculo de loja. Se na prática cada filial negociar com
-   fornecedores diferentes e o Gestor não puder escolher um que não atende a região dele, entra uma
-   N:N `empresa_terceirizada_loja` — e o select de aprovação passa a filtrar pela loja da solicitação.
+   fornecedores diferentes e o Técnico não puder acionar um que não atende a região dele, entra uma
+   N:N `empresa_terceirizada_loja` — e o select do `ModalAcionarTerceiro` passa a filtrar pela loja
+   da OS.
+
+6. ~~**Setor do Pequeno Reparo.**~~ **Resolvido na revisão 4** (1.4.7): `solicitacao_os.setor_id`.
+
+7. **Trocar o técnico de uma OS.**
+   Hoje `ordem_servico.tecnico_id` é fixo, e é isso que sustenta a inferência de autoria das
+   transições (item 4 acima): quem iniciou/pausou/encerrou só pode ter sido ele. No dia em que uma OS
+   puder ser reatribuída — férias, turno, especialidade errada — a inferência quebra e `os_evento`
+   deixa de ser opcional. Vale decidir a ordem: reatribuição **depois** da auditoria, nunca antes.
