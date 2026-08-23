@@ -302,8 +302,11 @@ make backup-banco
 Implementado em `cli_backup_banco.go` na raiz. Requer `R2_BUCKET_NAME_BACKUPS` no `.env`
 (reaproveita as outras três `R2_*` já usadas pelo upload de foto) — **o bucket precisa
 existir no Cloudflare antes**, criado manualmente no dashboard: `PutObject` não cria
-bucket, só grava dentro de um que já existe (testado local: erro limpo `NoSuchBucket`
-contra um nome ainda não criado — o resto do pipeline, pg_dump + upload, roda certo).
+bucket, só grava dentro de um que já existe. **Testado local de ponta a ponta contra o R2
+de verdade** (23/08/2026, bucket `backups-cooprata`): `make backup-banco` →
+`backup salvo em backups-cooprata/backups/<timestamp>.dump`, sem erro — antes disso, contra
+o mesmo bucket ainda não criado, o erro era um `NoSuchBucket` limpo (confirmando que só
+faltava o bucket, o resto do pipeline já rodava certo).
 `--no-owner --no-privileges` existem por causa do restore: o banco de teste ("restore
 ensaiado") normalmente tem um owner diferente do de produção, e sem essas duas flags o
 `pg_restore` para em `ALTER OWNER`/`GRANT` pra um role que não existe no destino —
@@ -845,13 +848,13 @@ passagem encontrou.
 admin cadastrar a primeira loja, passa a ser a diferença entre um susto e recomeçar do
 zero (Hobby não tem PITR).
 
-**Resolvido em código (23/08/2026), falta só o agendamento em produção.** O subcomando
-`backup-banco` (ver "Backup do banco" acima) faz `pg_dump` + upload pro R2, testado local
-de ponta a ponta — inclusive o restore (`pg_restore` contra banco descartável, contagem
-de linhas batendo). O que falta pra fechar o bloqueio: (1) criar o bucket
-`R2_BUCKET_NAME_BACKUPS` no Cloudflare — `PutObject` não cria bucket sozinho; (2)
+**Resolvido em código e testado local (23/08/2026), falta só produção.** O subcomando
+`backup-banco` (ver "Backup do banco" acima) faz `pg_dump` + upload pro R2 — testado local
+de ponta a ponta contra o R2 e o Postgres reais, bucket `backups-cooprata` já criado no
+Cloudflare, upload confirmado sem erro, e o restore também testado (`pg_restore` contra
+banco descartável, contagem de linhas batendo). O que falta pra fechar o bloqueio: (1)
 configurar o Cron Job no Railway apontando pro comando (⚠️ não testado contra Railway de
-verdade — ver a nota sobre o `ENTRYPOINT` do `dockerfile` na seção do comando); (3) rodar
+verdade — ver a nota sobre o `ENTRYPOINT` do `dockerfile` na seção do comando); (2) rodar
 o restore ensaiado **uma vez contra o dump que sai do R2 de produção**, não só contra o
 teste local.
 
@@ -886,9 +889,9 @@ Deixa de ser aceite consciente para entregar o acesso.
 
 ### Antes de entregar pro admin
 - **Backup com restore ensaiado.** O mecanismo (`backup-banco`, `pg_dump` → R2) está
-  pronto e testado local — falta o bucket no Cloudflare, o Cron Job no Railway e um
-  restore ensaiado **contra o dump real de produção**, não só o local. Backup nunca
-  testado com o dump de verdade não é backup.
+  pronto e testado local de ponta a ponta, bucket no Cloudflare já criado — falta o Cron
+  Job no Railway e um restore ensaiado **contra o dump real de produção**, não só o
+  local. Backup nunca testado com o dump de verdade não é backup.
 - **A partir daqui, toda migration é migration com dado dentro.** A regra de testar
   `up`+`down` num Postgres descartável (ver "Migrations") sobe de nível: teste contra um
   **restore do dump de produção**, não contra banco vazio. O que passa no vazio e quebra
