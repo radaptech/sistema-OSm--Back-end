@@ -321,20 +321,42 @@ instância só, sem um banco por tenant).
 **Agendamento é Railway Cron, não `pg_cron`** — mesmo motivo do job de preventiva vencida
 (ver "Abertura automática de solicitação por preventiva" nesse arquivo): Hobby não libera
 `shared_preload_libraries`. Ao configurar o Cron Job no Railway:
-- Aponte pro mesmo repo/imagem da API, com **Custom Start Command** rodando
-  `./main backup-banco` (não `go run .` — o binário já compilado é o que o
-  `ENTRYPOINT` do `dockerfile` gera).
-- ⚠️ **Não testado contra o Railway de verdade.** O `ENTRYPOINT` do `dockerfile` hoje é
-  fixo em `CompileDaemon ... -command=./main` (ferramenta de hot-reload, pensada pro
-  Compose local) — não é garantido que o Custom Start Command do Cron Job substitua esse
-  `ENTRYPOINT` em vez de virar argumento dele. Se o Cron Job não rodar o comando certo,
-  confirme isso primeiro: pode precisar de uma imagem/Dockerfile separado só pro Cron,
-  sem o `CompileDaemon` no meio.
+- Aponte pro mesmo repo, com **Custom Start Command** `backup-banco` (só o subcomando —
+  o `ENTRYPOINT` do `dockerfile` de produção já é `["./main"]`, então o argumento chega
+  como `./main backup-banco`; **testado local** com `docker run <imagem> backup-banco`
+  puro, sem `sh -c` nem truque, e subiu o backup certinho).
+- **`dockerfile` (produção) e `dockerfile.dev` (Compose local) são arquivos diferentes
+  desde 23/08/2026** — ver "Dois Dockerfiles" abaixo. Garanta que o Railway builda o
+  `dockerfile` (produção, sem CompileDaemon): "Settings > Build > Dockerfile Path", se o
+  nome sozinho não for pego por padrão.
 - Variáveis do serviço: as mesmas `DB_*`/`DB_SSLMODE` da API (host interno
   `*.railway.internal`) e as quatro `R2_*` (as três de sempre + `R2_BUCKET_NAME_BACKUPS`).
 - Frequência: diária é o ponto de partida razoável — não existe ainda rotação/expiração
   de backup antigo (o bucket cresce um `.dump` por execução, sem limpeza automática); se
   o custo de armazenamento incomodar, é o próximo passo, não um bloqueio para começar.
+
+## Dois Dockerfiles (produção × dev)
+`dockerfile` (produção, o que o Railway builda) e `dockerfile.dev` (o que
+`../docker-compose.yml` builda, `dockerfile: dockerfile.dev` no serviço `api`) — arquivos
+separados desde 23/08/2026. Motivo: `dockerfile.dev` roda `CompileDaemon` (hot-reload,
+pra reagir ao volume `./back-end:/app` do Compose) com um `ENTRYPOINT` fixo — sem uma
+imagem de produção própria, o Cron Job do `backup-banco` (acima) não tinha como injetar
+o argumento certo, e a imagem final carregava o toolchain do Go inteiro à toa.
+- `dockerfile` é multi-stage: `builder` compila (`CGO_ENABLED=0` — nada no projeto usa
+  cgo, pgx/v5 é Go puro, então sai binário estático), o estágio final é só
+  `alpine:3.24` (mesma versão por baixo de `golang:1.26.5-alpine`) + `ca-certificates`
+  (senão toda chamada HTTPS pro R2 falha na validação do certificado) +
+  `postgresql16-client` (só o `pg_dump`/`pg_restore`, não o servidor) + o binário +
+  `database/migrate` (`config/conn.go` lê migrations por caminho relativo,
+  `file://database/migrate`, resolvido a partir do `WORKDIR`). **Testado local:** builda
+  limpo, sobe a API normal contra o Postgres do Compose (migrations rodando, rotas
+  registradas) e roda `backup-banco` como argumento simples — 94.5MB contra 1.17GB da
+  imagem de dev (~12x menor), sem o Go toolchain nem o `.git` embarcados.
+- `dockerfile.dev` não muda: continua com `git`/`build-base`/`CompileDaemon` e o
+  `postgresql16-client` (o `backup-banco` também precisa rodar localmente pra testar).
+- **Nenhum dos dois copia `.env`** — nem precisa: `config.NewVariaveisAmbiente` tenta
+  carregar `.env` e só avisa se não achar, seguindo com variável de ambiente do sistema
+  (é o caminho de produção: Railway injeta as variáveis, não existe `.env` lá).
 
 ## Autenticação (JWT)
 - `auth.GerarJwt(id, tenantId int64, perfil string)` assina um HS256 com `JWT_SECRET`
@@ -852,11 +874,12 @@ zero (Hobby não tem PITR).
 `backup-banco` (ver "Backup do banco" acima) faz `pg_dump` + upload pro R2 — testado local
 de ponta a ponta contra o R2 e o Postgres reais, bucket `backups-cooprata` já criado no
 Cloudflare, upload confirmado sem erro, e o restore também testado (`pg_restore` contra
-banco descartável, contagem de linhas batendo). O que falta pra fechar o bloqueio: (1)
-configurar o Cron Job no Railway apontando pro comando (⚠️ não testado contra Railway de
-verdade — ver a nota sobre o `ENTRYPOINT` do `dockerfile` na seção do comando); (2) rodar
-o restore ensaiado **uma vez contra o dump que sai do R2 de produção**, não só contra o
-teste local.
+banco descartável, contagem de linhas batendo). Ganhou também um `dockerfile` de
+produção próprio (multi-stage, sem CompileDaemon — ver "Dois Dockerfiles"), testado
+local com `docker run <imagem> backup-banco` rodando limpo. O que falta pra fechar o
+bloqueio: (1) configurar o Cron Job no Railway apontando pra esse `dockerfile` (não o
+`dockerfile.dev`) com Custom Start Command `backup-banco`; (2) rodar o restore ensaiado
+**uma vez contra o dump que sai do R2 de produção**, não só contra o teste local.
 
 **Ordem de execução do primeiro deploy:**
 
