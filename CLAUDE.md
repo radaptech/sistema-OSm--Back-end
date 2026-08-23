@@ -821,9 +821,12 @@ Ainda não existe — é o único bloqueio real para entregar o acesso.
 diferentes o login responde 200 e o navegador **descarta o cookie**, sem erro visível. O
 CORS (`middleware/cors.go`) também só libera `radaptech.com.br` e `localhost`.
 
-**Aceite consciente antes de entregar o acesso:** os cards "Custos Pendentes" e "OS
-Finalizadas" do painel do Administrador chamam `/ordens-servico`, que **não existe** — o
-admin clica e recebe toast de erro. Esconder os dois é mais barato que explicar.
+**Resolvido no front (23/08/2026):** os cards "Custos Pendentes" e "OS Finalizadas" do
+painel do Administrador chamavam `/ordens-servico`, que **não existe** aqui — o admin
+clicava e recebia toast de erro. Os dois **saíram da Home do painel**; as telas e as rotas
+do front continuam prontas, esperando este back. Quando a fase 2 (Ordem de serviço) subir,
+o gesto no front é um `git revert` do commit que os removeu — não recriar os cards na mão.
+Deixa de ser aceite consciente para entregar o acesso.
 
 ### Antes de entregar pro admin
 - **Backup com restore ensaiado.** `pg_dump` agendado mandando pro R2 (Hobby não tem
