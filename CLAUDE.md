@@ -1,7 +1,7 @@
 # Contexto do Projeto - Back-end (Solicitação OS)
 
 API do sistema de manutenção/OS para redes de varejo, consumida pelo front-end em
-`../front-end` (React). Este back-end está em construção — ver `docs/` para o roteiro
+`../sistema-OSm--Front-end` (React). Este back-end está em construção — ver `docs/` para o roteiro
 completo e os contratos já fechados com o front.
 
 ## Stack
@@ -33,7 +33,7 @@ completo e os contratos já fechados com o front.
 - `docs/der-banco-dados.mmd` (+ `.svg`/`.png` gerados) — diagrama ER.
 - Artefatos publicados (fonte de verdade do contrato HTTP — pedir link se precisar):
   DER revisado, Contrato de API v1.2 (53 endpoints), RBAC, PRD, Roteiro do Back-end
-  (16 fases). Ver `../front-end/CLAUDE.md` para a lógica de negócio do ponto de vista
+  (16 fases). Ver `../sistema-OSm--Front-end/CLAUDE.md` para a lógica de negócio do ponto de vista
   do front (é o documento mais detalhado de regras de negócio do projeto).
 
 ## Regra de ouro: banco e API não divergem da modelagem
@@ -339,7 +339,7 @@ instância só, sem um banco por tenant).
 `dockerfile` (produção, o que o Railway builda) e `dockerfile.dev` (o que
 `../docker-compose.yml` builda, `dockerfile: dockerfile.dev` no serviço `api`) — arquivos
 separados desde 23/08/2026. Motivo: `dockerfile.dev` roda `CompileDaemon` (hot-reload,
-pra reagir ao volume `./back-end:/app` do Compose) com um `ENTRYPOINT` fixo — sem uma
+pra reagir ao volume `./sistema-OSm--Back-end:/app` do Compose) com um `ENTRYPOINT` fixo — sem uma
 imagem de produção própria, o Cron Job do `backup-banco` (acima) não tinha como injetar
 o argumento certo, e a imagem final carregava o toolchain do Go inteiro à toa.
 - `dockerfile` é multi-stage: `builder` compila (`CGO_ENABLED=0` — nada no projeto usa
@@ -863,7 +863,7 @@ tenant, entregue.
 Todo o CRUD do Administrador está de pé e **validado pelo navegador contra a API real**
 (não só por curl): login/cookie, lojas, setores em cascata, os quatro perfis de usuário,
 máquina com foto subindo pro R2 e voltando assinada no `<img>`, preventiva, terceirizada.
-Ver "Verificação pelo navegador" em `../front-end/CLAUDE.md` para os bugs que essa
+Ver "Verificação pelo navegador" em `../sistema-OSm--Front-end/CLAUDE.md` para os bugs que essa
 passagem encontrou.
 
 **A condição é o backup.** Enquanto não há dado dentro ele é opcional; no minuto em que o
