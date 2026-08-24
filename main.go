@@ -53,7 +53,22 @@ func main() {
 	c := r.NewContainer(db)
 	r.ConfigurarRotas(router, c)
 
-	router.Run(":8081")
+	router.Run(":" + porta())
+}
+
+// porta lê PORT (o Railway injeta essa variável e roteia o domínio público pra
+// ela -- sem ler, a API escuta numa porta fixa que o proxy nunca acerta, e todo
+// request vira 502 mesmo com o container de pé). Sem a variável (dev local,
+// onde o traefik já aponta pra 8081 fixo em docker-compose.yml), cai no default.
+func porta() string {
+
+	p := os.Getenv("PORT")
+	if p == "" {
+
+		return "8081"
+	}
+
+	return p
 }
 
 // proxiesConfiaveis lê TRUSTED_PROXIES (IPs/CIDRs separados por vírgula) e devolve
