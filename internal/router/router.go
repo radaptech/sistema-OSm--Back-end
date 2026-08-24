@@ -53,10 +53,11 @@ func ConfigurarRotas(r *gin.Engine, c *Container) {
 
 	api := r.Group("/api")
 
-	api.GET("", func(c *gin.Context) {
+	api.GET("/", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
 			"status":  "online",
 			"message": "API operando normalmente. Acesse a documentação do Swagger para ver as rotas.",
+			"version": "v1",
 		})
 	})
 
