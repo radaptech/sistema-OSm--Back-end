@@ -38,6 +38,16 @@ func (p *ConnPostgresql) Conn(configEnv *VariaveisDeAmbiente) (*pgxpool.Pool, er
 		return nil, fmt.Errorf("erro ao configurar Pool do banco de dados: %v", err)
 	}
 
+	// MinConns=0 é o default do pgx: sem conexão nenhuma mantida quente, o pool
+	// abre uma nova a cada vez que não sobra conexão ociosa. Direto no Postgres
+	// isso é barato -- mas em produção (Supabase Session Pooler, não conexão
+	// direta) abrir conexão nova negocia com o pooler antes de chegar no
+	// Postgres de verdade, e isso mede 700ms-1.3s a mais por request "fria"
+	// (medido em produção: lojas, sempre com conexão quente, ficou estável em
+	// ~230ms; empresas-terceirizadas, mesma query trivial, variou 234ms-1.286s
+	// request a request). MinConns mantém um punhado sempre pronto.
+	config.MinConns = 2
+
 	pool, err := pgxpool.NewWithConfig(context.Background(), config)
 	if err != nil {
 		return nil, fmt.Errorf("erro ao se conectar com o banco de dados, %v", err)
