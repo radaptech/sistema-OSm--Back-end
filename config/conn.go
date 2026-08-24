@@ -42,11 +42,18 @@ func (p *ConnPostgresql) Conn(configEnv *VariaveisDeAmbiente) (*pgxpool.Pool, er
 	// abre uma nova a cada vez que não sobra conexão ociosa. Direto no Postgres
 	// isso é barato -- mas em produção (Supabase Session Pooler, não conexão
 	// direta) abrir conexão nova negocia com o pooler antes de chegar no
-	// Postgres de verdade, e isso mede 700ms-1.3s a mais por request "fria"
-	// (medido em produção: lojas, sempre com conexão quente, ficou estável em
-	// ~230ms; empresas-terceirizadas, mesma query trivial, variou 234ms-1.286s
-	// request a request). MinConns mantém um punhado sempre pronto.
-	config.MinConns = 2
+	// Postgres de verdade, e isso mede até 1.3s a mais por request "fria"
+	// (medido em produção, request a request). MinConns mantém um punhado
+	// sempre pronto -- 5 é folgado contra o teto real (Supabase: Database >
+	// Observability > Peak Connections, 12/60 no pico do dia, CPU/mem/disco
+	// todos <50%: sobra espaço, não é o pooler no limite).
+	//
+	// MaxConns também precisa ser explícito: o default do pgx é
+	// max(4, runtime.NumCPU()) -- num container com poucas CPUs visíveis isso
+	// pode cair pra 4, menor que o MinConns=5 daqui embaixo, e
+	// NewWithConfig falha (MinConns não pode passar de MaxConns).
+	config.MinConns = 5
+	config.MaxConns = 10
 
 	pool, err := pgxpool.NewWithConfig(context.Background(), config)
 	if err != nil {
