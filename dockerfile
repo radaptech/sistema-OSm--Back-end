@@ -31,4 +31,4 @@ RUN apk add --no-cache ca-certificates postgresql16-client
 COPY --from=builder /app/main .
 COPY database/migrate ./database/migrate
 
-ENTRYPOINT ["./main"]
+CMD ["./main"]
