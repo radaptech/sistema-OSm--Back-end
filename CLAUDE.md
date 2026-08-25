@@ -16,12 +16,24 @@ completo e os contratos já fechados com o front.
   `HashPassword`/`HashCompare`, `argon2id.DefaultParams`). `bcrypt` foi removido —
   `provisionamento.go` também passou a usar `auth.HashPassword`; não reintroduza bcrypt
   em nenhum caminho de senha nova.
-- Infra alvo: **Railway** (app + Postgres, plano Hobby) e **Cloudflare R2** (bucket de
-  fotos/vídeos, S3-compatível). O Postgres do Railway é instância direta, sem pooler no
-  meio — `pgx`/`sqlc` conectam sem ajuste de prepared statements. Aponte
-  `DB_SERVER`/`DB_PORT`/... pras variáveis do plugin de Postgres e use o host **interno**
-  (`*.railway.internal`, rede privada IPv6), não o proxy público.
-  ⚠️ **Hobby não tem PITR**: backup é `pg_dump` agendado mandando pro R2 (subcomando
+- Infra alvo: **Railway** (app, plano Hobby), **Supabase** (Postgres) e **Cloudflare R2**
+  (bucket de fotos/vídeos, S3-compatível). O Postgres **não** é do plugin do Railway e
+  **não** é conexão direta: é o Supabase atrás do **Session Pooler** (Supavisor), host
+  `aws-0-<região>.pooler.supabase.com`, usuário no formato `postgres.<project-ref>`.
+  Não existe host interno `*.railway.internal` nesse caminho — o tráfego sai do Railway
+  pra internet.
+  ⚠️ **Session mode, não transaction mode.** É o que deixa `pgx`/`sqlc` funcionarem sem
+  ajuste: o pool do pgx usa **prepared statements** por padrão, e o transaction mode
+  (porta `6543`) devolve a conexão ao pooler a cada transação, então o statement
+  preparado some e volta `prepared statement "stmtcache_..." does not exist`,
+  intermitente e sob carga. Session pooler = porta **`5432`**. Se um dia for preciso
+  mudar pra `6543`, o ajuste é desligar o cache de statements
+  (`config.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol`), não
+  "tentar de novo".
+  ⚠️ Pooler no meio também é o motivo do `MinConns = 5` em `config/conn.go`: conexão
+  fria negocia com o Supavisor antes de chegar no Postgres e mediu até 1.3s a mais por
+  request. Ver o comentário lá, que é a fonte da verdade dos números.
+  ⚠️ **Sem PITR**: backup é `pg_dump` agendado mandando pro R2 (subcomando
   `backup-banco`, ver "Backup do banco" abaixo), com restore ensaiado — não existe rede
   de proteção gerenciada aqui. Local: Docker Compose
   (`postgres_container-sistema-OS`, `api_sistema-OS` com hot-reload via CompileDaemon,
@@ -315,22 +327,33 @@ ensaiado") normalmente tem um owner diferente do de produção, e sem essas duas
 `DROP DATABASE`), sem erro nenhum do `pg_restore`.
 
 Chave do objeto: `backups/<timestamp UTC>.dump` (`20060102-150405`) — sem prefixo de
-tenant, porque é o banco inteiro, todos os tenants juntos (Postgres do Railway é uma
-instância só, sem um banco por tenant).
+tenant, porque é o banco inteiro, todos os tenants juntos (o Postgres é uma instância
+só, sem um banco por tenant).
 
 **Agendamento é Railway Cron, não `pg_cron`** — mesmo motivo do job de preventiva vencida
 (ver "Abertura automática de solicitação por preventiva" nesse arquivo): Hobby não libera
 `shared_preload_libraries`. Ao configurar o Cron Job no Railway:
-- Aponte pro mesmo repo, com **Custom Start Command** `backup-banco` (só o subcomando —
-  o `ENTRYPOINT` do `dockerfile` de produção já é `["./main"]`, então o argumento chega
-  como `./main backup-banco`; **testado local** com `docker run <imagem> backup-banco`
-  puro, sem `sh -c` nem truque, e subiu o backup certinho).
+- ⚠️ **A major do `postgresql*-client` no `dockerfile` tem que ser >= a do servidor.**
+  `pg_dump` recusa dumpar um Postgres maior que ele: `aborting because of server version
+  mismatch` (`server version: 17.6; pg_dump version: 16.15`) — foi a segunda falha do
+  Cron-BACKUP (24/08/2026), já com o start command certo. Supabase roda **17.6**, então o
+  pacote é `postgresql17-client` nos dois dockerfiles. Major nova no Supabase = subir o
+  pacote junto, senão o backup morre calado até alguém olhar o log do cron.
+- Aponte pro mesmo repo, com **Custom Start Command `./main backup-banco`** — o comando
+  inteiro, não só o subcomando. O `dockerfile` de produção termina em **`CMD ["./main"]`**
+  (era `ENTRYPOINT`, virou `CMD` em 24/08/2026), e o start command do Railway **substitui
+  o `CMD` inteiro** em vez de virar argumento dele. Com só `backup-banco` ali, o Railway
+  não aplica nada e o container sobe a **API** — foi exatamente o que aconteceu na
+  primeira execução do Cron-BACKUP (24/08/2026): logs com o Gin registrando rotas e
+  `panic: JWT_SECRET não configurada`, nenhum backup. Se um dia o `dockerfile` voltar pra
+  `ENTRYPOINT`, `backup-banco` sozinho volta a funcionar — `./main backup-banco` funciona
+  nos dois casos.
 - **`dockerfile` (produção) e `dockerfile.dev` (Compose local) são arquivos diferentes
   desde 23/08/2026** — ver "Dois Dockerfiles" abaixo. Garanta que o Railway builda o
   `dockerfile` (produção, sem CompileDaemon): "Settings > Build > Dockerfile Path", se o
   nome sozinho não for pego por padrão.
-- Variáveis do serviço: as mesmas `DB_*`/`DB_SSLMODE` da API (host interno
-  `*.railway.internal`) e as quatro `R2_*` (as três de sempre + `R2_BUCKET_NAME_BACKUPS`).
+- Variáveis do serviço: as mesmas `DB_*`/`DB_SSLMODE` da API (host do Session Pooler do
+  Supabase, porta `5432` — ver "Stack") e as quatro `R2_*` (as três de sempre + `R2_BUCKET_NAME_BACKUPS`).
 - Frequência: diária é o ponto de partida razoável — não existe ainda rotação/expiração
   de backup antigo (o bucket cresce um `.dump` por execução, sem limpeza automática); se
   o custo de armazenamento incomodar, é o próximo passo, não um bloqueio para começar.
@@ -346,14 +369,18 @@ o argumento certo, e a imagem final carregava o toolchain do Go inteiro à toa.
   cgo, pgx/v5 é Go puro, então sai binário estático), o estágio final é só
   `alpine:3.24` (mesma versão por baixo de `golang:1.26.5-alpine`) + `ca-certificates`
   (senão toda chamada HTTPS pro R2 falha na validação do certificado) +
-  `postgresql16-client` (só o `pg_dump`/`pg_restore`, não o servidor) + o binário +
+  `postgresql17-client` (só o `pg_dump`/`pg_restore`, não o servidor) + o binário +
   `database/migrate` (`config/conn.go` lê migrations por caminho relativo,
   `file://database/migrate`, resolvido a partir do `WORKDIR`). **Testado local:** builda
   limpo, sobe a API normal contra o Postgres do Compose (migrations rodando, rotas
   registradas) e roda `backup-banco` como argumento simples — 94.5MB contra 1.17GB da
   imagem de dev (~12x menor), sem o Go toolchain nem o `.git` embarcados.
 - `dockerfile.dev` não muda: continua com `git`/`build-base`/`CompileDaemon` e o
-  `postgresql16-client` (o `backup-banco` também precisa rodar localmente pra testar).
+  `postgresql17-client` (o `backup-banco` também precisa rodar localmente pra testar).
+  Os dois ficam na **mesma major** de propósito: o dev é onde o `backup-banco` é testado
+  antes de subir, e testar com um cliente diferente do de produção testa outra coisa.
+  Cliente 17 dumpa o Postgres 16 do Compose sem reclamar (o problema é só o contrário —
+  ver abaixo), então alinhar não custa nada em dev.
 - **Nenhum dos dois copia `.env`** — nem precisa: `config.NewVariaveisAmbiente` tenta
   carregar `.env` e só avisa se não achar, seguindo com variável de ambiente do sistema
   (é o caminho de produção: Railway injeta as variáveis, não existe `.env` lá).
@@ -878,12 +905,13 @@ banco descartável, contagem de linhas batendo). Ganhou também um `dockerfile` 
 produção próprio (multi-stage, sem CompileDaemon — ver "Dois Dockerfiles"), testado
 local com `docker run <imagem> backup-banco` rodando limpo. O que falta pra fechar o
 bloqueio: (1) configurar o Cron Job no Railway apontando pra esse `dockerfile` (não o
-`dockerfile.dev`) com Custom Start Command `backup-banco`; (2) rodar o restore ensaiado
+`dockerfile.dev`) com Custom Start Command `./main backup-banco`; (2) rodar o restore ensaiado
 **uma vez contra o dump que sai do R2 de produção**, não só contra o teste local.
 
 **Ordem de execução do primeiro deploy:**
 
-1. Variáveis no serviço da API: `DB_*` (host **interno** `*.railway.internal`),
+1. Variáveis no serviço da API: `DB_*` (host do **Session Pooler** do Supabase, porta
+   `5432`, usuário `postgres.<project-ref>`),
    `DB_SSLMODE`, **`JWT_SECRET` novo** (`openssl rand -base64 64` — não reaproveitar o do
    `.env` local, que já circulou), `TRUSTED_PROXIES` com o endereço do proxy do Railway, e
    os quatro `R2_*` (sem eles o CRUD funciona e só o upload de foto responde 500 — a
