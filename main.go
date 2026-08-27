@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/radaptech/sistema-OSm--Back-end/bucketR2"
@@ -50,6 +51,7 @@ func main() {
 	}
 
 	router.Use(middleware.CorsConfig())
+	router.Use(middleware.Timeout(30 * time.Second))
 	c := r.NewContainer(db)
 	r.ConfigurarRotas(router, c)
 

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"time"
 
 	"github.com/golang-migrate/migrate/v4"
 	"github.com/golang-migrate/migrate/v4/database/pgx/v5"
@@ -54,6 +55,14 @@ func (p *ConnPostgresql) Conn(configEnv *VariaveisDeAmbiente) (*pgxpool.Pool, er
 	// NewWithConfig falha (MinConns não pode passar de MaxConns).
 	config.MinConns = 5
 	config.MaxConns = 10
+
+	// O default do pgx segura conexão ociosa por 30min, tempo demais: o Session
+	// Pooler do Supabase (e o NAT no caminho) derruba ociosas antes disso e sem
+	// mandar RST, então a conexão continua no pool parecendo boa. Quem pegasse
+	// uma dessas travava escrevendo num socket morto. 2min recicla antes da
+	// janela em que elas costumam ser mortas.
+	config.MaxConnIdleTime = 2 * time.Minute
+	config.ConnConfig.ConnectTimeout = 5 * time.Second
 
 	pool, err := pgxpool.NewWithConfig(context.Background(), config)
 	if err != nil {
