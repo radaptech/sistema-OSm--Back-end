@@ -307,6 +307,94 @@ func (q *Queries) ListarPreventivas(ctx context.Context, arg ListarPreventivasPa
 	return items, nil
 }
 
+const listarPreventivasVencidas = `-- name: ListarPreventivasVencidas :many
+SELECT
+    p.id,
+    p.tenant_id,
+    p.descricao,
+    p.maquina_id,
+    m.setor_id
+FROM preventiva p
+JOIN maquina m ON m.tenant_id = p.tenant_id AND m.id = p.maquina_id
+WHERE p.ativa
+  AND m.ativa
+  AND p.proxima_data <= (now() AT TIME ZONE 'America/Sao_Paulo')::date
+  AND NOT EXISTS (
+      SELECT 1
+      FROM solicitacao_os s
+      WHERE s.preventiva_id = p.id
+        AND s.status = 'Pendente'
+  )
+ORDER BY p.proxima_data, p.id
+`
+
+type ListarPreventivasVencidasRow struct {
+	ID        int64
+	TenantID  int64
+	Descricao string
+	MaquinaID int64
+	SetorID   int64
+}
+
+// Alimenta o job de abertura automática de solicitação (subcomando de CLI
+// `preventivas-vencidas`, chamado pelo Railway Cron -- ver "Abertura automática
+// de solicitação por preventiva" no CLAUDE.md). Cada linha daqui vira uma
+// solicitação com origem = 'preventiva' na fila do Gestor.
+//
+// ⚠️ É a única query do projeto SEM tenant_id no WHERE, e isso é proposital:
+// não há request, não há token, não há tenant. O job varre todos os tenants de
+// uma vez e o tenant_id viaja na linha, direto para o INSERT da solicitação.
+// Não "conserte" isso adicionando um filtro.
+//
+// Sem parâmetro nenhum, pelo mesmo motivo.
+//
+// O NOT EXISTS não é otimização, é o que impede o job de quebrar:
+// uq_preventiva_pendente é índice único parcial em
+// solicitacao_os (preventiva_id) WHERE status = 'Pendente'. Sem ele a primeira
+// rodada passa e a segunda morre com 23505 em toda preventiva que o Gestor
+// ainda não converteu nem rejeitou. (Uma preventiva PODE gerar várias
+// solicitações ao longo do tempo, uma por ciclo -- só não duas pendentes ao
+// mesmo tempo.)
+//
+// m.ativa é igualmente obrigatório: DesativarMaquina NÃO desativa as
+// preventivas da máquina (maquina.sql, e não há ON DELETE/trigger fazendo
+// isso). Sem esse filtro, máquina desativada continuaria abrindo solicitação a
+// cada ciclo, para sempre, e não haveria como parar pela API -- não existe
+// reativação nem DELETE de linha em lugar nenhum.
+//
+// A data de corte usa fuso explícito e não CURRENT_DATE, mesmo motivo do
+// `vencida` nas outras duas queries: o container roda em UTC, e a preventiva
+// apareceria vencida até 3h antes da virada do dia no Brasil.
+//
+// Projeta só o que o INSERT da solicitação precisa (o setor_id vem da máquina:
+// solicitacao_os.setor_id é NOT NULL e a solicitação não guarda loja). Não usa
+// p.* como as outras: aqui ninguém monta resposta de contrato.
+func (q *Queries) ListarPreventivasVencidas(ctx context.Context) ([]ListarPreventivasVencidasRow, error) {
+	rows, err := q.db.Query(ctx, listarPreventivasVencidas)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListarPreventivasVencidasRow
+	for rows.Next() {
+		var i ListarPreventivasVencidasRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.TenantID,
+			&i.Descricao,
+			&i.MaquinaID,
+			&i.SetorID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const obterPreventivaPorID = `-- name: ObterPreventivaPorID :one
 SELECT
     p.id, p.tenant_id, p.maquina_id, p.descricao, p.intervalo_dias, p.proxima_data, p.ativa, p.criado_em,

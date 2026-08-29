@@ -236,3 +236,98 @@ func (s *PreventivaService) DesativarPreventiva(ctx context.Context, tenantID, i
 
 	return nil
 }
+
+// AbrirSolicitacoesDePreventivasVencidas percorre as preventivas cuja
+// proxima_data já passou e abre uma Solicitação (não uma OS) para cada uma. É
+// o miolo do subcomando de CLI `preventivas-vencidas`, chamado pelo Railway
+// Cron -- ver "Abertura automática de solicitação por preventiva" no CLAUDE.md.
+//
+// A solicitação nasce Pendente e cai na fila do Gestor: a OS só existe quando
+// ele aprova com técnico e urgência. Criar OS direto pularia a aprovação, que é
+// o ponto do fluxo.
+//
+// Sem tenantID no parâmetro, diferente de todo o resto do pacote: não há
+// request nem token: o job varre todos os tenants e o tenant_id vem na linha da
+// preventiva (ver ListarPreventivasVencidas).
+//
+// Devolve quantas solicitações abriu e os erros das que falharam, juntados com
+// errors.Join -- falha em uma preventiva não pode impedir as outras de rodarem,
+// então nenhuma delas aborta o laço. Erro não-nil aqui é resultado parcial, não
+// fracasso: quem chama loga e segue.
+func (s *PreventivaService) AbrirSolicitacoesDePreventivasVencidas(ctx context.Context) (int, error) {
+
+	// Leitura fora de transação: cada preventiva ganha a sua logo abaixo.
+	vencidas, err := repository.New(s.Pool).ListarPreventivasVencidas(ctx)
+	if err != nil {
+		return 0, helper.TraduzErroPostgres(err)
+	}
+
+	var criadas int
+	var falhas []error
+
+	for _, p := range vencidas {
+		err := s.abrirSolicitacaoDaPreventiva(ctx, p)
+
+		switch {
+		case err == nil:
+			criadas++
+
+		// uq_preventiva_pendente barrando o INSERT significa que outra execução
+		// do job criou a solicitação entre o SELECT e o INSERT desta -- duas
+		// réplicas, ou dois disparos do cron colados. É exatamente o serviço que
+		// o índice existe para prestar: não é falha, e refazer não tem sentido
+		// (a solicitação que interessa já está na fila do Gestor).
+		case errors.Is(err, helper.ErrDadoDuplicado):
+
+		default:
+			falhas = append(falhas, fmt.Errorf("preventiva %d (tenant %d): %w", p.ID, p.TenantID, err))
+		}
+	}
+
+	return criadas, errors.Join(falhas...)
+}
+
+// abrirSolicitacaoDaPreventiva grava a solicitação de uma preventiva vencida e
+// avança o ciclo dela.
+//
+// Transação própria por preventiva, e não uma para o lote todo, pelos dois
+// lados: uma linha ruim não pode derrubar as outras 200, e as duas escritas
+// aqui dentro têm que ser atômicas entre si. Separadas, avançar a data com o
+// INSERT falhando pularia o ciclo em silêncio, e inserir sem avançar faria a
+// preventiva disparar de novo no instante em que o Gestor convertesse a
+// solicitação.
+func (s *PreventivaService) abrirSolicitacaoDaPreventiva(ctx context.Context, p repository.ListarPreventivasVencidasRow) error {
+
+	tx, err := s.Pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("erro ao abrir transação: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	repo := repository.New(tx)
+
+	if _, err := repo.CriarSolicitacaoPreventiva(ctx, repository.CriarSolicitacaoPreventivaParams{
+		TenantID:     p.TenantID,
+		MaquinaID:    p.MaquinaID,
+		SetorID:      p.SetorID,
+		PreventivaID: p.ID,
+		Descricao:    "Manutenção preventiva: " + p.Descricao,
+	}); err != nil {
+		return helper.TraduzErroPostgres(err)
+	}
+
+	// A query soma o intervalo a partir da proxima_data vencida, não de hoje --
+	// senão um ciclo processado com atraso arrastaria todos os seguintes.
+	if _, err := repo.AvancarProximaData(ctx, repository.AvancarProximaDataParams{
+		ID:       p.ID,
+		TenantID: p.TenantID,
+	}); err != nil {
+		return helper.TraduzErroPostgres(err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("erro ao commitar transação: %w", err)
+	}
+
+	return nil
+}

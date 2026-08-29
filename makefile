@@ -14,3 +14,9 @@ provisionar-admin:
 # UploadFoto. Em produção quem chama isto é o Railway Cron -- ver CLAUDE.md.
 backup-banco:
 	@go run . backup-banco
+
+# Abre uma solicitacao para cada preventiva vencida e avanca o ciclo de cada
+# uma. Em producao quem chama isto e o Railway Cron, uma vez por dia -- ver
+# "Abertura automatica de solicitacao por preventiva" no CLAUDE.md.
+preventivas-vencidas:
+	@go run . preventivas-vencidas
