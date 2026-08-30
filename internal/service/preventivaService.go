@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -16,6 +18,13 @@ import (
 
 type PreventivaService struct {
 	Pool *pgxpool.Pool
+	// Notificador é opcional -- campo público setado depois da construção
+	// (router.go), não parâmetro do construtor: mudar a assinatura de
+	// NewRepoPreventiva quebraria todo teste que já chama NewRepoPreventiva(pool)
+	// direto (preventivaIntegracao_test.go, preventivaJobIntegracao_test.go).
+	// nil (o zero value, é o que todo teste existente continua recebendo)
+	// significa "não notifica" -- ver o cheque em notificarPreventivaVencida.
+	Notificador NotificadorInterface
 }
 
 func NewRepoPreventiva(pool *pgxpool.Pool) *PreventivaService {
@@ -329,5 +338,50 @@ func (s *PreventivaService) abrirSolicitacaoDaPreventiva(ctx context.Context, p 
 		return fmt.Errorf("erro ao commitar transação: %w", err)
 	}
 
+	s.notificarPreventivaVencida(p)
+
 	return nil
+}
+
+// notificarPreventivaVencida avisa os gestores do setor por WhatsApp depois
+// que a solicitação já commitou -- fora da transação e em goroutine própria,
+// mesmo motivo de SolicitacaoService.notificar: falha de rede não pode
+// atrasar nem derrubar o job (que ainda tem outras N preventivas pra
+// processar no mesmo laço).
+//
+// ListarPreventivasVencidasRow não carrega os nomes denormalizados (o
+// comentário da query já explica: "ninguém monta resposta de contrato" ali)
+// -- por isso relê a máquina via ObterMaquinaPorID, fora da transação já
+// fechada, só pra montar o texto da mensagem.
+func (s *PreventivaService) notificarPreventivaVencida(p repository.ListarPreventivasVencidasRow) {
+
+	if s.Notificador == nil {
+		return
+	}
+
+	go func() {
+		fundo, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+
+		maquina, err := repository.New(s.Pool).ObterMaquinaPorID(fundo, repository.ObterMaquinaPorIDParams{
+			ID: p.MaquinaID, TenantID: p.TenantID,
+		})
+		if err != nil {
+			log.Printf("notificar preventiva %d: obter máquina %d: %v", p.ID, p.MaquinaID, err)
+			return
+		}
+
+		dados := DadosNotificacao{
+			Alvo:      maquina.Nome + " · " + maquina.NumeroPatrimonio,
+			Descricao: p.Descricao,
+			LojaNome:  maquina.LojaNome,
+			SetorNome: maquina.SetorNome,
+			// SolicitanteNome fica nil de propósito: é o que decide o
+			// template "preventiva vencida" em vez do de solicitante.
+		}
+
+		if err := s.Notificador.NotificarNovaSolicitacao(fundo, p.TenantID, p.SetorID, dados); err != nil {
+			log.Printf("notificar preventiva %d: %v", p.ID, err)
+		}
+	}()
 }

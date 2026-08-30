@@ -33,6 +33,20 @@ func nomeValido(nome string) (string, error) {
 	return limpo, nil
 }
 
+// campoObrigatorio é o nomeValido genérico: mesma checagem (apara e recusa o
+// que sobrar vazio), mas com o nome do campo na mensagem -- nomeValido fala
+// sempre "nome", e usar ele para `descricao`/`item` daria um toast errado
+// ("nome é obrigatório" para um campo que não é nome nenhum). nomeValido
+// continua existindo por si -- é o call site mais comum -- em vez de virar um
+// wrapper de uma linha em cima deste.
+func campoObrigatorio(campo, valor string) (string, error) {
+	limpo := strings.TrimSpace(valor)
+	if limpo == "" {
+		return "", fmt.Errorf("%w: %s é obrigatório", helper.ErrValidacao, campo)
+	}
+	return limpo, nil
+}
+
 // textoOuNil é o irmão do nomeValido para campo OPCIONAL: apara e devolve nil
 // quando não sobra nada, em vez de recusar.
 //

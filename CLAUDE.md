@@ -295,7 +295,7 @@ que o front espera (camelCase, datas `dd/mm/yyyy HH:MM:SS`, ver `config/dataBr.g
   manualmente em dev, só em produção/CI antes do deploy do binário.
 - Aplicadas até aqui: `000001` schema inicial, `000002` horas parada desde a solicitação,
   `000003` chave do R2, `000004` criticidade vira ENUM, `000005` foto só na solicitação
-  humana, `000006` seed de `area_tecnico`.
+  humana, `000006` seed de `area_tecnico`, `000007` urgência vira ENUM.
 - ⚠️ **Tabela e tipo dividem namespace no Postgres** — trocar uma tabela por um ENUM
   homônimo exige dropar a tabela **antes** de criar o tipo (foi o caso de `000004`).
 
@@ -671,8 +671,17 @@ o argumento certo, e a imagem final carregava o toolchain do Go inteiro à toa.
   mesma lacuna de `area_tecnico`, que deixaria o cadastro de máquina travado em todo tenant
   novo. Como ENUM o valor nasce com o schema, e a ordem de declaração já dá o
   `ORDER BY criticidade` (enums do Postgres são ordenáveis) que a coluna `ordem` fazia.
-  `nivel_urgencia` **continua tabela** de propósito: não está neste caminho e
-  `ordem_servico` ainda não tem escrita.
+  `ordem_servico.urgencia` é o **ENUM `nivel_urgencia`** também, desde a migration
+  `000007` — mesma lacuna e mesmo motivo de `nivel_criticidade`: tupla fixa no front
+  (`niveisUrgencia`, `front-end/src/tipos/ordemServico.ts`), sem tela de cadastro, tabela
+  vazia em todo tenant. Ficou tabela em `000004` só porque `ordem_servico` ainda não tinha
+  nenhum caminho de escrita; `CriarOrdemServicoDeSolicitacao` (`solicitacao_os.sql`, fase 1
+  de Solicitações) foi o primeiro, e sem a migration `POST /solicitacoes/:id/abrir-os`
+  travaria em todo tenant do mesmo jeito que cadastro de máquina travava antes da `000004`.
+  A migration precisou dropar e recriar `vw_os_finalizada`/`vw_os_custo_sem_lancamento`
+  também — as duas fazem `SELECT os.*`, e o Postgres resolve isso em colunas concretas na
+  criação da view, então as duas ficam dependentes de `urgencia_id` por baixo mesmo sem
+  citar a coluna no texto; `DROP COLUMN` direto falha com "other objects depend on it".
 - ⚠️ **Armadilha do sqlc em coluna calculada:** expressão booleana composta vira `*bool`,
   e `COALESCE` sozinho vira `interface{}`. Para sair `bool` limpo, **feche com cast**:
   `COALESCE(<expr>, false)::boolean AS x` — é o que `vencida` usa nas duas queries de
