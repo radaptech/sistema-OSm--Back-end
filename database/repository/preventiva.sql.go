@@ -348,13 +348,24 @@ type ListarPreventivasVencidasRow struct {
 //
 // Sem parâmetro nenhum, pelo mesmo motivo.
 //
-// O NOT EXISTS não é otimização, é o que impede o job de quebrar:
-// uq_preventiva_pendente é índice único parcial em
-// solicitacao_os (preventiva_id) WHERE status = 'Pendente'. Sem ele a primeira
-// rodada passa e a segunda morre com 23505 em toda preventiva que o Gestor
-// ainda não converteu nem rejeitou. (Uma preventiva PODE gerar várias
-// solicitações ao longo do tempo, uma por ciclo -- só não duas pendentes ao
-// mesmo tempo.)
+// Sobre o NOT EXISTS e uq_preventiva_pendente (índice único parcial em
+// solicitacao_os (preventiva_id) WHERE status = 'Pendente'), que fazem coisas
+// diferentes e é fácil confundir:
+//
+//	o índice é quem garante a regra -- uma preventiva não tem duas
+//	solicitações pendentes ao mesmo tempo (pode ter várias ao longo do tempo,
+//	uma por ciclo). Ele vale inclusive contra duas réplicas do cron rodando
+//	juntas, que é justamente o que a query sozinha não pega;
+//
+//	o NOT EXISTS evita o trabalho condenado. Enquanto o Gestor não converte
+//	nem rejeita, a preventiva continua com proxima_data no passado, então sem
+//	este filtro ela voltaria em toda execução para tomar 23505 no INSERT --
+//	uma transação inútil por preventiva parada na fila, todo dia.
+//
+// Ou seja: tirar o NOT EXISTS não corrompe nada (o service trata o 23505 como
+// benigno e a transação inteira volta), só desperdiça. Tirar o índice é que
+// quebra. É por isso que nenhum teste falha se este filtro sumir -- não tente
+// escrever um sem antes tornar o desperdício observável.
 //
 // m.ativa é igualmente obrigatório: DesativarMaquina NÃO desativa as
 // preventivas da máquina (maquina.sql, e não há ON DELETE/trigger fazendo

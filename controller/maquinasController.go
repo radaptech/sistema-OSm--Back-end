@@ -109,7 +109,7 @@ func (m *MaquinaController) Cadastrar() gin.HandlerFunc {
 			return
 		}
 
-		input, ok := corpoMultipart[model.MaquinarioInsert](ctx)
+		input, ok := corpoMultipart[model.MaquinarioInsert](ctx, bucketr2.TamanhoMaximoFoto)
 		if !ok {
 			return
 		}
@@ -248,7 +248,7 @@ func (m *MaquinaController) Atualizar() gin.HandlerFunc {
 			return
 		}
 
-		input, ok := corpoMultipart[model.AtualizarMaquina](ctx)
+		input, ok := corpoMultipart[model.AtualizarMaquina](ctx, bucketr2.TamanhoMaximoFoto)
 		if !ok {
 			return
 		}

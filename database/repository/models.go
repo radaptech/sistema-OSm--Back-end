@@ -95,6 +95,49 @@ func (ns NullNivelCriticidade) Value() (driver.Value, error) {
 	return string(ns.NivelCriticidade), nil
 }
 
+type NivelUrgencia string
+
+const (
+	NivelUrgenciaBaixa NivelUrgencia = "Baixa"
+	NivelUrgenciaMdia  NivelUrgencia = "Média"
+	NivelUrgenciaAlta  NivelUrgencia = "Alta"
+)
+
+func (e *NivelUrgencia) Scan(src interface{}) error {
+	switch s := src.(type) {
+	case []byte:
+		*e = NivelUrgencia(s)
+	case string:
+		*e = NivelUrgencia(s)
+	default:
+		return fmt.Errorf("unsupported scan type for NivelUrgencia: %T", src)
+	}
+	return nil
+}
+
+type NullNivelUrgencia struct {
+	NivelUrgencia NivelUrgencia
+	Valid         bool // Valid is true if NivelUrgencia is not NULL
+}
+
+// Scan implements the Scanner interface.
+func (ns *NullNivelUrgencia) Scan(value interface{}) error {
+	if value == nil {
+		ns.NivelUrgencia, ns.Valid = "", false
+		return nil
+	}
+	ns.Valid = true
+	return ns.NivelUrgencia.Scan(value)
+}
+
+// Value implements the driver Valuer interface.
+func (ns NullNivelUrgencia) Value() (driver.Value, error) {
+	if !ns.Valid {
+		return nil, nil
+	}
+	return string(ns.NivelUrgencia), nil
+}
+
 type OrigemSolicitacao string
 
 const (
@@ -485,20 +528,12 @@ type Maquina struct {
 	Criticidade      NivelCriticidade
 }
 
-type NivelUrgencium struct {
-	ID       int16
-	TenantID int64
-	Nome     string
-	Ordem    int16
-}
-
 type OrdemServico struct {
 	ID                    int64
 	TenantID              int64
 	SolicitacaoID         int64
 	Tipo                  TipoOs
 	TecnicoID             int64
-	UrgenciaID            int16
 	EmpresaTerceirizadaID *int64
 	TerceiroAcionadoEm    pgtype.Timestamptz
 	AbertaPorID           int64
@@ -507,6 +542,7 @@ type OrdemServico struct {
 	AbertaEm              pgtype.Timestamptz
 	IniciadaEm            pgtype.Timestamptz
 	CriadoEm              pgtype.Timestamptz
+	Urgencia              NivelUrgencia
 }
 
 type OsCusto struct {
@@ -632,7 +668,6 @@ type VwOsCustoSemLancamento struct {
 	SolicitacaoID         int64
 	Tipo                  TipoOs
 	TecnicoID             int64
-	UrgenciaID            int16
 	EmpresaTerceirizadaID *int64
 	TerceiroAcionadoEm    pgtype.Timestamptz
 	AbertaPorID           int64
@@ -641,6 +676,7 @@ type VwOsCustoSemLancamento struct {
 	AbertaEm              pgtype.Timestamptz
 	IniciadaEm            pgtype.Timestamptz
 	CriadoEm              pgtype.Timestamptz
+	Urgencia              NivelUrgencia
 }
 
 type VwOsFinalizada struct {
@@ -649,7 +685,6 @@ type VwOsFinalizada struct {
 	SolicitacaoID         int64
 	Tipo                  TipoOs
 	TecnicoID             int64
-	UrgenciaID            int16
 	EmpresaTerceirizadaID *int64
 	TerceiroAcionadoEm    pgtype.Timestamptz
 	AbertaPorID           int64
@@ -658,6 +693,7 @@ type VwOsFinalizada struct {
 	AbertaEm              pgtype.Timestamptz
 	IniciadaEm            pgtype.Timestamptz
 	CriadoEm              pgtype.Timestamptz
+	Urgencia              NivelUrgencia
 	CustoTotal            int32
 }
 
