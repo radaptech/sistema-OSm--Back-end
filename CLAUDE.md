@@ -795,6 +795,59 @@ e `make preventivas-vencidas`. Falta **só** criar o Cron Job no Railway.
 - O job **não roda migrations**: quem faz isso é o boot da API. O container do cron sobe o
   mesmo binário contra o mesmo banco já migrado.
 
+## Notificação de solicitação por WhatsApp (infra pronta; código ainda não)
+
+Gestor não fica com o app aberto o tempo todo — decidido notificar por WhatsApp sempre que
+uma Solicitação nasce `Pendente` (as duas criações humanas e o job de preventiva vencida),
+pro Gestor saber sem precisar checar o painel. Mesmo raciocínio vale pro Técnico mais
+adiante (aviso de OS atribuída), quando a fase 2 existir.
+
+**Decisão: Evolution API self-hosted, não a Cloud API oficial da Meta.** Não é o caminho
+"correto" — é WhatsApp Web por baixo (lib Baileys, engenharia reversa), viola os termos do
+WhatsApp e o número pode ser banido. Mas pro volume daqui (poucas mensagens por dia, pra
+2-3 destinatários fixos que reconhecem o remetente) o risco na prática é baixo — é o
+oposto do padrão que catch bans (rajada, destinatário que não reconhece, conteúdo de
+marketing). Ganho real: zero aprovação de template pela Meta (a oficial exige, e leva
+dias, pra toda mensagem business-initiated fora da janela de 24h), texto livre, e roda no
+mesmo Docker Compose que já existe — custo marginal zero em vez de mensalidade de um
+provedor gerenciado (Z-API e primos, ~R$60-100/mês fixos) ou por-mensagem da oficial
+(~R$0,035/mensagem, categoria *utility*).
+
+**Requer número dedicado, não o do Gestor.** Quem fica banível é o número que autentica no
+Evolution API (via QR, como um WhatsApp Web comum) — um chip pré-pago qualquer, comprado só
+pra isso, com WhatsApp Business instalado. O número do Gestor é só destinatário, nunca
+entra em risco nenhum. **Chip ainda não comprado** — é o único passo manual que falta;
+o resto (infra + o que vai ler as variáveis abaixo) já está pronto pra quando ele chegar.
+
+**Infra (`../docker-compose.yml`), já testada de ponta a ponta:** três serviços novos --
+`evolution-postgres` e `evolution-redis` (estado da instância/sessão do WhatsApp, banco e
+cache PRÓPRIOS, separados do banco da aplicação -- não é dado de domínio) e `evolution-api`
+(`evoapicloud/evolution-api:v2.3.7`, porta `8092` no host). Testado: instância criada via
+`POST /instance/create`, QR de pareamento obtido via `GET /instance/connect/:nome`
+(devolve um PNG em base64 de verdade), estado `connecting` sobrevivendo a um restart do
+container (prova que é o Postgres persistindo, não memória). Falta só escanear o QR com o
+WhatsApp Business do chip, quando ele existir -- nenhum outro passo de infra.
+
+⚠️ **`AUTHENTICATION_API_KEY` no compose é valor de dev** (`evolution-dev-key-troque-em-producao`,
+mesmo padrão do `postgres`/`postgres` do banco principal) -- gerar um de verdade
+(`openssl rand -base64 32`) antes de produção, e trocar nos dois lados: o `environment` do
+serviço `evolution-api` no compose E o `.env` do back-end (`EVOLUTION_API_KEY`, ver
+`.env-example`) -- os dois precisam bater, é a mesma chave dos dois lados da chamada.
+
+⚠️ **`SERVER_URL=http://localhost:8092` no compose é placeholder de dev.** Só importa pra
+webhook/callback interno da própria Evolution API, e o backend não expõe rota nenhuma pra
+ela chamar de volta ainda -- revisitar quando for pra produção (Railway), mesmo espírito do
+`TRUSTED_PROXIES` que muda por ambiente.
+
+**O que falta (código, não infra):** a query de "gestores que atendem este setor, com
+telefone" (`database/queries`, mesmo `EXISTS` de `ListarSolicitacoes`), o
+`NotificacaoService` (cliente HTTP do Evolution API + os dois templates -- "solicitação
+aberta pelo Solicitante" e "preventiva vencida" -- atrás de uma interface, pra
+`SolicitacaoService` continuar testável sem bater na Evolution API de verdade), e o
+disparo em goroutine (fire-and-forget, nunca síncrono no request nem no que trava o job)
+plugado nos três pontos que criam uma solicitação `Pendente`: `CadastrarSolicitacaoMaquinario`,
+`CadastrarSolicitacaoReparo` e `abrirSolicitacaoDaPreventiva`.
+
 ## Ambiente local
 - `.env` na raiz: `DB_SERVER`, `DB_USER`, `DB_PORT`, `DATABASE`, `DB_PASSWORD`
   (`DB_SSLMODE` opcional, default `disable`) e `JWT_SECRET`. `TRUSTED_PROXIES` **não**
