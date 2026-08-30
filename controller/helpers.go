@@ -20,6 +20,7 @@ package controller
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 
@@ -122,30 +123,38 @@ func corpoJSON[T any](ctx *gin.Context) (T, bool) {
 	return input, true
 }
 
-// corpoMultipart lê e valida o corpo das rotas COM arquivo (POST/PUT /maquinas
-// hoje, as três criações de solicitação depois): o JSON vem na parte `dados` e
-// os arquivos nas partes `foto`/`video` -- é o formato que montarMultipart
-// monta no front. Por isso não há ShouldBindJSON aqui.
+// corpoMultipart lê e valida o corpo das rotas COM arquivo (POST/PUT
+// /maquinas, as duas criações humanas de solicitação): o JSON vem na parte
+// `dados` e os arquivos nas partes `foto`/`video` -- é o formato que
+// montarMultipart monta no front. Por isso não há ShouldBindJSON aqui.
+//
+// limiteCorpo é o teto do corpo INTEIRO da requisição (bucketr2.TamanhoMaximoFoto
+// nas rotas só-foto, bucketr2.TamanhoMaximoComVideo em
+// POST /solicitacoes/maquinario) -- varia por rota porque só esta última
+// aceita vídeo. O teto de MEMÓRIA passado a ParseMultipartForm continua
+// sempre bucketr2.TamanhoMaximoFoto: é o que fica retido na RAM do processo,
+// não o tamanho do upload -- o excedente (o vídeo, se limiteCorpo for maior)
+// escorre pro arquivo temporário do disco sozinho, sem custo de heap.
 //
 // Os arquivos em si não são lidos aqui: quem sabe se são obrigatórios, pra
 // qual bucket vão e o que fazer quando o resto falha é o handler do domínio
 // (ver chaveDaFoto em maquinasController.go).
-func corpoMultipart[T any](ctx *gin.Context) (T, bool) {
+func corpoMultipart[T any](ctx *gin.Context, limiteCorpo int64) (T, bool) {
 
 	var input T
 
 	// MaxBytesReader corta a leitura do corpo; ParseMultipartForm sozinho só
 	// limita o que fica em memória, e o resto iria pra disco do container.
-	ctx.Request.Body = http.MaxBytesReader(ctx.Writer, ctx.Request.Body, bucketr2.TamanhoMaximoFoto)
+	ctx.Request.Body = http.MaxBytesReader(ctx.Writer, ctx.Request.Body, limiteCorpo)
 	if err := ctx.Request.ParseMultipartForm(bucketr2.TamanhoMaximoFoto); err != nil {
 
 		// Estourar o limite é 413 e não 400: o corpo não está malformado, é
-		// grande demais -- e é a diferença entre o toast dizer "foto muito
-		// grande" ou "dados invalidos" pra quem fotografou pelo celular.
+		// grande demais -- e é a diferença entre o toast dizer "arquivo muito
+		// grande" ou "dados invalidos" pra quem fotografou/gravou pelo celular.
 		var excedeu *http.MaxBytesError
 		if errors.As(err, &excedeu) {
 			ctx.JSON(http.StatusRequestEntityTooLarge, gin.H{
-				"error": "arquivo maior que o limite de 10MB",
+				"error": fmt.Sprintf("arquivo(s) maior(es) que o limite de %dMB", limiteCorpo/(1<<20)),
 			})
 			return input, false
 		}

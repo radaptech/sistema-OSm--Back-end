@@ -16,10 +16,21 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 )
 
-// TamanhoMaximoFoto é o teto do corpo inteiro da requisição com foto. Exportado
-// porque quem corta o body é o handler (http.MaxBytesReader, que precisa do
-// ResponseWriter) -- aqui só existe o número, num lugar só.
+// TamanhoMaximoFoto é o teto do corpo inteiro da requisição com foto (e o teto
+// de memória de QUALQUER requisição multipart, mesmo as que aceitam corpo
+// maior -- ver TamanhoMaximoComVideo). Exportado porque quem corta o body é o
+// handler (http.MaxBytesReader, que precisa do ResponseWriter) -- aqui só
+// existe o número, num lugar só.
 const TamanhoMaximoFoto = 10 << 20 // 10MB
+
+// TamanhoMaximoComVideo é o teto do corpo em POST /solicitacoes/maquinario --
+// a única rota que aceita vídeo (front-end/src/componentes/UploadVideo.tsx
+// já corta em 8s/40MB no cliente; isto é o teto do servidor, não a regra de
+// negócio). Continua usando TamanhoMaximoFoto como teto de MEMÓRIA em
+// ParseMultipartForm -- são números diferentes de propósito: o corpo pode
+// chegar a 40MB, mas o que fica na RAM do processo continua 10MB, o resto
+// escorre pro arquivo temporário do disco.
+const TamanhoMaximoComVideo = 40 << 20 // 40MB
 
 var s3Client *s3.Client
 var presignClient *s3.PresignClient
