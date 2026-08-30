@@ -171,3 +171,30 @@ func montarSolicitacoesEmLote(ctx context.Context, repo *repository.Queries, lin
 
 	return dados, nil
 }
+
+// alvoDaSolicitacao monta o "o quê" da notificação de WhatsApp -- "Forno ·
+// PAT-001" pra maquinário (mesmo padrão nome·patrimônio de
+// CamposMaquina.tsx/AdministradorMaquinas no front) ou o texto livre do item
+// pra reparo. Os branches de fallback (nome/código ausente) não deveriam
+// disparar nunca -- ck_solicitacao_alvo garante MaquinaNome/MaquinaCodigo
+// presentes pra tipo 'maquinario' -- mas notificação é código best-effort
+// que não pode panicar em cima de um ponteiro nil por uma garantia que vive
+// só no banco.
+func alvoDaSolicitacao(sol model.SolicitacaoOS) string {
+
+	if sol.Tipo == "reparo" {
+		if sol.ItemDescricao != nil {
+			return *sol.ItemDescricao
+		}
+		return "item não identificado"
+	}
+
+	nome := "máquina"
+	if sol.MaquinaNome != nil {
+		nome = *sol.MaquinaNome
+	}
+	if sol.MaquinaCodigo != nil {
+		return nome + " · " + *sol.MaquinaCodigo
+	}
+	return nome
+}

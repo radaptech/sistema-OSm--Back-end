@@ -499,6 +499,29 @@ type Querier interface {
 	// ida só ao banco -- é o que ListarUsuarios usa para montar o escopo de uma
 	// página inteira sem N+1.
 	ObterEscoposSessaoPorUsuarios(ctx context.Context, usuarioIds []int64) ([]ObterEscoposSessaoPorUsuariosRow, error)
+	// Quem recebe a notificação de WhatsApp quando uma Solicitação nasce naquele
+	// setor (ver CLAUDE.md, "Notificação de solicitação por WhatsApp"): todo
+	// gestor cujo escopo alcança o setor, mesmo critério de "alcança" do EXISTS
+	// em ListarSolicitacoes/ListarMaquinas -- a loja bate E, dentro dela, acesso
+	// total OU o setor específico marcado.
+	//
+	// Administrador não entra: não tem linha em usuario_escopo
+	// (trg_usuario_escopo_nao_admin recusa) -- a ausência de escopo É o acesso
+	// total ao tenant, não dá pra "alcançar um setor" a partir do vazio. A
+	// notificação de solicitação é só pro Gestor por ora (ver CLAUDE.md);
+	// Técnico entra quando a fase 2 existir, com sua própria query.
+	//
+	// Sem telefone cadastrado, o gestor não aparece -- não é erro, é degrade
+	// silencioso: quem chama (NotificacaoService) não teria pra onde mandar de
+	// qualquer forma. Ativo também filtra: gestor desativado não deve saber de
+	// solicitação nova.
+	//
+	// EXISTS e não JOIN, mesmo motivo de ListarUsuarios/ListarTecnicos: com JOIN
+	// o gestor apareceria uma vez por linha de usuario_escopo_setor que casasse
+	// (e com acesso_total_setores, a linha de usuario_escopo não tem setor
+	// nenhum atrelado -- LEFT JOIN duplicaria por engano se fosse feito fora do
+	// EXISTS).
+	ObterGestoresDoSetor(ctx context.Context, arg ObterGestoresDoSetorParams) ([]ObterGestoresDoSetorRow, error)
 	// Filhos de uma solicitação só, usada por ObterSolicitacaoPorID (GET /:id, e
 	// pela criação, que relê por ali dentro da mesma transação).
 	ObterImpactosDaSolicitacao(ctx context.Context, solicitacaoID int64) ([]MarcadorImpacto, error)

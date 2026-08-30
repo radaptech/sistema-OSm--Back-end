@@ -35,6 +35,19 @@ func NewContainer(db *pgxpool.Pool) *Container {
 	serviceTerceirizada := service.NewRepoEmpresaTerceirizada(db)
 	serviceSolicitacao := service.NewRepoSolicitacao(db)
 
+	// Notificador é opcional (campo público, não parâmetro de construtor -- ver
+	// o comentário em SolicitacaoService/PreventivaService): URL vazia faz
+	// NotificacaoService tentar chamar "" e falhar por request, exatamente como
+	// bucketMaquinas vazio só quebra o upload sem derrubar o resto. Ver
+	// CLAUDE.md, "Notificação de solicitação por WhatsApp".
+	notificador := service.NewRepoNotificacao(db,
+		os.Getenv("EVOLUTION_API_URL"),
+		os.Getenv("EVOLUTION_API_KEY"),
+		os.Getenv("EVOLUTION_INSTANCE_NAME"),
+	)
+	serviceSolicitacao.Notificador = notificador
+	servicePreventiva.Notificador = notificador
+
 	// O bucket do R2 é escolhido aqui, no wiring, e não guardado por linha: cada
 	// tipo de anexo tem o seu (ver .env-example) e não existe coluna `bucket`.
 	// Vazio só quebra o upload da foto -- o CRUD de máquina segue funcionando.

@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"slices"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -19,6 +21,13 @@ const TamanhoPaginaSolicitacoes = 10
 
 type SolicitacaoService struct {
 	Pool *pgxpool.Pool
+	// Notificador é opcional -- campo público setado depois da construção
+	// (router.go), não parâmetro do construtor: mudar a assinatura de
+	// NewRepoSolicitacao quebraria todo teste que já chama
+	// NewRepoSolicitacao(pool) direto (solicitacaoOsIntegracao_test.go). nil
+	// (o zero value, o que todo teste existente continua recebendo) significa
+	// "não notifica" -- ver o cheque em notificar.
+	Notificador NotificadorInterface
 }
 
 func NewRepoSolicitacao(pool *pgxpool.Pool) *SolicitacaoService {
@@ -26,6 +35,34 @@ func NewRepoSolicitacao(pool *pgxpool.Pool) *SolicitacaoService {
 	return &SolicitacaoService{
 		Pool: pool,
 	}
+}
+
+// notificar avisa os gestores do setor por WhatsApp que uma solicitação nova
+// chegou -- fora da transação (já commitada, resposta já montada) e em
+// goroutine própria: falha de rede/Evolution API não pode atrasar nem
+// derrubar a resposta HTTP pro Solicitante que acabou de criar o pedido.
+func (s *SolicitacaoService) notificar(tenantId int64, sol model.SolicitacaoOS) {
+
+	if s.Notificador == nil {
+		return
+	}
+
+	dados := DadosNotificacao{
+		Alvo:            alvoDaSolicitacao(sol),
+		Descricao:       sol.Descricao,
+		LojaNome:        sol.LojaNome,
+		SetorNome:       sol.SetorNome,
+		SolicitanteNome: sol.SolicitanteNome,
+	}
+
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+
+		if err := s.Notificador.NotificarNovaSolicitacao(ctx, tenantId, sol.SetorId, dados); err != nil {
+			log.Printf("notificar solicitação %d: %v", sol.Id, err)
+		}
+	}()
 }
 
 // CadastrarSolicitacaoMaquinario é POST /solicitacoes/maquinario. Foto e
@@ -99,7 +136,13 @@ func (s *SolicitacaoService) CadastrarSolicitacaoMaquinario(ctx context.Context,
 		return model.SolicitacaoOS{}, err
 	}
 
-	return concluirSolicitacao(ctx, tx, repo, tenantId, criada.ID)
+	resposta, err := concluirSolicitacao(ctx, tx, repo, tenantId, criada.ID)
+	if err != nil {
+		return model.SolicitacaoOS{}, err
+	}
+	s.notificar(tenantId, resposta)
+
+	return resposta, nil
 }
 
 // CadastrarSolicitacaoReparo é POST /solicitacoes/reparo. Sem impactos (a
@@ -145,7 +188,13 @@ func (s *SolicitacaoService) CadastrarSolicitacaoReparo(ctx context.Context, ten
 		return model.SolicitacaoOS{}, err
 	}
 
-	return concluirSolicitacao(ctx, tx, repo, tenantId, criada.ID)
+	resposta, err := concluirSolicitacao(ctx, tx, repo, tenantId, criada.ID)
+	if err != nil {
+		return model.SolicitacaoOS{}, err
+	}
+	s.notificar(tenantId, resposta)
+
+	return resposta, nil
 }
 
 // ListarMinhasSolicitacoes é GET /solicitacoes/minhas -- restrita ao próprio
