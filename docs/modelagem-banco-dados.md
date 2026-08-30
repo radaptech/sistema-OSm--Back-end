@@ -225,6 +225,17 @@ uma flexibilidade falsa, que só serve para inserir valor que a aplicação não
 **Continuam tabela:** `area_tecnico`, `nivel_criticidade`, `nivel_urgencia`. São
 vocabulário do cliente: um supermercado pode querer "Automação" onde outro quer "Ar-condicionado".
 
+> **Ajustado depois da revisão 4.1.** `nivel_criticidade` (migration `000004`) e
+> `nivel_urgencia` (migration `000007`) viraram `ENUM` também: nenhum dos dois provou ser
+> vocabulário do cliente na prática — o front tipa os dois como tupla fixa
+> (`niveisCriticidade`/`niveisUrgencia`) e nunca existiu tela de cadastro/edição de nível
+> em nenhum dos dois. A tabela ficava vazia até alguém escrever um `INSERT` manual (mesma
+> lacuna que `area_tecnico` teve até a `000006`), travando cadastro de máquina e abertura de
+> OS respectivamente. `area_tecnico` continua tabela porque é vocabulário do cliente de
+> verdade (o próprio exemplo "Automação" vs. "Ar-condicionado" já pressupõe um cadastro
+> variando por tenant, e a `000006` prova que o produto espera `INSERT` novo ali). Efeito:
+> das "três tabelas" do parágrafo original, sobra uma.
+
 **Resultado:** nove listas de domínio caem para três tabelas, some um JOIN de toda listagem quente,
 e uma limitação registrada na revisão 1 desaparece — o CHECK de "área de atuação é obrigatória para
 técnico" precisava de subquery (que `CHECK` não aceita) e agora é uma expressão simples:

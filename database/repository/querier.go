@@ -41,7 +41,14 @@ type Querier interface {
 	// continua dando acesso a uma loja que sumiu das listagens. Quem chama decide
 	// se recusa ou se desativa os setores junto, mas precisa saber que existem.
 	ContarSetoresAtivosDaLoja(ctx context.Context, arg ContarSetoresAtivosDaLojaParams) (int64, error)
+	ContarSolicitacoesDoSolicitante(ctx context.Context, arg ContarSolicitacoesDoSolicitanteParams) (int64, error)
 	ContarUsuarios(ctx context.Context, arg ContarUsuariosParams) (int64, error)
+	// `chave` é a KEY do objeto no R2 (bucketR2.UploadFoto sobe o arquivo ANTES
+	// de abrir a transação -- precisa da key para este INSERT -- e devolve só a
+	// key, nunca URL: a leitura é sempre assinada na hora, ver
+	// back-end/CLAUDE.md "R2 -- storage de anexos"). mime_type e tamanho_bytes
+	// saem de graça do header do multipart, sem custo de I/O extra.
+	CriarAnexoSolicitacao(ctx context.Context, arg CriarAnexoSolicitacaoParams) error
 	// Empresa terceirizada é a prestadora externa que o TÉCNICO aciona quando
 	// decide não resolver a OS internamente (front-end/CLAUDE.md item 9:
 	// "terceirizar é decisão do Técnico"). Entidade simples: não pende de loja nem
@@ -74,6 +81,11 @@ type Querier interface {
 	// transação -- não há UPDATE de escopo individual aqui de propósito.
 	CriarEscopo(ctx context.Context, arg CriarEscopoParams) (UsuarioEscopo, error)
 	CriarEscopoSetor(ctx context.Context, arg CriarEscopoSetorParams) error
+	// Um INSERT por marcador (hoje só existe 'Afeta Produção' -- marcador_impacto
+	// é ENUM de um valor só, associativa porque o contrato já troca uma lista).
+	// Chamada em loop pelo service, na mesma transação da solicitação: sem
+	// solicitação persistida ainda não há id para pendurar o impacto.
+	CriarImpactoSolicitacao(ctx context.Context, arg CriarImpactoSolicitacaoParams) error
 	// Loja é a unidade/filial dentro do tenant. Exclusão é sempre soft delete
 	// (ativa = false) -- ver "Soft delete" em docs/modelagem-banco-dados.md:
 	// máquina, setor e todo o histórico de OS apontam pra loja, então apagar de
@@ -119,6 +131,32 @@ type Querier interface {
 	// o banco já recusa sozinho um setor de outro tenant, sem checagem extra
 	// aqui.
 	CriarMaquina(ctx context.Context, arg CriarMaquinaParams) (Maquina, error)
+	// Nasce da aprovação do Gestor (POST /:id/abrir-os): só o INSERT mínimo que
+	// faz a linha existir, ck_os_executor validando o resto (tecnico_id e
+	// urgencia NOT NULL, e como tipo aqui nunca é 'terceiros' -- solicitacao_os
+	// só produz 'maquinario'/'reparo' -- empresa_terceirizada_id e
+	// terceiro_acionado_em ficam NULL, satisfazendo a metade "terceiros" do
+	// CHECK por vacuidade). O ciclo de vida (iniciar/pausar/encerrar) é fase 2,
+	// fora daqui.
+	//
+	// `urgencia` é o ENUM nivel_urgencia (migration 000007) -- sem
+	// ObterUrgenciaPorNome/resolução nome->id: o front já manda o rótulo exato
+	// ('Baixa'/'Média'/'Alta', front-end/src/tipos/ordemServico.ts) e o valor
+	// viaja direto, mesmo padrão de `tipo`/`origem` em CriarSolicitacaoPreventiva.
+	//
+	// `tipo` é tipo_os, não tipo_solicitacao -- tipos Postgres diferentes com os
+	// mesmos rótulos textuais; o service converte (solicitacao.Tipo vira o
+	// parâmetro aqui), não este arquivo.
+	//
+	// `afeta_producao` vem do service, que já leu solicitacao_impacto: é aqui,
+	// não em solicitacao_os, que o relógio de máquina parada (docs/modelagem,
+	// "horas_parada só existe se afeta_producao") vai procurar o flag.
+	//
+	// RETURNING id, aberta_em (não só id): `aberta_em` é o `dataAbertura` da
+	// resposta de POST /:id/abrir-os (OrdemServico do front) -- sai do DEFAULT
+	// now() sem precisar reler a linha inteira, mesmo espírito de
+	// CriarSolicitacaoMaquinario devolvendo `criado_em` junto do `id`.
+	CriarOrdemServicoDeSolicitacao(ctx context.Context, arg CriarOrdemServicoDeSolicitacaoParams) (CriarOrdemServicoDeSolicitacaoRow, error)
 	// Manutenção preventiva de uma máquina. Máquina exige pelo menos uma
 	// (regra de negócio do front: esquemaCadastrarMaquina, preventivas min(1)), e
 	// elas viajam na mesma requisição da máquina -- CriarPreventiva é chamada
@@ -157,6 +195,18 @@ type Querier interface {
 	// dois, e é ela que torna impossível pendurar um setor numa loja de outro
 	// tenant -- o banco recusa, não depende de disciplina no service.
 	CriarSetor(ctx context.Context, arg CriarSetorParams) (Setor, error)
+	// POST /solicitacoes/maquinario. `tipo`/`origem` literais, mesmo motivo de
+	// CriarSolicitacaoPreventiva: ck_solicitacao_alvo exige maquina_id e proíbe
+	// item_descricao para 'maquinario', ck_origem exige solicitante_id para
+	// 'solicitante'. setor_id vem da máquina escolhida (o service resolve via
+	// ObterMaquinaPorID antes de chamar isto -- solicitação não guarda loja).
+	//
+	// RETURNING id, criado_em (não `*`): é só o que o service precisa para montar
+	// a resposta via ObterSolicitacaoPorID logo em seguida, na mesma transação --
+	// mesmo padrão de CadastrarMaquina relendo por Obter...PorID porque RETURNING
+	// não enxerga tabela juntada (aqui nem precisaria do JOIN, mas mantém as duas
+	// criações e a leitura com uma origem só de verdade).
+	CriarSolicitacaoMaquinario(ctx context.Context, arg CriarSolicitacaoMaquinarioParams) (CriarSolicitacaoMaquinarioRow, error)
 	// Solicitação de OS -- a fila que o Gestor avalia antes de existir Ordem de
 	// Serviço. Nasce de duas origens (ck_origem amarra as duas colunas):
 	//   'solicitante' -> alguém abriu pelo app, tem solicitante_id e foto;
@@ -195,16 +245,24 @@ type Querier interface {
 	//   - trg_solicitacao_tem_foto exige anexo só para origem = 'solicitante'
 	//     desde a migration 000005 -- antes dela este INSERT falhava no COMMIT;
 	//   - uq_preventiva_pendente (índice único parcial em preventiva_id WHERE
-	//     status = 'Pendente') é a rede contra execução duplicada do cron. Deixar o
-	//     23505 subir e o service tratar como benigno é mais simples que um
-	//     ON CONFLICT com predicado parcial, que devolveria zero linhas e faria o
-	//     :one virar pgx.ErrNoRows -- um segundo caso de erro para o mesmo evento.
+	//     status = 'Pendente') é a rede contra execução duplicada do cron, e é ele
+	//     -- não o NOT EXISTS da query que alimenta este INSERT -- quem garante a
+	//     regra quando duas réplicas rodam juntas. Deixar o 23505 subir e o service
+	//     tratar como benigno é mais simples que um ON CONFLICT com predicado
+	//     parcial, que devolveria zero linhas e faria o :one virar pgx.ErrNoRows --
+	//     um segundo caso de erro para o mesmo evento.
 	// Os casts ::bigint em maquina_id e preventiva_id não são decoração: as duas
 	// colunas são nullable no schema (precisam ser, para 'reparo' e para a origem
 	// humana), e sem o cast o sqlc gera *int64 nos parâmetros. Aqui elas nunca são
 	// nulas -- ck_solicitacao_alvo e ck_origem proíbem -- e ponteiro num job que
 	// roda sozinho é só uma forma a mais de gravar NULL por engano.
 	CriarSolicitacaoPreventiva(ctx context.Context, arg CriarSolicitacaoPreventivaParams) (int64, error)
+	// POST /solicitacoes/reparo. Espelho da anterior para o outro lado de
+	// ck_solicitacao_alvo: maquina_id fica NULL (nem entra na lista de colunas) e
+	// item_descricao é obrigatório. setor_id aqui vem do escopo do solicitante
+	// (ObterEscopoSessaoPorUsuario -- reparo não tem máquina para derivar loja),
+	// não de uma query nova.
+	CriarSolicitacaoReparo(ctx context.Context, arg CriarSolicitacaoReparoParams) (CriarSolicitacaoReparoRow, error)
 	// Exclusão é sempre soft delete (ativo = false) -- ver "Soft delete" em
 	// docs/modelagem-banco-dados.md: perde-se o cadastro, não o histórico de OS
 	// vinculado ao usuário (solicitante/técnico/gestor).
@@ -308,13 +366,24 @@ type Querier interface {
 	//
 	// Sem parâmetro nenhum, pelo mesmo motivo.
 	//
-	// O NOT EXISTS não é otimização, é o que impede o job de quebrar:
-	// uq_preventiva_pendente é índice único parcial em
-	// solicitacao_os (preventiva_id) WHERE status = 'Pendente'. Sem ele a primeira
-	// rodada passa e a segunda morre com 23505 em toda preventiva que o Gestor
-	// ainda não converteu nem rejeitou. (Uma preventiva PODE gerar várias
-	// solicitações ao longo do tempo, uma por ciclo -- só não duas pendentes ao
-	// mesmo tempo.)
+	// Sobre o NOT EXISTS e uq_preventiva_pendente (índice único parcial em
+	// solicitacao_os (preventiva_id) WHERE status = 'Pendente'), que fazem coisas
+	// diferentes e é fácil confundir:
+	//
+	//   o índice é quem garante a regra -- uma preventiva não tem duas
+	//   solicitações pendentes ao mesmo tempo (pode ter várias ao longo do tempo,
+	//   uma por ciclo). Ele vale inclusive contra duas réplicas do cron rodando
+	//   juntas, que é justamente o que a query sozinha não pega;
+	//
+	//   o NOT EXISTS evita o trabalho condenado. Enquanto o Gestor não converte
+	//   nem rejeita, a preventiva continua com proxima_data no passado, então sem
+	//   este filtro ela voltaria em toda execução para tomar 23505 no INSERT --
+	//   uma transação inútil por preventiva parada na fila, todo dia.
+	//
+	// Ou seja: tirar o NOT EXISTS não corrompe nada (o service trata o 23505 como
+	// benigno e a transação inteira volta), só desperdiça. Tirar o índice é que
+	// quebra. É por isso que nenhum teste falha se este filtro sumir -- não tente
+	// escrever um sem antes tornar o desperdício observável.
 	//
 	// m.ativa é igualmente obrigatório: DesativarMaquina NÃO desativa as
 	// preventivas da máquina (maquina.sql, e não há ON DELETE/trigger fazendo
@@ -337,6 +406,23 @@ type Querier interface {
 	//
 	// Array simples, sem paginação: o front pagina no cliente (item 12).
 	ListarSetores(ctx context.Context, arg ListarSetoresParams) ([]Setor, error)
+	// GET /solicitacoes -- a fila do Gestor. Array simples, sem paginação (o
+	// front pagina no cliente, mesmo padrão de ListarMaquinas/ListarPreventivas).
+	//
+	// status/tipo/lojaId/busca são combináveis e opcionais -- NULL não filtra.
+	// Busca cobre descrição, nome da máquina e item do reparo (os dois campos que
+	// a lista mostra como "alvo").
+	//
+	// Escopo no WHERE via EXISTS sobre usuario_escopo, mesmo bloco de
+	// ListarMaquinas/ListarPreventivas: NULL é o administrador (não filtra), os
+	// demais perfis só enxergam solicitação cujo setor eles alcançam.
+	ListarSolicitacoes(ctx context.Context, arg ListarSolicitacoesParams) ([]ListarSolicitacoesRow, error)
+	// GET /solicitacoes/minhas -- restrita ao próprio solicitante (nunca escopo:
+	// é a lista pessoal, não a fila do gestor), paginada por LIMIT/OFFSET porque
+	// model.RespostaPaginada exige os dois números (ContarSolicitacoesDoSolicitante
+	// abaixo, mesmo WHERE, mesmo motivo de ContarUsuarios repetir o de
+	// ListarUsuarios -- divergir dá total que não bate com a página).
+	ListarSolicitacoesDoSolicitante(ctx context.Context, arg ListarSolicitacoesDoSolicitanteParams) ([]ListarSolicitacoesDoSolicitanteRow, error)
 	// GET /tecnicos -- projeção somente-leitura sobre `usuario`, não tabela
 	// própria: técnico é usuário com perfil 'tecnico'. Existe separada de
 	// ListarUsuarios por três motivos, e o primeiro é o que obriga:
@@ -383,6 +469,16 @@ type Querier interface {
 	// certo: ele não pertence a loja alguma. ContarUsuarios repete o mesmo WHERE
 	// de propósito; divergir entre as duas dá total que não bate com a página.
 	ListarUsuarios(ctx context.Context, arg ListarUsuariosParams) ([]Usuario, error)
+	// `AND status = 'Pendente'` no WHERE, não só no id: sem isso, abrir OS duas
+	// vezes seguidas passaria a segunda também (uq_os_solicitacao pegaria no
+	// INSERT de ordem_servico, mas tarde -- é melhor a solicitação já recusar
+	// antes de gastar o INSERT). 0 linhas afetadas é como o service sabe que não
+	// era Pendente e devolve ErrConflitoIntegridade, sem tentar o INSERT da OS.
+	MarcarSolicitacaoConvertida(ctx context.Context, arg MarcarSolicitacaoConvertidaParams) (int64, error)
+	ObterAnexosDaSolicitacao(ctx context.Context, solicitacaoID int64) ([]SolicitacaoAnexo, error)
+	// Plural de propósito, mesmo motivo de ObterImpactosDasSolicitacoes: quem
+	// monta uma página de solicitações busca os anexos de todas numa ida só.
+	ObterAnexosDasSolicitacoes(ctx context.Context, solicitacaoIds []int64) ([]SolicitacaoAnexo, error)
 	// Usado no cadastro de técnico: o front manda o nome da área (AreaTecnico em
 	// front-end/src/tipos/tecnico.ts), o banco guarda o id em usuario.area_tecnico_id.
 	ObterAreaTecnicoPorNome(ctx context.Context, arg ObterAreaTecnicoPorNomeParams) (int16, error)
@@ -403,6 +499,13 @@ type Querier interface {
 	// ida só ao banco -- é o que ListarUsuarios usa para montar o escopo de uma
 	// página inteira sem N+1.
 	ObterEscoposSessaoPorUsuarios(ctx context.Context, usuarioIds []int64) ([]ObterEscoposSessaoPorUsuariosRow, error)
+	// Filhos de uma solicitação só, usada por ObterSolicitacaoPorID (GET /:id, e
+	// pela criação, que relê por ali dentro da mesma transação).
+	ObterImpactosDaSolicitacao(ctx context.Context, solicitacaoID int64) ([]MarcadorImpacto, error)
+	// Mesma forma da anterior, para uma página inteira numa ida só ao banco --
+	// mesmo padrão de ObterEscoposSessaoPorUsuarios (usuario_escopo.sql): quem
+	// lista usa a plural para não fazer N+1, uma query por solicitação da página.
+	ObterImpactosDasSolicitacoes(ctx context.Context, solicitacaoIds []int64) ([]SolicitacaoImpacto, error)
 	// Igual a ObterLojaPorID, com FOR SHARE: usada dentro da transação que cria
 	// setor, para a loja não ser desativada entre o cheque de `ativa` e o INSERT.
 	// FOR SHARE e não FOR UPDATE porque ninguém aqui altera a loja -- só precisa
@@ -426,6 +529,17 @@ type Querier interface {
 	//
 	// Sem filtro de `ativa`: a tela de edição precisa carregar o registro.
 	ObterPreventivaPorID(ctx context.Context, arg ObterPreventivaPorIDParams) (ObterPreventivaPorIDRow, error)
+	// GET /solicitacoes/resumo -- os três contadores da Home do Solicitante.
+	// `abertas`/`emAndamento`/`concluidas` não são estados de solicitacao_os
+	// (que só tem Pendente/Convertida/Rejeitada): são o status da OrdemServico
+	// que ela virou, por isso o LEFT JOIN com ordem_servico. Uma solicitação
+	// Pendente conta como "aberta" (ainda não foi nem avaliada); Rejeitada não
+	// entra em nenhum balde, de propósito -- não é trabalho aberto nem
+	// concluído, e a tela nem mostra essa categoria.
+	//
+	// count(*) FILTER (WHERE ...) e não três subqueries: uma passada só pela
+	// tabela, sem repetir o FROM/WHERE três vezes.
+	ObterResumoSolicitacoes(ctx context.Context, arg ObterResumoSolicitacoesParams) (ObterResumoSolicitacoesRow, error)
 	// Diferente de ObterSetorPorID acima, que projeta só o que a sessão precisa:
 	// esta devolve a linha inteira para a tela de edição.
 	ObterSetorCompletoPorID(ctx context.Context, arg ObterSetorCompletoPorIDParams) (Setor, error)
@@ -437,10 +551,42 @@ type Querier interface {
 	// setores para N lojas, e setor pertence a uma loja só -- é daqui que sai a
 	// distribuição de cada setor no escopo da loja certa.
 	ObterSetoresPorIDs(ctx context.Context, arg ObterSetoresPorIDsParams) ([]ObterSetoresPorIDsRow, error)
+	// Traz os denormalizados que SolicitacaoOS do front exige: maquinaNome/
+	// maquinaCodigo/maquinaFotoUrl (reparo não tem máquina -- os três vêm NULL
+	// via LEFT JOIN), setorNome/lojaId/lojaNome (sempre presentes -- toda
+	// solicitação tem setor), solicitanteNome (NULL quando origem = 'preventiva')
+	// e rejeitadoPorNome (NULL enquanto não rejeitada).
+	//
+	// Impactos e anexos ficam de fora de propósito, em vez de um array_agg aqui
+	// dentro: mesmo padrão de usuário/escopo (ObterUsuarioPorID não traz o
+	// escopo -- quem busca é uma query própria). Evita GROUP BY sobre `s.*` e
+	// mantém uma única forma de buscar cada filho, reaproveitada tanto para uma
+	// solicitação (aqui) quanto para uma página inteira delas (as `...Das...`
+	// plurais abaixo).
+	//
+	// JOINs de setor/loja são INNER (NOT NULL, FK garante); máquina, solicitante
+	// e rejeitado_por são LEFT (todos nullable no schema).
+	//
+	// escopo_usuario_id é opcional, mesmo `escopoDe(usuarioId, perfil)` de
+	// ListarSolicitacoes -- e todo chamador manda ele, sempre: GET
+	// /solicitacoes/:id (aberto a qualquer perfil) para não deixar um
+	// Solicitante enumerar id e ler foto/descrição de outro setor, e
+	// AbrirOS/Rejeitar (só gestor/administrador na rota) para o Gestor não agir
+	// em solicitação de loja que ele não atende. NULL só quando `escopoDe`
+	// devolve NULL, ou seja, para administrador -- ele não tem escopo, a
+	// ausência É o acesso total. Fora do escopo cai em pgx.ErrNoRows como se o
+	// id não existisse -- 404, nunca 403, mesmo critério de "filtro do cliente
+	// estreita, nunca amplia".
+	ObterSolicitacaoPorID(ctx context.Context, arg ObterSolicitacaoPorIDParams) (ObterSolicitacaoPorIDRow, error)
 	// Usado no login: email é citext (case-insensitive) e único por tenant.
 	ObterUsuarioPorEmail(ctx context.Context, arg ObterUsuarioPorEmailParams) (Usuario, error)
 	ObterUsuarioPorID(ctx context.Context, arg ObterUsuarioPorIDParams) (Usuario, error)
 	RegistrarUltimoAcesso(ctx context.Context, arg RegistrarUltimoAcessoParams) error
+	// ck_rejeicao exige os três juntos (motivo, autor, instante) -- por isso
+	// entram juntos aqui, nunca um UPDATE incremental. Mesmo filtro
+	// `status = 'Pendente'` de MarcarSolicitacaoConvertida e pelo mesmo motivo:
+	// não rejeitar (nem re-rejeitar) o que já saiu do estado inicial.
+	RejeitarSolicitacao(ctx context.Context, arg RejeitarSolicitacaoParams) (int64, error)
 }
 
 var _ Querier = (*Queries)(nil)
