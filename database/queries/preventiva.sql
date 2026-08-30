@@ -142,3 +142,67 @@ WHERE id = $1 AND tenant_id = $2;
 UPDATE preventiva
 SET ativa = false
 WHERE tenant_id = $1 AND maquina_id = $2;
+
+-- name: ListarPreventivasVencidas :many
+-- Alimenta o job de abertura automática de solicitação (subcomando de CLI
+-- `preventivas-vencidas`, chamado pelo Railway Cron -- ver "Abertura automática
+-- de solicitação por preventiva" no CLAUDE.md). Cada linha daqui vira uma
+-- solicitação com origem = 'preventiva' na fila do Gestor.
+--
+-- ⚠️ É a única query do projeto SEM tenant_id no WHERE, e isso é proposital:
+-- não há request, não há token, não há tenant. O job varre todos os tenants de
+-- uma vez e o tenant_id viaja na linha, direto para o INSERT da solicitação.
+-- Não "conserte" isso adicionando um filtro.
+--
+-- Sem parâmetro nenhum, pelo mesmo motivo.
+--
+-- Sobre o NOT EXISTS e uq_preventiva_pendente (índice único parcial em
+-- solicitacao_os (preventiva_id) WHERE status = 'Pendente'), que fazem coisas
+-- diferentes e é fácil confundir:
+--
+--   o índice é quem garante a regra -- uma preventiva não tem duas
+--   solicitações pendentes ao mesmo tempo (pode ter várias ao longo do tempo,
+--   uma por ciclo). Ele vale inclusive contra duas réplicas do cron rodando
+--   juntas, que é justamente o que a query sozinha não pega;
+--
+--   o NOT EXISTS evita o trabalho condenado. Enquanto o Gestor não converte
+--   nem rejeita, a preventiva continua com proxima_data no passado, então sem
+--   este filtro ela voltaria em toda execução para tomar 23505 no INSERT --
+--   uma transação inútil por preventiva parada na fila, todo dia.
+--
+-- Ou seja: tirar o NOT EXISTS não corrompe nada (o service trata o 23505 como
+-- benigno e a transação inteira volta), só desperdiça. Tirar o índice é que
+-- quebra. É por isso que nenhum teste falha se este filtro sumir -- não tente
+-- escrever um sem antes tornar o desperdício observável.
+--
+-- m.ativa é igualmente obrigatório: DesativarMaquina NÃO desativa as
+-- preventivas da máquina (maquina.sql, e não há ON DELETE/trigger fazendo
+-- isso). Sem esse filtro, máquina desativada continuaria abrindo solicitação a
+-- cada ciclo, para sempre, e não haveria como parar pela API -- não existe
+-- reativação nem DELETE de linha em lugar nenhum.
+--
+-- A data de corte usa fuso explícito e não CURRENT_DATE, mesmo motivo do
+-- `vencida` nas outras duas queries: o container roda em UTC, e a preventiva
+-- apareceria vencida até 3h antes da virada do dia no Brasil.
+--
+-- Projeta só o que o INSERT da solicitação precisa (o setor_id vem da máquina:
+-- solicitacao_os.setor_id é NOT NULL e a solicitação não guarda loja). Não usa
+-- p.* como as outras: aqui ninguém monta resposta de contrato.
+SELECT
+    p.id,
+    p.tenant_id,
+    p.descricao,
+    p.maquina_id,
+    m.setor_id
+FROM preventiva p
+JOIN maquina m ON m.tenant_id = p.tenant_id AND m.id = p.maquina_id
+WHERE p.ativa
+  AND m.ativa
+  AND p.proxima_data <= (now() AT TIME ZONE 'America/Sao_Paulo')::date
+  AND NOT EXISTS (
+      SELECT 1
+      FROM solicitacao_os s
+      WHERE s.preventiva_id = p.id
+        AND s.status = 'Pendente'
+  )
+ORDER BY p.proxima_data, p.id;

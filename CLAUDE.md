@@ -62,7 +62,15 @@ que o front espera (camelCase, datas `dd/mm/yyyy HH:MM:SS`, ver `config/dataBr.g
 - `main.go` — entrypoint. Roda migrations automaticamente no boot
   (`RunMigrationPostgress`), aplica `middleware.CorsConfig()` global, monta o
   `router.Container` e registra as rotas (`router.ConfigurarRotas`), e sobe o Gin na
-  porta 8081. Também despacha subcomandos de CLI antes de subir o servidor (ver abaixo).
+  porta 8081. Também despacha subcomandos de CLI antes de subir o servidor:
+  `subcomandos` (mapa nome → função) + `despacharSubcomando(args) bool`, que roda o
+  comando pedido e diz se rodou. Os três hoje: `provisionar-admin`, `backup-banco`,
+  `preventivas-vencidas` — cada um no seu `cli_*.go` na raiz.
+  ⚠️ **Argumento desconhecido cai fora do mapa e a API sobe**, sem erro. É o
+  comportamento de sempre e é a armadilha do Custom Start Command do Railway (typo ou
+  comando pela metade = container subindo o Gin no lugar do job, calado — já aconteceu
+  com o Cron-BACKUP). `main_test.go` tranca o roteamento e os nomes, justamente porque o
+  Railway chama por string e não compila junto com este repo.
   `proxiesConfiaveis()` (mesmo arquivo) alimenta o `SetTrustedProxies` — ver "Rotas e
   rate limit".
 - `config/` — `VariaveisDeAmbiente` (lê `.env`), `ConnPostgresql` (pool + migrations),
@@ -194,6 +202,11 @@ que o front espera (camelCase, datas `dd/mm/yyyy HH:MM:SS`, ver `config/dataBr.g
     `AtualizarMaquina` substitui o conjunto inteiro (`DesativarPreventivasDaMaquina` antes
     de `gravarPreventivas`, sem merge incremental) — mesmo padrão do escopo em
     `AtualizarUsuario`.
+    Mora aqui também o **job de preventiva vencida**:
+    `AbrirSolicitacoesDePreventivasVencidas` (percorre as vencidas, devolve quantas abriu
+    e as falhas num `errors.Join`) e `abrirSolicitacaoDaPreventiva` (a transação de uma
+    preventiva só). É o único método do pacote **sem `tenantID` no parâmetro** — não há
+    request nem token, o job varre todos os tenants. Ver a seção do job.
 - `controller/` — `loginController.go`: `LoginController` recebe um
   `LoginServiceInterface` (a interface existe pro teste do handler poder trocar o
   service — `UsuarioService` guarda `*pgxpool.Pool` concreto, não dá pra mockar de
@@ -282,7 +295,7 @@ que o front espera (camelCase, datas `dd/mm/yyyy HH:MM:SS`, ver `config/dataBr.g
   manualmente em dev, só em produção/CI antes do deploy do binário.
 - Aplicadas até aqui: `000001` schema inicial, `000002` horas parada desde a solicitação,
   `000003` chave do R2, `000004` criticidade vira ENUM, `000005` foto só na solicitação
-  humana, `000006` seed de `area_tecnico`.
+  humana, `000006` seed de `area_tecnico`, `000007` urgência vira ENUM.
 - ⚠️ **Tabela e tipo dividem namespace no Postgres** — trocar uma tabela por um ENUM
   homônimo exige dropar a tabela **antes** de criar o tipo (foi o caso de `000004`).
 
@@ -357,6 +370,20 @@ só, sem um banco por tenant).
 - Frequência: diária é o ponto de partida razoável — não existe ainda rotação/expiração
   de backup antigo (o bucket cresce um `.dump` por execução, sem limpeza automática); se
   o custo de armazenamento incomodar, é o próximo passo, não um bloqueio para começar.
+
+## Job de preventiva vencida (`preventivas-vencidas`)
+Terceiro subcomando de CLI, mesmo molde de `provisionar-admin` e `backup-banco`:
+`cli_preventivas_vencidas.go` na raiz, `make preventivas-vencidas` em dev, Railway Cron em
+produção. Abre uma Solicitação para cada preventiva vencida e avança o ciclo dela — o
+porquê de cada decisão está em "Abertura automática de solicitação por preventiva".
+
+Imprime o total **antes** do erro de propósito (falha parcial é normal: sem o número
+primeiro, o log do cron mostraria só o que deu errado), e mesmo assim sai com código ≠ 0
+quando houve falha — cron que falha metade e devolve sucesso não é notado por ninguém.
+
+```
+make preventivas-vencidas
+```
 
 ## Dois Dockerfiles (produção × dev)
 `dockerfile` (produção, o que o Railway builda) e `dockerfile.dev` (o que
@@ -644,8 +671,17 @@ o argumento certo, e a imagem final carregava o toolchain do Go inteiro à toa.
   mesma lacuna de `area_tecnico`, que deixaria o cadastro de máquina travado em todo tenant
   novo. Como ENUM o valor nasce com o schema, e a ordem de declaração já dá o
   `ORDER BY criticidade` (enums do Postgres são ordenáveis) que a coluna `ordem` fazia.
-  `nivel_urgencia` **continua tabela** de propósito: não está neste caminho e
-  `ordem_servico` ainda não tem escrita.
+  `ordem_servico.urgencia` é o **ENUM `nivel_urgencia`** também, desde a migration
+  `000007` — mesma lacuna e mesmo motivo de `nivel_criticidade`: tupla fixa no front
+  (`niveisUrgencia`, `front-end/src/tipos/ordemServico.ts`), sem tela de cadastro, tabela
+  vazia em todo tenant. Ficou tabela em `000004` só porque `ordem_servico` ainda não tinha
+  nenhum caminho de escrita; `CriarOrdemServicoDeSolicitacao` (`solicitacao_os.sql`, fase 1
+  de Solicitações) foi o primeiro, e sem a migration `POST /solicitacoes/:id/abrir-os`
+  travaria em todo tenant do mesmo jeito que cadastro de máquina travava antes da `000004`.
+  A migration precisou dropar e recriar `vw_os_finalizada`/`vw_os_custo_sem_lancamento`
+  também — as duas fazem `SELECT os.*`, e o Postgres resolve isso em colunas concretas na
+  criação da view, então as duas ficam dependentes de `urgencia_id` por baixo mesmo sem
+  citar a coluna no texto; `DROP COLUMN` direto falha com "other objects depend on it".
 - ⚠️ **Armadilha do sqlc em coluna calculada:** expressão booleana composta vira `*bool`,
   e `COALESCE` sozinho vira `interface{}`. Para sair `bool` limpo, **feche com cast**:
   `COALESCE(<expr>, false)::boolean AS x` — é o que `vencida` usa nas duas queries de
@@ -657,6 +693,19 @@ o argumento certo, e a imagem final carregava o toolchain do Go inteiro à toa.
 - `AvancarProximaData` soma o intervalo **a partir da `proxima_data` vencida, não de hoje**
   — senão um ciclo processado com atraso arrastaria todos os seguintes (vencida há 5 dias
   com intervalo 30 vai pra hoje+25, não hoje+30).
+- ⚠️ **`ListarPreventivasVencidas` é a única query do projeto sem `tenant_id` no `WHERE`**,
+  e sem parâmetro nenhum: é do job, não de um request — não há token, e o `tenant_id` viaja
+  na linha direto pro INSERT da solicitação. Não "conserte" adicionando filtro. Ver a seção
+  do job para o papel de `m.ativa` e do `NOT EXISTS`.
+- `database/queries/solicitacao_os.sql` existe hoje **só** com
+  `CriarSolicitacaoPreventiva` — o resto da fase 1 (as duas criações humanas e as
+  leituras) entra nele. `tipo` e `origem` são **literais no SQL, não parâmetros**:
+  `ck_solicitacao_alvo` e `ck_origem` não deixam variar, e `solicitante_id` nem aparece
+  na lista de colunas porque ali ele é *proibido*, não opcional.
+  ⚠️ `maquina_id` e `preventiva_id` levam `::bigint` **de propósito**: as colunas são
+  nullable no schema (precisam ser, para `reparo` e para a origem humana) e sem o cast o
+  sqlc gera `*int64` no parâmetro — ponteiro num job que roda sozinho é só mais uma forma
+  de gravar NULL por engano. Mesma família da armadilha do `vencida`.
 
 **`area_tecnico` nasce populada (migration `000006`).** Todo tenant novo ganha as cinco
 áreas que o front tipa (`areasTecnico`) por um **trigger `AFTER INSERT ON empresa`** —
@@ -690,19 +739,26 @@ Cadastros: **completos**. Falta o miolo do fluxo, na ordem em que o front precis
 2. **Ordem de serviço** — o ciclo de vida (`iniciar`/`pausar`/`retomar`/
    `acionar-terceiro`/`encerrar`/`custo`), os dois relógios e a flag `finalizada`.
    Destrava os dois cards mortos do painel do Administrador.
-3. **Indicadores** (`GET /indicadores/maquinas/:id`) e o **job de preventiva vencida**
-   (ver seção abaixo).
+3. **Indicadores** (`GET /indicadores/maquinas/:id`). O **job de preventiva vencida**
+   saiu desta lista — está pronto e testado, falta só o Cron Job no Railway (ver seção
+   abaixo).
 
 Listagem nova que precise recortar por escopo usa `atorDaRota` no controller +
 `escopoDe(usuarioId, perfil)` no service, com o `EXISTS` no `WHERE` — ver "Escopo no
 `WHERE`" em "Queries e repository". Rota com arquivo usa `corpoMultipart`, sem arquivo usa
 `corpoJSON`.
 
-## Abertura automática de solicitação por preventiva (a fazer)
+## Abertura automática de solicitação por preventiva (feito; falta o Cron no Railway)
 Ao vencer a `proxima_data` de uma preventiva **ativa**, o sistema abre uma **Solicitação**
 (não uma OS) que cai na fila do Gestor. Ela nasce com `origem = 'preventiva'`,
 `preventiva_id` preenchido e `solicitante_id` **nulo** — não houve pessoa. A OS só nasce
 depois, quando o Gestor aprova com técnico + urgência: criar OS direto pularia a aprovação.
+
+**Implementado e testado (28/08/2026)**, ponta a ponta contra Postgres de verdade:
+`ListarPreventivasVencidas` (`preventiva.sql`), `CriarSolicitacaoPreventiva`
+(`solicitacao_os.sql`, arquivo novo), `AbrirSolicitacoesDePreventivasVencidas` +
+`abrirSolicitacaoDaPreventiva` (`preventivaService.go`), `cli_preventivas_vencidas.go`
+e `make preventivas-vencidas`. Falta **só** criar o Cron Job no Railway.
 
 - **A migration `000005` destravou isso.** `fn_check_solicitacao_tem_foto` exigia foto em
   *toda* solicitação, e a de preventiva não tem nem como ter — ninguém fotografou nada.
@@ -711,20 +767,42 @@ depois, quando o Gestor aprova com técnico + urgência: criar OS direto pularia
   `solicitante_id` porque `ck_origem` já amarra os dois.
 - **Onde o job mora: não no banco.** `pg_cron` precisa de `shared_preload_libraries`, que
   o Postgres gerenciado do Railway não deixa configurar no Hobby — e regra de negócio em
-  job de banco fica fora do teste e do CI. O caminho que encaixa é **subcomando de CLI**,
-  como `provisionar-admin` (o `main.go` já despacha subcomandos), chamado pelo Railway
-  Cron. Alternativa: ticker em goroutine dentro da API — zero infra nova, mas acopla o job
-  ao uptime e duplica com 2 réplicas.
-- ⚠️ **`uq_preventiva_pendente` é a rede de segurança**: índice único parcial em
-  `solicitacao_os (preventiva_id) WHERE status = 'Pendente'`. Uma preventiva não tem duas
-  solicitações pendentes ao mesmo tempo (mas pode ter várias ao longo do tempo, a cada
-  ciclo). Consequência prática: **a query que lista as vencidas precisa de `NOT EXISTS`
-  sobre solicitação pendente**, senão o job quebra com 23505 na segunda rodada. Em
-  compensação, é ela que torna a execução duplicada (2 réplicas) inofensiva.
-- Falta: query `ListarPreventivasVencidas` (com o `NOT EXISTS`), query de inserção da
-  solicitação automática, o service percorrendo as vencidas — **uma transação por
-  preventiva**, para uma falha não travar as demais — chamando `AvancarProximaData` junto,
-  e o subcomando + entrada no Railway Cron.
+  job de banco fica fora do teste e do CI. Ficou **subcomando de CLI**, como
+  `provisionar-admin` e `backup-banco`. Consequência boa: **não há nada do Railway dentro
+  do código** — sair de lá é reapontar quem dispara (cron de VPS, `CronJob` de k8s,
+  GitHub Actions com as `DB_*` nos secrets, que funciona porque o Supabase é alcançável
+  pela internet). Ticker em goroutine dentro da API continua sendo a saída de emergência:
+  acopla o job ao uptime, mas duplicar execução aqui é inofensivo por construção (ver o
+  índice abaixo) — o aviso vale mesmo é pro `backup-banco`.
+- **Uma transação por preventiva**, não uma para o lote: uma linha ruim não pode derrubar
+  as outras 200. Dentro dela, o `INSERT` e o `AvancarProximaData` são atômicos **entre
+  si** — separados, avançar a data com o INSERT falhando pularia o ciclo em silêncio, e
+  inserir sem avançar faria a preventiva disparar de novo no instante em que o Gestor
+  convertesse a solicitação. As falhas voltam juntas num `errors.Join`: erro não-nil do
+  job é resultado **parcial**, não fracasso.
+- ⚠️ **`uq_preventiva_pendente` × `NOT EXISTS` fazem coisas diferentes**, e a versão
+  anterior desta seção confundia as duas. O **índice** (único parcial em
+  `solicitacao_os (preventiva_id) WHERE status = 'Pendente'`) é quem **garante a regra** —
+  uma preventiva não tem duas solicitações pendentes ao mesmo tempo (pode ter várias ao
+  longo do tempo, uma por ciclo) — inclusive contra duas réplicas do cron rodando juntas,
+  que é justamente o que a query sozinha nunca pegaria. O **`NOT EXISTS`** na query só
+  evita trabalho condenado: sem ele, toda preventiva parada na fila do Gestor volta a cada
+  execução para tomar 23505 no INSERT, uma transação inútil por dia por preventiva.
+  Tirar o `NOT EXISTS` **não corrompe nada** (o service trata 23505 como benigno e a
+  transação volta inteira) — por isso **nenhum teste falha se ele sumir**. Tirar o índice
+  é que quebra.
+- ⚠️ **`m.ativa` na query é obrigatório e esse SIM está trancado por teste.**
+  `DesativarMaquina` não desativa as preventivas da máquina, então sem esse filtro máquina
+  desativada abriria solicitação a cada ciclo, para sempre, sem jeito de parar pela API
+  (não existe reativação nem `DELETE` de linha).
+- **Configurar o Cron Job no Railway** (o que falta): mesmo repo, **Dockerfile Path
+  `dockerfile`** (produção, não o `.dev`), **Custom Start Command `./main
+  preventivas-vencidas`** — o comando inteiro, mesma armadilha do Cron-BACKUP (ver "Backup
+  do banco"). Variáveis: só as `DB_*` + `DB_SSLMODE`; **não precisa das `R2_*` nem da
+  `JWT_SECRET`**. Frequência: 1×/dia de manhã (`0 9 * * *` UTC = 06:00 BRT) — preventiva
+  vence no dia, não na hora, e rodar mais vezes não duplica nada, só não adianta.
+- O job **não roda migrations**: quem faz isso é o boot da API. O container do cron sobe o
+  mesmo binário contra o mesmo banco já migrado.
 
 ## Ambiente local
 - `.env` na raiz: `DB_SERVER`, `DB_USER`, `DB_PORT`, `DATABASE`, `DB_PASSWORD`
@@ -814,6 +892,12 @@ depois, quando o Gestor aprova com técnico + urgência: criar OS direto pularia
     (header ausente/em branco → 400, `www`/`api` → 403), por isso passa `nil` como
     `*repository.Queries`. O `TestGetTenantID` existe porque o cast já esteve em `int32`
     e nunca casava com o `bigint` de `empresa.id` — falhava calado devolvendo `false`.
+- `main_test.go` (`package main`) — `despacharSubcomando`. Substitui o mapa `subcomandos`
+  por fakes e testa **o roteamento, nunca a execução** (os subcomandos reais conectam no
+  banco e chamam `log.Fatal`). Cobre os nomes exatos continuarem existindo (o Railway Cron
+  chama por string, não compila junto), as flags do `provisionar-admin` chegarem sem o nome
+  do subcomando, e os dois erros humanos que o painel do Railway aceita calado: typo e
+  `./main` no lugar do subcomando.
 - Dois níveis em `internal/service/`:
   - `loginService_test.go` — unitário, sem banco: tabela cobrindo `validarEscopo` +
     `escopoDoPerfil` nos 4 perfis.
@@ -837,6 +921,13 @@ depois, quando o Gestor aprova com técnico + urgência: criar OS direto pularia
     cinco perfis mais os dois casos de contorno (`?lojaId=`/`?setorId=` fora do escopo
     devolvem vazio). Falha aqui é silenciosa em produção — responde 200 com máquina demais
     e nenhuma tela reclama.
+  - `preventivaJobIntegracao_test.go` — o job de preventiva vencida, em 6 subtestes que
+    compartilham estado e rodam em ordem ("não duplica" só faz sentido depois de "abre").
+    Cobre a forma da solicitação automática (`ck_origem`/`ck_solicitacao_alvo`, o trigger
+    DEFERRABLE da foto, zero anexos), o `proxima_data` indo pra hoje+25 e não hoje+30, e o
+    ciclo reabrindo depois que o Gestor converte a pendente.
+    **Mutação conferida**: tirar `m.ativa` da query quebra 4 subtestes; tirar o
+    `NOT EXISTS` **não quebra nenhum**, e isso é esperado — ver a seção do job.
   - **Teste de escrita transacional confere o banco, não o retorno.** Em
     `maquinarioIntegracao_test.go` a máquina criada é localizada pela *listagem*, não pelo
     struct devolvido: um `CadastrarMaquina` sem `tx.Commit` devolvia a linha com id

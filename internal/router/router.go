@@ -22,6 +22,7 @@ type Container struct {
 	Maquina *controller.MaquinaController
 	Prevent *controller.PreventivaController
 	Terceir *controller.EmpresaTerceirizadaController
+	Solicit *controller.SolicitacaoController
 }
 
 func NewContainer(db *pgxpool.Pool) *Container {
@@ -32,11 +33,30 @@ func NewContainer(db *pgxpool.Pool) *Container {
 	serviceMaquina := service.NewRepoMaquinario(db)
 	servicePreventiva := service.NewRepoPreventiva(db)
 	serviceTerceirizada := service.NewRepoEmpresaTerceirizada(db)
+	serviceSolicitacao := service.NewRepoSolicitacao(db)
+
+	// Notificador é opcional (campo público, não parâmetro de construtor -- ver
+	// o comentário em SolicitacaoService/PreventivaService): URL vazia faz
+	// NotificacaoService tentar chamar "" e falhar por request, exatamente como
+	// bucketMaquinas vazio só quebra o upload sem derrubar o resto. Ver
+	// CLAUDE.md, "Notificação de solicitação por WhatsApp".
+	notificador := service.NewRepoNotificacao(db,
+		os.Getenv("EVOLUTION_API_URL"),
+		os.Getenv("EVOLUTION_API_KEY"),
+		os.Getenv("EVOLUTION_INSTANCE_NAME"),
+	)
+	serviceSolicitacao.Notificador = notificador
+	servicePreventiva.Notificador = notificador
 
 	// O bucket do R2 é escolhido aqui, no wiring, e não guardado por linha: cada
 	// tipo de anexo tem o seu (ver .env-example) e não existe coluna `bucket`.
 	// Vazio só quebra o upload da foto -- o CRUD de máquina segue funcionando.
 	bucketMaquinas := os.Getenv("R2_BUCKET_NAME_MAQUINARIO")
+	// Anexo de solicitação de maquinário vira OS (bucket "de Serviço"); anexo de
+	// pequeno reparo tem o dele -- os dois vazios têm o mesmo efeito de
+	// bucketMaquinas vazio: só o upload quebra, o resto do CRUD segue.
+	bucketOsServico := os.Getenv("R2_BUCKET_NAME_OS_SERVICO")
+	bucketPequenosReparos := os.Getenv("R2_BUCKET_NAME_PEQUENOS_REPAROS")
 
 	return &Container{
 		Login:   controller.NewLoginController(serviceLogin),
@@ -45,6 +65,7 @@ func NewContainer(db *pgxpool.Pool) *Container {
 		Maquina: controller.NewMaquinaController(serviceMaquina, bucketMaquinas),
 		Prevent: controller.NewPreventivaController(servicePreventiva),
 		Terceir: controller.NewEmpresaTerceirizadaController(serviceTerceirizada),
+		Solicit: controller.NewSolicitacaoController(serviceSolicitacao, bucketOsServico, bucketPequenosReparos, bucketMaquinas),
 		queries: repository.New(db),
 	}
 }
@@ -144,4 +165,26 @@ func ConfigurarRotas(r *gin.Engine, c *Container) {
 	terceirizadas.POST("", middleware.Permitir("administrador"), c.Terceir.Cadastrar())
 	terceirizadas.PUT("/:id", middleware.Permitir("administrador"), c.Terceir.Atualizar())
 	terceirizadas.DELETE("/:id", middleware.Permitir("administrador"), c.Terceir.Desativar())
+
+	solicitacoes := api.Group("/solicitacoes", middleware.AutenticacaoJwt())
+	// As duas criações são só do Solicitante -- é quem preenche NovaSolicitacao
+	// no front (front-end/CLAUDE.md), a única tela que chama estas rotas.
+	solicitacoes.POST("/maquinario", middleware.Permitir("solicitante"), c.Solicit.CriarMaquinario())
+	solicitacoes.POST("/reparo", middleware.Permitir("solicitante"), c.Solicit.CriarReparo())
+	// Minhas e Resumo são sempre "o que é meu" -- o service nem recebe perfil,
+	// só o usuario.id do token (mesmo motivo de GET /lojas e /setores ficarem
+	// sem Permitir: o recorte já está no que a query pede, não no RBAC).
+	solicitacoes.GET("/minhas", c.Solicit.Minhas())
+	solicitacoes.GET("/resumo", c.Solicit.Resumo())
+	// A fila é do Gestor (e Administrador) -- Técnico não participa da
+	// aprovação, só recebe a OS depois que ela existe.
+	solicitacoes.GET("", middleware.Permitir("gestor", "administrador"), c.Solicit.Listar())
+	// :id é aberto a qualquer perfil autenticado, recortado pelo escopo de quem
+	// chama (ver ObterSolicitacaoPorID em solicitacao_os.sql) -- o Solicitante
+	// abre o próprio pedido em Minhas Solicitações, o Gestor o dele na fila.
+	solicitacoes.GET("/:id", c.Solicit.Obter())
+	// abrir-os/rejeitar são a decisão do Gestor sobre a fila -- mesmo RBAC de
+	// GET /solicitacoes.
+	solicitacoes.POST("/:id/abrir-os", middleware.Permitir("gestor", "administrador"), c.Solicit.AbrirOS())
+	solicitacoes.POST("/:id/rejeitar", middleware.Permitir("gestor", "administrador"), c.Solicit.Rejeitar())
 }
