@@ -9,13 +9,8 @@ import (
 	"github.com/radaptech/sistema-OSm--Back-end/internal/model"
 )
 
-// OrdemServicoService é só leitura por enquanto. A OS não nasce aqui: quem a
-// cria é SolicitacaoService.AbrirOS (a aprovação do Gestor), e o ciclo de vida
-// -- iniciar/pausar/retomar/acionar-terceiro/encerrar/custo -- é a fase 2.
-//
-// Guarda o *pgxpool.Pool e não um Querier pelo mesmo motivo do resto do
-// pacote: as escritas que vêm depois precisam de transação, e Querier não
-// expõe WithTx.
+// Só leitura: a OS nasce em SolicitacaoService.AbrirOS, e o ciclo de vida é fase 2.
+// Guarda o Pool e não um Querier porque essas escritas vão precisar de WithTx.
 type OrdemServicoService struct {
 	Pool *pgxpool.Pool
 }
@@ -27,14 +22,9 @@ func NewRepoOrdemServico(pool *pgxpool.Pool) *OrdemServicoService {
 	}
 }
 
-// FiltrosOrdemServico é o que GET /ordens-servico aceita por query string.
-// Struct, e não sete parâmetros soltos como em ListarSolicitacoes: são filtros
-// demais para uma assinatura posicional continuar legível, e trocar dois
-// *int64 vizinhos de lugar (LojaId/TecnicoId) compila e devolve a lista
-// errada, calado.
-//
-// `pagina` do contrato do front não entra: a resposta é array simples e o
-// front pagina no cliente, mesmo padrão de ListarSolicitacoes/ListarMaquinas.
+// Struct e não parâmetros soltos como no resto do pacote: trocar LojaId e
+// TecnicoId de lugar numa assinatura posicional compila e devolve lista errada.
+// `pagina` fica de fora -- o front pagina no cliente.
 type FiltrosOrdemServico struct {
 	Status     []string
 	Tipo       *string
@@ -44,15 +34,8 @@ type FiltrosOrdemServico struct {
 	Busca      *string
 }
 
-// ListarOrdensServico é GET /ordens-servico -- um endpoint para os três
-// painéis (Gestor, Técnico, Administrador), o que muda é o filtro. Recortada
-// pelo escopo de quem chama, igual a ListarSolicitacoes/ListarMaquinas: o RBAC
-// da rota libera os três perfis e quem recorta é o WHERE.
-//
-// ⚠️ O escopo sai de escopoDe(usuarioId, perfil), nunca de FiltrosOrdemServico
-// -- os filtros vêm do cliente e só sabem estreitar. Um Técnico mandando
-// ?tecnicoId= de outro técnico recebe lista vazia se as OS dele estiverem fora
-// do escopo, não a lista do colega.
+// ⚠️ O escopo sai de escopoDe(usuarioId, perfil), nunca dos filtros: o RBAC da
+// rota libera três perfis, e quem recorta é o WHERE. Filtro do cliente só estreita.
 func (s *OrdemServicoService) ListarOrdensServico(ctx context.Context, tenantId, usuarioId int64, perfil string, filtros FiltrosOrdemServico) ([]model.OrdemServico, error) {
 
 	repo := repository.New(s.Pool)
@@ -74,12 +57,8 @@ func (s *OrdemServicoService) ListarOrdensServico(ctx context.Context, tenantId,
 	return montarOrdensServicoEmLote(ctx, repo, linhas)
 }
 
-// montarOrdensServicoEmLote busca as pausas da página inteira numa ida só e
-// monta a resposta -- mesmo desenho de montarSolicitacoesEmLote: uma query por
-// OS seria N+1, e um JOIN 1:N duplicaria a OS por pausa.
-//
-// Devolve slice não-nil mesmo vazia: o front tipa OrdemServico[] e `null`
-// quebra o .map.
+// Pausas da página inteira numa ida só: por OS seria N+1, e num JOIN a 1:N
+// duplicaria a OS. Slice não-nil mesmo vazia -- `null` quebra o .map do front.
 func montarOrdensServicoEmLote(ctx context.Context, repo *repository.Queries, linhas []repository.ListarOrdensServicoRow) ([]model.OrdemServico, error) {
 
 	dados := make([]model.OrdemServico, 0, len(linhas))

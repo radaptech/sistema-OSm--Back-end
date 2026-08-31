@@ -120,6 +120,24 @@ que o front espera (camelCase, datas `dd/mm/yyyy HH:MM:SS`, ver `config/dataBr.g
   O `MarshalJSON` do `DataBr` tem receiver ponteiro, então num campo não-ponteiro o
   `encoding/json` ignora o método e serializa `{}` — a data some da resposta sem erro
   nenhum. Use `config.NewDataBrPtr(...)`, que existe pra isso.
+- `internal/model/ordemServico.go` — `OrdemServico` serve os **dois** caminhos que
+  devolvem uma OS (`GET /ordens-servico` e `POST /solicitacoes/:id/abrir-os`), e não duas
+  structs: o front também tipa uma só, e tudo que a OS recém-aberta ainda não tem
+  (técnico denormalizado, encerramento, custo, horas, pausas) é opcional no contrato.
+  Quem monta a completa é `MontarOrdemServico`; a da abertura é
+  `MontarOrdemServicoDaAbertura`, que preenche menos porque a query dela não faz os JOINs
+  de técnico.
+  **`omitempty` só onde o front tem `?`**: `retomadaEm` e `custoHoraTecnico` são
+  `T | null` sem `?`, então são sempre emitidos — o `null` ali **é** a informação
+  ("pausa ainda aberta", "reparo não cobra hora técnica", por `ck_custo_por_tipo`).
+  `tipoDefeito` fica solto na OS e não dentro de `encerramento`, porque é assim que o
+  front tipa (aparece no cabeçalho do card).
+  Os blocos `encerramento`/`custo` nascem quando uma coluna **NOT NULL da tabela filha**
+  vem não-nula — com LEFT JOIN é isso que distingue "linha existe" de "não existe". Para
+  o custo o sinal é `custo_manutencao`, nunca `custo_hora_tecnico` (nulo por regra em
+  reparo e terceiros, mesmo com a linha existindo). `custoTotal` é somado no Go, não no
+  SELECT: mais uma expressão na query seria mais uma chance de cair na armadilha do
+  `numeric` (ver `banco-de-dados.md`).
 - `internal/helper/Errors.go` — `TraduzErroPostgres`: converte código de erro do
   Postgres (`23505`, `23503`, `23502`, ...) em erro de negócio (`ErrDadoDuplicado`,
   `ErrConflitoIntegridade`, ...) pros controllers não fazerem `switch` em `pgErr.Code`
