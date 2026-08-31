@@ -102,7 +102,12 @@ que o front espera (camelCase, datas `dd/mm/yyyy HH:MM:SS`, ver `config/dataBr.g
   `maquinario.go` (`MaquinarioInsert`, `AtualizarMaquina`, `Maquinario` +
   `MontarListaMaquinarios`), `preventiva.go` (`PreventivaPayload`, `Preventiva` +
   `MontarPreventiva`), `paginacao.go` (`RespostaPaginada[T]`, genérico — espelha
-  `RespostaPaginada<T>` do front; só `GET /usuarios` usa hoje).
+  `RespostaPaginada<T>` do front; `GET /usuarios` e `GET /solicitacoes/minhas` usam),
+  `solicitacao.go` (as duas criações — `NovaSolicitacaoMaquinarioPayload`,
+  `NovaSolicitacaoReparoPayload` —, `AberturaOrdemServicoPayload`,
+  `RejeicaoSolicitacaoPayload`, `SolicitacaoOS` + `MontarSolicitacao`,
+  `AnexoSolicitacao`, `ResumoSolicitacoes`, `OrdemServico` (parcial, ver seção
+  "Solicitações" abaixo) + `MontarOrdemServico`).
   **Toda struct de resposta precisa do `id` e das tags camelCase**: sem tag o Go
   serializa `Nome` e o front lê `undefined`, e sem `id` a listagem não serve pra nada
   (é o `value` do select, o `/:id` do botão editar e o que vai pro escopo). Já
@@ -207,6 +212,24 @@ que o front espera (camelCase, datas `dd/mm/yyyy HH:MM:SS`, ver `config/dataBr.g
     e as falhas num `errors.Join`) e `abrirSolicitacaoDaPreventiva` (a transação de uma
     preventiva só). É o único método do pacote **sem `tenantID` no parâmetro** — não há
     request nem token, o job varre todos os tenants. Ver a seção do job.
+    Também `notificarPreventivaVencida`, chamada no fim de `abrirSolicitacaoDaPreventiva`
+    — ver "Solicitações" abaixo pro papel do `Notificador`.
+  - `solicitacaoOs.go` + `solicitacaoOsHelpers.go` — `SolicitacaoService`: as duas
+    criações humanas, as duas listagens (fila do gestor com escopo, "minhas" paginada),
+    obter por id, resumo, `AbrirOS` e `Rejeitar`. Ver a seção "Solicitações" abaixo pro
+    detalhe de cada método — aqui vale só o que é convenção nova em relação ao resto do
+    pacote: `montarSolicitacoesEmLote` é o `ObterEscoposSessaoPorUsuarios` da vez (busca
+    impacto/anexo de uma página inteira numa ida só, sem N+1) e `concluirSolicitacao` é a
+    cauda comum às duas criações + `Rejeitar` (relê, comita, monta — mesmo motivo de
+    `CadastrarMaquina` relendo por `ObterMaquinaPorID`).
+  - `ordemServico.go` — `OrdemServicoService`, só leitura por enquanto
+    (`ListarOrdensServico` + `montarOrdensServicoEmLote`). A OS não nasce aqui: quem a
+    cria é `SolicitacaoService.AbrirOS`. Único service do pacote que recebe os filtros
+    numa **struct** (`FiltrosOrdemServico`) em vez de parâmetros soltos — são seis, e
+    dois deles são `*int64` vizinhos (`LojaId`/`TecnicoId`): trocá-los de lugar numa
+    assinatura posicional compila e devolve a lista errada, calado.
+  - `notificacaoService.go` — `NotificacaoService`, o cliente da Evolution API (WhatsApp).
+    Ver "Solicitações" abaixo, tem seção própria.
 - `controller/` — `loginController.go`: `LoginController` recebe um
   `LoginServiceInterface` (a interface existe pro teste do handler poder trocar o
   service — `UsuarioService` guarda `*pgxpool.Pool` concreto, não dá pra mockar de
@@ -217,7 +240,9 @@ que o front espera (camelCase, datas `dd/mm/yyyy HH:MM:SS`, ver `config/dataBr.g
   `Atualizar`/`Desativar`.
   `lojaController.go`, `setorController.go`, `maquinasController.go` e
   `preventivaController.go` seguem o mesmo molde (uma interface própria por service,
-  pro fake do teste).
+  pro fake do teste). `solicitacaoController.go` também, mais 3 buckets do R2 (anexo de
+  maquinário, de pequeno reparo, e a foto de cadastro da máquina pra resolver
+  `maquinaFotoUrl`) — ver "Solicitações" abaixo.
   **Mapa de erro → status**: `ErrValidacao` 400, `ErrDadoDuplicado` 409,
   `ErrConflitoIntegridade` 422, resto 500 **com o erro cru só no `log`**.
   `ErrNaoEncontrado` é **404 quando o `:id` da rota é a única coisa que pode faltar**
@@ -243,12 +268,16 @@ que o front espera (camelCase, datas `dd/mm/yyyy HH:MM:SS`, ver `config/dataBr.g
   - `corpoJSON[T]` — `ShouldBindJSON` das rotas sem arquivo. Campo extra é ignorado pelo
     binding. Substituiu `corpoLoja`/`corpoSetor`, que eram a mesma função com tipos
     diferentes; as notas de cada payload vivem na struct dele, em `internal/model`.
-  - `corpoMultipart[T]` — rotas **com** arquivo (`POST`/`PUT /maquinas` hoje, as três
-    criações de solicitação depois): JSON na parte `dados`, arquivos nas partes
+  - `corpoMultipart[T](ctx, limiteCorpo)` — rotas **com** arquivo (`POST`/`PUT /maquinas`,
+    as duas criações de solicitação): JSON na parte `dados`, arquivos nas partes
     `foto`/`video`. ⚠️ Como o corpo entra por `json.Unmarshal`, **as tags `binding` não
     rodam sozinhas** — é por isso que a função chama `binding.Validator.ValidateStruct`
     explicitamente. Sem essa linha, `required`/`oneof`/`min=1`/`dive` viram decoração.
     Corpo maior que o limite responde **413**, não 400: não está malformado, está grande.
+    `limiteCorpo` é o teto do corpo (`bucketr2.TamanhoMaximoFoto` nas rotas só-foto,
+    `bucketr2.TamanhoMaximoComVideo` em `POST /solicitacoes/maquinario`, a única que
+    aceita vídeo) — o teto de MEMÓRIA passado a `ParseMultipartForm` continua sempre
+    `TamanhoMaximoFoto`: o excedente do vídeo escorre pro disco, não infla a heap.
   - Ficaram de fora de propósito: `cookieSessao` (regras do cookie de sessão, colado no
     Login/Logout) e `resolverFoto`/`chaveDaFoto` (métodos — dependem do bucket que o
     `MaquinaController` guarda).
@@ -279,7 +308,9 @@ que o front espera (camelCase, datas `dd/mm/yyyy HH:MM:SS`, ver `config/dataBr.g
   nil pointer na primeira máquina com foto que alguém listar — e aí não some só a foto,
   some a resposta inteira.
   **Wireado em `/maquinas`** (`POST`/`PUT` sobem a foto, todas as leituras devolvem URL
-  assinada); falta o mesmo para `solicitacao_anexo`.
+  assinada) e em `/solicitacoes` (foto obrigatória + vídeo opcional nas duas criações,
+  `solicitacaoController.resolverSolicitacao` resolve anexo e `maquinaFotoUrl` antes de
+  responder — ver "Solicitações" abaixo).
 
 ## Migrations
 - Criar novo par: `make migration nome_da_migration` (gera `NNNNNN_nome.up.sql` +
@@ -492,6 +523,12 @@ o argumento certo, e a imagem final carregava o toolchain do Go inteiro à toa.
   | `GET·PUT·DELETE /preventivas/:id`, `POST /preventivas` | administrador |
   | `GET /empresas-terceirizadas` | **técnico**, administrador |
   | `GET·PUT·DELETE /empresas-terceirizadas/:id`, `POST /empresas-terceirizadas` | administrador |
+  | `POST /solicitacoes/maquinario`, `/reparo` | **solicitante** |
+  | `GET /solicitacoes/minhas`, `/resumo` | **qualquer perfil autenticado** (o service filtra pelo próprio ator) |
+  | `GET /solicitacoes` (fila) | gestor, administrador |
+  | `GET /solicitacoes/:id` | **qualquer perfil autenticado** (escopo no `WHERE`) |
+  | `POST /solicitacoes/:id/abrir-os`, `/:id/rejeitar` | gestor, administrador |
+  | `GET /ordens-servico` | gestor, administrador, **técnico** (escopo no `WHERE`) |
 
 - **`GET /maquinas` e `GET /preventivas` são abertas mas não são amplas**: o RBAC libera
   qualquer perfil e o **escopo é aplicado no `WHERE`** (ver "Escopo no `WHERE`" em "Queries
@@ -528,6 +565,15 @@ o argumento certo, e a imagem final carregava o toolchain do Go inteiro à toa.
   pasta, card no painel nem rota no código).
 - `GET /empresas` mora no `LojaController` porque empresa **não tem CRUD** — o tenant
   nasce pela CLI de provisionamento, e a única tela que pergunta por ela é a de loja.
+- **As duas criações de `/solicitacoes` são só do solicitante** — é a única tela que
+  chama (`NovaSolicitacao` no front). `/minhas` e `/resumo` ficam sem `Permitir` de
+  propósito, mesmo critério de `/lojas`/`/setores`: o service já filtra pelo
+  `usuario.id` de quem chama (nunca recebe `perfil`), então RBAC ali não filtraria nada
+  a mais, só barraria administrador/gestor de testar a própria rota. `GET /solicitacoes`
+  (a fila) é só gestor/administrador — Técnico não participa da aprovação, só recebe a
+  OS depois que ela existe. `GET /solicitacoes/:id` é aberta a qualquer perfil, recortada
+  pelo escopo no `WHERE` (mesmo `EXISTS` de `ListarSolicitacoes`) — sem isso um
+  Solicitante enumerando id leria foto/descrição de outro setor.
 - **`TenantMiddleware` entra só em `/autenticacao/login`** — é o único endpoint que lê o
   header `X-tenant-ID`; ver "Autenticação". Rota autenticada que precise de tenant usa
   `GetTenantIDToken`, não o middleware.
@@ -729,24 +775,220 @@ neste tenant" — sem técnico, o Gestor não abre OS nenhuma.
 
 ## O que falta no back (retomar aqui)
 
-Cadastros: **completos**. Falta o miolo do fluxo, na ordem em que o front precisa:
+Cadastros: **completos**. Solicitações (fase 1): **completo** — ver seção própria
+"Solicitações" abaixo. `GET /ordens-servico`: **completo** — com ele o Painel do Gestor
+fica inteiro (ver "Ordem de serviço — listagem" abaixo). Falta o resto do miolo do fluxo,
+na ordem em que o front precisa:
 
-1. **Solicitações** — `POST /solicitacoes/maquinario` e `/reparo` (multipart, use
-   `corpoMultipart[T]`), `GET /solicitacoes/minhas` (paginado), `GET /solicitacoes`,
-   `/:id`, `/resumo`, `POST /:id/abrir-os` e `/:id/rejeitar`. Junto vem o CRUD de
-   `solicitacao_anexo` (nada em `database/queries/` ainda) e o `URLLeitura` resolvendo
-   `chave` → `url` na resposta, como já é feito em máquina.
-2. **Ordem de serviço** — o ciclo de vida (`iniciar`/`pausar`/`retomar`/
-   `acionar-terceiro`/`encerrar`/`custo`), os dois relógios e a flag `finalizada`.
-   Destrava os dois cards mortos do painel do Administrador.
-3. **Indicadores** (`GET /indicadores/maquinas/:id`). O **job de preventiva vencida**
+1. **Ciclo de vida da Ordem de serviço** — `iniciar`/`pausar`/`retomar`/
+   `acionar-terceiro`/`encerrar`/`custo`. É tudo ESCRITA, e nenhuma delas é do Gestor:
+   as cinco primeiras são do **Técnico** (`PainelTecnico`) e o `custo` é do
+   **Administrador** (`AdministradorCustosPendentes`). Destrava os dois cards mortos do
+   painel do Administrador.
+   O que já existe e NÃO precisa ser refeito: a criação da OS (`AbrirOS`, fase 1 — a OS
+   nasce da aprovação do Gestor, nunca de um `POST /ordens-servico`) e a **leitura**
+   (`GET /ordens-servico`, ver "Ordem de serviço — listagem" abaixo), que já projeta
+   encerramento, custo, horas e pausas para quando essas linhas existirem.
+2. **Indicadores** (`GET /indicadores/maquinas/:id`). O **job de preventiva vencida**
    saiu desta lista — está pronto e testado, falta só o Cron Job no Railway (ver seção
-   abaixo).
+   abaixo). A **notificação por WhatsApp** também saiu — código pronto e testado, falta
+   só o chip dedicado (ver "Notificação de solicitação por WhatsApp" abaixo).
 
 Listagem nova que precise recortar por escopo usa `atorDaRota` no controller +
 `escopoDe(usuarioId, perfil)` no service, com o `EXISTS` no `WHERE` — ver "Escopo no
 `WHERE`" em "Queries e repository". Rota com arquivo usa `corpoMultipart`, sem arquivo usa
 `corpoJSON`.
+
+## Solicitações (fase 1, feito)
+
+`sqlc → service → controller → rotas`, nessa ordem, cada camada testada contra Postgres
+real antes de seguir pra próxima (histórico: PR #11, `radaptech/sistema-OSm--Back-end`).
+
+- **As duas criações humanas** (`POST /solicitacoes/maquinario`, `/reparo`) sobem foto
+  (obrigatória — é a evidência que o Gestor avalia antes de aprovar) e vídeo (opcional,
+  só em `/maquinario`, até 8s/40MB — o teto é do servidor, o corte de duração é do front,
+  `UploadVideo.tsx`) ANTES de abrir a transação, mesmo padrão de
+  `MaquinarioInsert.FotoChave`: falhar o upload não deixa resíduo no banco.
+  `CadastrarSolicitacaoMaquinario` valida que a máquina pertence ao **próprio setor** do
+  Solicitante (`resolverSetorSolicitante`, via `ObterEscopoSessaoPorUsuario`) — mesma
+  regra que já filtra o dropdown em `GET /maquinas`, aplicada de novo do lado da escrita
+  contra um POST direto escolhendo máquina de outro setor.
+- **`GET /solicitacoes/:id` tem escopo no `WHERE`** (`ObterSolicitacaoPorID`, mesmo
+  `EXISTS` de `ListarSolicitacoes`/`ListarMaquinas`) — foi adicionado durante a fase 1
+  depois de notar que a rota, aberta a qualquer perfil, deixaria um Solicitante enumerar
+  id e ler foto/descrição de outro setor sem isso. Todo chamador manda
+  `escopoDe(usuarioId, perfil)`, inclusive `AbrirOS`/`Rejeitar` — NULL só quando é
+  administrador (que não tem escopo, a ausência É o acesso total).
+- **`AbrirOS` devolve um `OrdemServico` deliberadamente incompleto** (sem `tecnicoNome`/
+  `tecnicoArea`/`empresaTerceirizada*`, todos opcionais no contrato do front) — buscar
+  esses JOINs agora seria refazer o trabalho que a fase 2 (Ordem de serviço, ver "O que
+  falta") já vai precisar fazer direito, com `os_encerramento`/`os_custo` no meio.
+- **`AnexoSolicitacao.Url` é `*string`, não `string`** — o front declara `url: string`
+  sem `?` (sempre presente), mas se a assinatura da URL falhar no controller não tem como
+  inventar uma: string vazia sairia como `""`, parecendo uma URL válida até a mídia
+  tentar carregar. `null` é honesto sobre o que aconteceu; mesma folga de
+  `Maquinario.FotoUrl`, só que sem `omitempty` (o campo continua sempre emitido).
+- **`nivel_urgencia` virou ENUM** na migration `000007` — mesma lacuna e mesmo motivo de
+  `nivel_criticidade` (000004): tupla fixa no front, sem tela de cadastro, tabela vazia
+  travaria `POST /:id/abrir-os` em todo tenant. Ver "Migrations" e a nota em
+  `docs/modelagem-banco-dados.md` (seção 2.4).
+- Testado: `internal/service/solicitacaoOsIntegracao_test.go` (16 subtestes: as duas
+  criações persistindo de verdade, as 4 recusas, escopo nas duas listagens e no
+  obter-por-id, resumo, abrir-os e rejeitar) e
+  `controller/solicitacaoController_test.go` (mapa erro→status, foto obrigatória,
+  content-type recusado antes do R2, upload sem R2 configurado, validação de payload,
+  ator sempre do token, chave crua nunca vazando na resposta).
+
+## Ordem de serviço — listagem (`GET /ordens-servico`, feito)
+
+Um endpoint para os **três** painéis; o que muda é o filtro que cada um manda:
+Gestor sem filtro (abas "OS em Andamento"/"OS Finalizadas"), Técnico `?tecnicoId=`,
+Administrador `?status=Concluída` (Custos Pendentes) e `?finalizada=true` (OS
+Finalizadas). Array simples, sem paginação — `?pagina=` é aceito e **ignorado**, o front
+pagina no cliente (mesmo padrão de `/solicitacoes`, `/maquinas`, `/preventivas`).
+
+**Não existe `POST /ordens-servico`, e não é esquecimento**: a OS nasce de
+`POST /solicitacoes/:id/abrir-os` (a aprovação do Gestor). `uq_os_solicitacao` garante
+que toda OS vem de uma solicitação, e criar direto pularia a aprovação — que é o ponto do
+fluxo. Nenhum teste insere em `ordem_servico` na mão: todos passam por `AbrirOS`.
+
+Escopo no `WHERE` via o mesmo `EXISTS` de `ListarSolicitacoes`, sobre o setor da
+**solicitação de origem** — `ordem_servico` não tem `setor_id` próprio, e nem deveria: a
+OS é da solicitação, não de um lugar.
+
+- ⚠️ **`?status=` vem separado por VÍRGULA, não repetido.** `montarQuery` no front faz
+  `busca.set(chave, valor.join(','))` para todo array, então `?status=Aberta,Em Andamento`
+  é uma chave só. `ctx.QueryArray` devolveria um item com a vírgula dentro e o cast
+  `::status_os` estouraria em 22P02 — 500 numa tela que só queria filtrar. O parse é
+  `strings.Split` + validação item a item contra `statusOsValidos` (400, nunca 500).
+- ⚠️ **O parâmetro `status` entra como `text[]` e só vira `status_os` dentro do `ANY`.**
+  Como `status_os[]` direto o pgx não acha plano de encode (`unknown type (OID ...):
+  cannot find encode plan`) — ele conhece os arrays built-in, não um ARRAY de ENUM nosso,
+  e registrar o tipo custaria um `AfterConnect` em `config/conn.go` por enum. O cast
+  **volta** para `status_os` antes de comparar, senão `idx_os_tecnico_status` para de valer.
+- ⚠️ **`horas_*` e `custo_*` são projetadas CRUAS, sem `::float8`** — e isso é o oposto do
+  reflexo. O `::float8` faz duas coisas ruins de uma vez: o sqlc perde o vínculo com a
+  coluna (então o override do `sqlc.yaml` deixa de casar, porque ele casa por NOME DE
+  COLUNA) **e** a expressão passa a ser tipada como NOT NULL — sai `float64` e o `Scan`
+  quebra no primeiro NULL, que é o caso comum (OS aberta não tem horas nem custo).
+  Coluna crua + override para `pgtype.Float8` resolve os dois. `pointer: true` não serve:
+  ele só vale onde o sqlc **já** concluiu que é nullable.
+  As quatro são NULL em estado legítimo: `horas_*` só existem em OS encerrada
+  (`vw_os_horas` é INNER em `os_encerramento`), `horas_parada` some também quando
+  `afeta_producao` é falsa (o front exibe "Não se aplica", que **não** é zero), e
+  `custo_hora_tecnico` é nulo por regra em reparo e terceiros (`ck_custo_por_tipo`).
+- ⚠️ **O override de `numeric` no `sqlc.yaml` nunca casou nada** — o `db_type` correto é
+  `pg_catalog.numeric`, não `numeric`. É por isso que `shopspring/decimal` não está no
+  `go.mod` e `models.go` seguia com `pgtype.Numeric`. Nunca doeu porque nenhuma query
+  tocava coluna `numeric` antes desta. Deixado como está de propósito: consertá-lo traria
+  `decimal.Decimal`, que serializa como **string** em JSON contra um front que tipa
+  `number`. Quem vai precisar dele direito é a **escrita** do custo (fase 2) — e aí são
+  DUAS entradas, uma com `nullable: true`, senão só a coluna NOT NULL vira decimal.
+- ⚠️ **`vw_os_horas` devolve `numeric`** mesmo sem coluna numeric envolvida:
+  `EXTRACT(EPOCH ...)` retorna numeric desde o Postgres 14.
+- **`area_tecnico` é LEFT JOIN aqui, INNER em `ListarTecnicos`.** Lá o `WHERE` já garante
+  `perfil = 'tecnico'` e `ck_usuario_area_tecnico` exige a coluna. Aqui não: `fk_os_tecnico`
+  aponta pra `usuario` sem checar perfil, e `AtualizarUsuario` zera `area_tecnico_id` ao
+  tirar alguém do perfil técnico. Com INNER, **promover a gestor um técnico com OS aberta
+  apagaria essas OS da listagem inteira**, calado — e é o Gestor quem olha a listagem. Há
+  teste trancando isso.
+- **`finalizada` é derivado, não coluna** (encerramento MAIS custo lançado). A expressão
+  aparece **duas vezes** — projeção e filtro — porque o Postgres não deixa referenciar
+  alias do SELECT no `WHERE`; divergir as duas dá uma listagem que se contradiz, e há
+  teste conferindo. `vw_os_finalizada` não serve: ela é `JOIN os_custo` e só devolve as
+  finalizadas. O `::boolean` no fim é obrigatório (sem ele vira `*bool`, mesma armadilha
+  do `vencida` em `preventiva.sql`).
+  ⚠️ A fila "Custos Pendentes" do Administrador é **`?status=Concluída`**, não
+  `?finalizada=false`: ela lista toda OS concluída, com ou sem custo, porque virou fila de
+  conferência contra a nota fiscal.
+- **`custoTotal` é somado no model, não no SELECT** — uma expressão a mais na query seria
+  mais uma chance de cair na armadilha do numeric, e a conta é uma soma.
+- **`os_pausa` vem por query separada** (`ObterPausasDasOrdensServico`, em lote): 1:N no
+  JOIN duplicaria a OS por pausa. Mesmo desenho de `ObterAnexosDasSolicitacoes`.
+  `pausaAtual` é a de `retomada_em` nulo (`uq_pausa_aberta` garante no máximo uma) e vem
+  **repetida** dentro de `pausas` — não substitui o histórico.
+- **`model.OrdemServico` é uma struct só para os dois caminhos** (`GET /ordens-servico` e
+  `POST /:id/abrir-os`), porque o front também tipa uma só: tudo que a OS recém-aberta não
+  tem ainda é opcional no contrato. Quem monta a completa é `MontarOrdemServico`; a da
+  abertura é `MontarOrdemServicoDaAbertura`.
+- Sem R2 nesta rota: o tipo `OrdemServico` do front não tem campo de mídia — a foto do
+  defeito é da **solicitação**, e é lá que o modal de detalhes vai buscá-la.
+- Testado: `internal/service/ordemServicoIntegracao_test.go` (escopo dos 5 perfis, filtros
+  combináveis, `finalizada` nos 4 estados, nulo como estado legítimo, **os dois relógios**
+  — solicitada 8h atrás, iniciada 5h, 1h de pausa → trabalhadas ~4h e parada ~8h, o que
+  tranca a migration `000002`), `internal/model/ordemServico_test.go` (serialização, campos
+  omitidos, `custoTotal`, pausas) e `controller/ordemServicoController_test.go` (mapa
+  erro→status, vírgula no `status`, filtros chegando no service, ator sempre do token).
+  ⚠️ O teste do controller monta a query com `url.Values`, não string crua:
+  `httptest.NewRequest` **panica** com o espaço de `"Em Andamento"` sem encoding.
+
+## Notificação de solicitação por WhatsApp (feito — infra, código e wiring; falta o chip)
+
+Gestor não fica com o app aberto o tempo todo — o sistema avisa por WhatsApp sempre que
+uma Solicitação nasce `Pendente` (as duas criações humanas e o job de preventiva
+vencida), pro Gestor saber sem precisar checar o painel. Mesmo raciocínio serve o
+Técnico mais adiante (aviso de OS atribuída), quando a fase 2 existir — hoje é só
+Gestor.
+
+**Decisão: Evolution API self-hosted, não a Cloud API oficial da Meta.** Não é o caminho
+"correto" — é WhatsApp Web por baixo (lib Baileys, engenharia reversa), viola os termos
+do WhatsApp e o número pode ser banido. Mas pro volume daqui (poucas mensagens por dia,
+pra 2-3 destinatários fixos que reconhecem o remetente) o risco na prática é baixo — é o
+oposto do padrão que costuma levar a ban (rajada, destinatário que não reconhece,
+conteúdo de marketing). Ganho real: zero aprovação de template pela Meta (a oficial
+exige, e leva dias, pra toda mensagem business-initiated fora da janela de 24h), texto
+livre, e roda no mesmo Docker Compose que já existe — custo marginal zero, em vez de
+mensalidade de um provedor gerenciado (Z-API e primos, ~R$60-100/mês fixos) ou do
+por-mensagem da oficial (~R$0,035/mensagem, categoria *utility*).
+
+**Requer número dedicado, nunca o do Gestor.** Quem fica banível é o número que
+autentica no Evolution API via QR (como um WhatsApp Web comum) — um chip pré-pago
+qualquer, comprado só pra isso, com WhatsApp Business instalado. O número do Gestor é só
+destinatário, nunca entra em risco.
+
+**Infra** (`../docker-compose.yml`, repo `sistema-os-infra`, PR #1): três serviços —
+`evolution-postgres` + `evolution-redis` (estado da sessão do WhatsApp, banco e cache
+PRÓPRIOS, separados do banco da aplicação) e `evolution-api`
+(`evoapicloud/evolution-api:v2.3.7`, porta `8092` no host). Testada de ponta a ponta:
+instância criada, QR de pareamento obtido (PNG em base64 real), estado `connecting`
+sobrevivendo a um restart do container (prova que é o Postgres persistindo, não
+memória).
+
+**Código** (`radaptech/sistema-OSm--Back-end`, PRs #11/#14):
+- `ObterGestoresDoSetor` (`usuario.sql`) — dado um `setor_id`, todo gestor cujo escopo
+  alcança ele (mesmo `EXISTS` de `ListarSolicitacoes`), ativo, com telefone. Sem
+  telefone/desativado/administrador não aparece — não é erro, é degrade silencioso.
+- `NotificacaoService` (`notificacaoService.go`) — cliente HTTP da Evolution API
+  (`POST /message/sendText/{instancia}`, **path confirmado testando contra a instância
+  real** — a documentação pública erra, descreve o inverso). `NotificadorInterface` é o
+  que `SolicitacaoService`/`PreventivaService` dependem, nunca a struct concreta.
+  `normalizarTelefone` existe porque `usuario.telefone` é texto livre sem máscara em
+  lugar nenhum do sistema. Falha em um gestor não impede os outros (`errors.Join`, mesmo
+  espírito do job de preventiva vencida).
+- `SolicitacaoService`/`PreventivaService` ganharam um campo público
+  `Notificador NotificadorInterface` (não parâmetro de construtor — mudar a assinatura
+  quebraria todo teste que já chama `NewRepoX(pool)` direto). `nil` (o zero value, o que
+  todo teste existente continua recebendo) significa "não notifica". Plugado nos 3
+  pontos que criam uma solicitação `Pendente`, sempre em goroutine com
+  `context.Background()` + timeout de 15s (nunca o `ctx` da request, que morre quando a
+  resposta é escrita): `CadastrarSolicitacaoMaquinario`, `CadastrarSolicitacaoReparo`
+  (`Alvo` sai de `alvoDaSolicitacao`) e `abrirSolicitacaoDaPreventiva` (relê a máquina
+  via `ObterMaquinaPorID` depois do commit, porque `ListarPreventivasVencidasRow` não
+  carrega os nomes).
+- `router.go` conecta o `NotificacaoService` real; lê `EVOLUTION_API_URL`/`_API_KEY`/
+  `_INSTANCE_NAME` do `.env` (ver `.env-example`).
+
+**Testado em 3 camadas, a última contra a Evolution API real**: puros
+(`montarTexto`/`normalizarTelefone`), `NotificacaoService` de integração contra Postgres
++ Evolution API real, e o wiring com um fake que grava o que recebeu
+(`notificacaoWiringIntegracao_test.go`) — mais um smoke real+real (rodado e removido,
+não ficou no repo) que confirmou `CadastrarSolicitacaoMaquinario` voltando em ~12ms
+(assíncrono de verdade) com o log da falha esperada (WhatsApp não pareado) aparecendo
+~3s depois.
+
+**O que falta**: só o chip — comprar, instalar WhatsApp Business, escanear o QR
+(`POST /instance/connect/sistema-os-notificacoes` contra a Evolution API). Nenhum código
+pendente.
 
 ## Abertura automática de solicitação por preventiva (feito; falta o Cron no Railway)
 Ao vencer a `proxima_data` de uma preventiva **ativa**, o sistema abre uma **Solicitação**
@@ -759,6 +1001,11 @@ depois, quando o Gestor aprova com técnico + urgência: criar OS direto pularia
 (`solicitacao_os.sql`, arquivo novo), `AbrirSolicitacoesDePreventivasVencidas` +
 `abrirSolicitacaoDaPreventiva` (`preventivaService.go`), `cli_preventivas_vencidas.go`
 e `make preventivas-vencidas`. Falta **só** criar o Cron Job no Railway.
+
+Desde a fase de notificação (ver seção própria acima), `abrirSolicitacaoDaPreventiva`
+também chama `notificarPreventivaVencida` no fim — mesmo `Notificador` opcional de
+`SolicitacaoService`, mesmo motivo de rodar em goroutine (uma preventiva com WhatsApp
+lento não pode atrasar as outras 200 no mesmo laço).
 
 - **A migration `000005` destravou isso.** `fn_check_solicitacao_tem_foto` exigia foto em
   *toda* solicitação, e a de preventiva não tem nem como ter — ninguém fotografou nada.
@@ -803,59 +1050,6 @@ e `make preventivas-vencidas`. Falta **só** criar o Cron Job no Railway.
   vence no dia, não na hora, e rodar mais vezes não duplica nada, só não adianta.
 - O job **não roda migrations**: quem faz isso é o boot da API. O container do cron sobe o
   mesmo binário contra o mesmo banco já migrado.
-
-## Notificação de solicitação por WhatsApp (infra pronta; código ainda não)
-
-Gestor não fica com o app aberto o tempo todo — decidido notificar por WhatsApp sempre que
-uma Solicitação nasce `Pendente` (as duas criações humanas e o job de preventiva vencida),
-pro Gestor saber sem precisar checar o painel. Mesmo raciocínio vale pro Técnico mais
-adiante (aviso de OS atribuída), quando a fase 2 existir.
-
-**Decisão: Evolution API self-hosted, não a Cloud API oficial da Meta.** Não é o caminho
-"correto" — é WhatsApp Web por baixo (lib Baileys, engenharia reversa), viola os termos do
-WhatsApp e o número pode ser banido. Mas pro volume daqui (poucas mensagens por dia, pra
-2-3 destinatários fixos que reconhecem o remetente) o risco na prática é baixo — é o
-oposto do padrão que catch bans (rajada, destinatário que não reconhece, conteúdo de
-marketing). Ganho real: zero aprovação de template pela Meta (a oficial exige, e leva
-dias, pra toda mensagem business-initiated fora da janela de 24h), texto livre, e roda no
-mesmo Docker Compose que já existe — custo marginal zero em vez de mensalidade de um
-provedor gerenciado (Z-API e primos, ~R$60-100/mês fixos) ou por-mensagem da oficial
-(~R$0,035/mensagem, categoria *utility*).
-
-**Requer número dedicado, não o do Gestor.** Quem fica banível é o número que autentica no
-Evolution API (via QR, como um WhatsApp Web comum) — um chip pré-pago qualquer, comprado só
-pra isso, com WhatsApp Business instalado. O número do Gestor é só destinatário, nunca
-entra em risco nenhum. **Chip ainda não comprado** — é o único passo manual que falta;
-o resto (infra + o que vai ler as variáveis abaixo) já está pronto pra quando ele chegar.
-
-**Infra (`../docker-compose.yml`), já testada de ponta a ponta:** três serviços novos --
-`evolution-postgres` e `evolution-redis` (estado da instância/sessão do WhatsApp, banco e
-cache PRÓPRIOS, separados do banco da aplicação -- não é dado de domínio) e `evolution-api`
-(`evoapicloud/evolution-api:v2.3.7`, porta `8092` no host). Testado: instância criada via
-`POST /instance/create`, QR de pareamento obtido via `GET /instance/connect/:nome`
-(devolve um PNG em base64 de verdade), estado `connecting` sobrevivendo a um restart do
-container (prova que é o Postgres persistindo, não memória). Falta só escanear o QR com o
-WhatsApp Business do chip, quando ele existir -- nenhum outro passo de infra.
-
-⚠️ **`AUTHENTICATION_API_KEY` no compose é valor de dev** (`evolution-dev-key-troque-em-producao`,
-mesmo padrão do `postgres`/`postgres` do banco principal) -- gerar um de verdade
-(`openssl rand -base64 32`) antes de produção, e trocar nos dois lados: o `environment` do
-serviço `evolution-api` no compose E o `.env` do back-end (`EVOLUTION_API_KEY`, ver
-`.env-example`) -- os dois precisam bater, é a mesma chave dos dois lados da chamada.
-
-⚠️ **`SERVER_URL=http://localhost:8092` no compose é placeholder de dev.** Só importa pra
-webhook/callback interno da própria Evolution API, e o backend não expõe rota nenhuma pra
-ela chamar de volta ainda -- revisitar quando for pra produção (Railway), mesmo espírito do
-`TRUSTED_PROXIES` que muda por ambiente.
-
-**O que falta (código, não infra):** a query de "gestores que atendem este setor, com
-telefone" (`database/queries`, mesmo `EXISTS` de `ListarSolicitacoes`), o
-`NotificacaoService` (cliente HTTP do Evolution API + os dois templates -- "solicitação
-aberta pelo Solicitante" e "preventiva vencida" -- atrás de uma interface, pra
-`SolicitacaoService` continuar testável sem bater na Evolution API de verdade), e o
-disparo em goroutine (fire-and-forget, nunca síncrono no request nem no que trava o job)
-plugado nos três pontos que criam uma solicitação `Pendente`: `CadastrarSolicitacaoMaquinario`,
-`CadastrarSolicitacaoReparo` e `abrirSolicitacaoDaPreventiva`.
 
 ## Ambiente local
 - `.env` na raiz: `DB_SERVER`, `DB_USER`, `DB_PORT`, `DATABASE`, `DB_PASSWORD`
@@ -936,7 +1130,20 @@ plugado nos três pontos que criam uma solicitação `Pendente`: `CadastrarSolic
   - `controller/preventivaController_test.go` — o mapa erro → status e a assimetria do
     `maquinaId`: obrigatório no POST (cheque do controller, não tag — a struct é
     compartilhada com o corpo da máquina), ignorado no PUT.
-  - **Os dois têm o teste "ator vem do token"**: `usuario.id`/`perfil` chegando da query em
+  - `controller/ordemServicoController_test.go` — o mapa erro → status e o que só existe
+    nesta rota: `?status=` separado por **vírgula** (é assim que `montarQuery` serializa
+    array no front — com `ctx.QueryArray` o filtro chegaria com a vírgula dentro e viraria
+    500), `?finalizada=` que é 400 quando não é booleano (ignorar devolveria a lista
+    inteira pra tela de OS Finalizadas) e `?finalizada=false` chegando como ponteiro, não
+    como nil. ⚠️ Monta a query com `url.Values`, não string crua: `httptest.NewRequest`
+    **panica** com o espaço de `"Em Andamento"` sem encoding.
+  - `controller/solicitacaoController_test.go` — o mapa erro → status, foto obrigatória
+    nas duas criações (sem tocar no service nem no R2), content-type de arquivo recusado
+    antes do R2 (`chaveDoUpload`), upload sem R2 configurado → 500 sem criar nada,
+    validação de payload multipart e JSON, `?lojaId=`/`?status=`/`?tipo=`, e a chave crua
+    do R2 nunca vazando na resposta (mesmo teste de `maquinasController_test.go`, agora
+    pra anexo).
+  - **Todos têm o teste "ator vem do token"**: `usuario.id`/`perfil` chegando da query em
     vez do JWT não muda status nenhum — a listagem responde 200 com dados demais.
   - `middleware/perfil_test.go` — `Permitir` com um perfil, vários, nenhum, e o caso de
     falha fechada (contexto sem perfil **nega**, protege contra montar o middleware na
@@ -956,7 +1163,7 @@ plugado nos três pontos que criam uma solicitação `Pendente`: `CadastrarSolic
     `escopoDoPerfil` nos 4 perfis.
   - `loginIntegracao_test.go`, `lojaIntegracao_test.go`, `setorIntegracao_test.go`,
     `maquinarioIntegracao_test.go`, `preventivaIntegracao_test.go`,
-    `escopoListagemIntegracao_test.go` —
+    `escopoListagemIntegracao_test.go`, `solicitacaoOsIntegracao_test.go` —
     integração de verdade contra Postgres. `bancoDeTeste` (em `loginIntegracao_test.go`,
     compartilhado) cria um banco descartável (`teste_<nome do teste>_<pid>`), aplica as
     migrations nele e dropa no fim; o seed é criado pelos próprios services, então o
@@ -981,6 +1188,27 @@ plugado nos três pontos que criam uma solicitação `Pendente`: `CadastrarSolic
     ciclo reabrindo depois que o Gestor converte a pendente.
     **Mutação conferida**: tirar `m.ativa` da query quebra 4 subtestes; tirar o
     `NOT EXISTS` **não quebra nenhum**, e isso é esperado — ver a seção do job.
+  - `ordemServicoIntegracao_test.go` — `GET /ordens-servico`, query e service no mesmo
+    teste (o setup de tenant/lojas/OS é caro pra repetir). Os subtestes rodam **em ordem**
+    e compartilham estado: os de filtro contam com todas as OS `Aberta`, e só depois o
+    "prepara o ciclo de vida" as encerra/pausa/lança custo. Esses INSERTs são na mão,
+    diferente das OS (que vão por `AbrirOS`), porque não existe caminho de escrita para
+    `os_encerramento`/`os_custo`/`os_pausa` ainda — quando existir, viram chamada de
+    service. O último subteste promove um técnico a gestor, então fica por último de
+    propósito.
+  - `solicitacaoOsIntegracao_test.go` — as duas criações persistindo de verdade (não só
+    o retorno, mesmo critério do próximo bullet), as 4 recusas (setor errado, máquina
+    desativada/inexistente, marcador de impacto desconhecido), escopo nas duas
+    listagens e no obter-por-id, resumo, `AbrirOS` (feliz + técnico inválido + duplo) e
+    `Rejeitar` (feliz + duplo + motivo vazio).
+  - `notificacaoService_test.go` — `montarTexto`/`normalizarTelefone` puros, e
+    `TestNotificarNovaSolicitacao` de integração contra Postgres **e a Evolution API
+    real** (`evolutionDeTeste`, mesmo critério de `bancoDeTeste`: sem ela alcançável,
+    `t.Skip`). `notificacaoWiringIntegracao_test.go` prova o outro lado com um fake
+    (`notificadorFake`, grava o que recebeu e sincroniza via channel com a goroutine):
+    `SolicitacaoService`/`PreventivaService` chamando o `Notificador` com tenant/setor
+    certos, `Alvo` formatado certo nos dois tipos, `SolicitanteNome` presente/ausente
+    conforme a origem, e `Notificador == nil` não quebrando nada.
   - **Teste de escrita transacional confere o banco, não o retorno.** Em
     `maquinarioIntegracao_test.go` a máquina criada é localizada pela *listagem*, não pelo
     struct devolvido: um `CadastrarMaquina` sem `tx.Commit` devolvia a linha com id
@@ -1078,8 +1306,10 @@ CORS (`middleware/cors.go`) também só libera `radaptech.com.br` e `localhost`.
 **Resolvido no front (23/08/2026):** os cards "Custos Pendentes" e "OS Finalizadas" do
 painel do Administrador chamavam `/ordens-servico`, que **não existe** aqui — o admin
 clicava e recebia toast de erro. Os dois **saíram da Home do painel**; as telas e as rotas
-do front continuam prontas, esperando este back. Quando a fase 2 (Ordem de serviço) subir,
-o gesto no front é um `git revert` do commit que os removeu — não recriar os cards na mão.
+do front continuam prontas, esperando este back. `GET /ordens-servico` já existe (ver a
+seção dela), mas as duas telas também escrevem — `AdministradorCustosPendentes` chama
+`POST /:id/custo` —, então o `git revert` do commit que os removeu só vale depois do ciclo
+de vida da fase 2. Não recriar os cards na mão.
 Deixa de ser aceite consciente para entregar o acesso.
 
 ### Antes de entregar pro admin

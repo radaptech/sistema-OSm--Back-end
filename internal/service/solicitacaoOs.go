@@ -416,7 +416,7 @@ func (s *SolicitacaoService) AbrirOS(ctx context.Context, tenantId, atorId int64
 		return model.OrdemServico{}, fmt.Errorf("erro ao commitar transação: %w", err)
 	}
 
-	return model.MontarOrdemServico(os, atual, string(urgencia), payload.TecnicoId, afetaProducao), nil
+	return model.MontarOrdemServicoDaAbertura(os, atual, string(urgencia), payload.TecnicoId, afetaProducao), nil
 }
 
 // Rejeitar é POST /solicitacoes/:id/rejeitar -- encerra a solicitação sem
