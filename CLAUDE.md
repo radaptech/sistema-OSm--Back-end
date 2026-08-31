@@ -937,7 +937,9 @@ pra 2-3 destinatários fixos que reconhecem o remetente) o risco na prática é 
 oposto do padrão que costuma levar a ban (rajada, destinatário que não reconhece,
 conteúdo de marketing). Ganho real: zero aprovação de template pela Meta (a oficial
 exige, e leva dias, pra toda mensagem business-initiated fora da janela de 24h), texto
-livre, e roda no mesmo Docker Compose que já existe — custo marginal zero.
+livre, e roda no mesmo Docker Compose que já existe — custo marginal zero, em vez de
+mensalidade de um provedor gerenciado (Z-API e primos, ~R$60-100/mês fixos) ou do
+por-mensagem da oficial (~R$0,035/mensagem, categoria *utility*).
 
 **Requer número dedicado, nunca o do Gestor.** Quem fica banível é o número que
 autentica no Evolution API via QR (como um WhatsApp Web comum) — um chip pré-pago
