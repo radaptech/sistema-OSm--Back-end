@@ -222,6 +222,12 @@ que o front espera (camelCase, datas `dd/mm/yyyy HH:MM:SS`, ver `config/dataBr.g
     impacto/anexo de uma página inteira numa ida só, sem N+1) e `concluirSolicitacao` é a
     cauda comum às duas criações + `Rejeitar` (relê, comita, monta — mesmo motivo de
     `CadastrarMaquina` relendo por `ObterMaquinaPorID`).
+  - `ordemServico.go` — `OrdemServicoService`, só leitura por enquanto
+    (`ListarOrdensServico` + `montarOrdensServicoEmLote`). A OS não nasce aqui: quem a
+    cria é `SolicitacaoService.AbrirOS`. Único service do pacote que recebe os filtros
+    numa **struct** (`FiltrosOrdemServico`) em vez de parâmetros soltos — são seis, e
+    dois deles são `*int64` vizinhos (`LojaId`/`TecnicoId`): trocá-los de lugar numa
+    assinatura posicional compila e devolve a lista errada, calado.
   - `notificacaoService.go` — `NotificacaoService`, o cliente da Evolution API (WhatsApp).
     Ver "Solicitações" abaixo, tem seção própria.
 - `controller/` — `loginController.go`: `LoginController` recebe um
@@ -522,6 +528,7 @@ o argumento certo, e a imagem final carregava o toolchain do Go inteiro à toa.
   | `GET /solicitacoes` (fila) | gestor, administrador |
   | `GET /solicitacoes/:id` | **qualquer perfil autenticado** (escopo no `WHERE`) |
   | `POST /solicitacoes/:id/abrir-os`, `/:id/rejeitar` | gestor, administrador |
+  | `GET /ordens-servico` | gestor, administrador, **técnico** (escopo no `WHERE`) |
 
 - **`GET /maquinas` e `GET /preventivas` são abertas mas não são amplas**: o RBAC libera
   qualquer perfil e o **escopo é aplicado no `WHERE`** (ver "Escopo no `WHERE`" em "Queries
@@ -769,13 +776,19 @@ neste tenant" — sem técnico, o Gestor não abre OS nenhuma.
 ## O que falta no back (retomar aqui)
 
 Cadastros: **completos**. Solicitações (fase 1): **completo** — ver seção própria
-"Solicitações" abaixo. Falta o resto do miolo do fluxo, na ordem em que o front precisa:
+"Solicitações" abaixo. `GET /ordens-servico`: **completo** — com ele o Painel do Gestor
+fica inteiro (ver "Ordem de serviço — listagem" abaixo). Falta o resto do miolo do fluxo,
+na ordem em que o front precisa:
 
-1. **Ordem de serviço** — o ciclo de vida (`iniciar`/`pausar`/`retomar`/
-   `acionar-terceiro`/`encerrar`/`custo`), os dois relógios e a flag `finalizada`.
-   Destrava os dois cards mortos do painel do Administrador. `AbrirOS` (fase 1) já cria a
-   linha de `ordem_servico` mínima que aprova a solicitação — o ciclo de vida em cima
-   dela é o que falta.
+1. **Ciclo de vida da Ordem de serviço** — `iniciar`/`pausar`/`retomar`/
+   `acionar-terceiro`/`encerrar`/`custo`. É tudo ESCRITA, e nenhuma delas é do Gestor:
+   as cinco primeiras são do **Técnico** (`PainelTecnico`) e o `custo` é do
+   **Administrador** (`AdministradorCustosPendentes`). Destrava os dois cards mortos do
+   painel do Administrador.
+   O que já existe e NÃO precisa ser refeito: a criação da OS (`AbrirOS`, fase 1 — a OS
+   nasce da aprovação do Gestor, nunca de um `POST /ordens-servico`) e a **leitura**
+   (`GET /ordens-servico`, ver "Ordem de serviço — listagem" abaixo), que já projeta
+   encerramento, custo, horas e pausas para quando essas linhas existirem.
 2. **Indicadores** (`GET /indicadores/maquinas/:id`). O **job de preventiva vencida**
    saiu desta lista — está pronto e testado, falta só o Cron Job no Railway (ver seção
    abaixo). A **notificação por WhatsApp** também saiu — código pronto e testado, falta
@@ -825,6 +838,89 @@ real antes de seguir pra próxima (histórico: PR #11, `radaptech/sistema-OSm--B
   `controller/solicitacaoController_test.go` (mapa erro→status, foto obrigatória,
   content-type recusado antes do R2, upload sem R2 configurado, validação de payload,
   ator sempre do token, chave crua nunca vazando na resposta).
+
+## Ordem de serviço — listagem (`GET /ordens-servico`, feito)
+
+Um endpoint para os **três** painéis; o que muda é o filtro que cada um manda:
+Gestor sem filtro (abas "OS em Andamento"/"OS Finalizadas"), Técnico `?tecnicoId=`,
+Administrador `?status=Concluída` (Custos Pendentes) e `?finalizada=true` (OS
+Finalizadas). Array simples, sem paginação — `?pagina=` é aceito e **ignorado**, o front
+pagina no cliente (mesmo padrão de `/solicitacoes`, `/maquinas`, `/preventivas`).
+
+**Não existe `POST /ordens-servico`, e não é esquecimento**: a OS nasce de
+`POST /solicitacoes/:id/abrir-os` (a aprovação do Gestor). `uq_os_solicitacao` garante
+que toda OS vem de uma solicitação, e criar direto pularia a aprovação — que é o ponto do
+fluxo. Nenhum teste insere em `ordem_servico` na mão: todos passam por `AbrirOS`.
+
+Escopo no `WHERE` via o mesmo `EXISTS` de `ListarSolicitacoes`, sobre o setor da
+**solicitação de origem** — `ordem_servico` não tem `setor_id` próprio, e nem deveria: a
+OS é da solicitação, não de um lugar.
+
+- ⚠️ **`?status=` vem separado por VÍRGULA, não repetido.** `montarQuery` no front faz
+  `busca.set(chave, valor.join(','))` para todo array, então `?status=Aberta,Em Andamento`
+  é uma chave só. `ctx.QueryArray` devolveria um item com a vírgula dentro e o cast
+  `::status_os` estouraria em 22P02 — 500 numa tela que só queria filtrar. O parse é
+  `strings.Split` + validação item a item contra `statusOsValidos` (400, nunca 500).
+- ⚠️ **O parâmetro `status` entra como `text[]` e só vira `status_os` dentro do `ANY`.**
+  Como `status_os[]` direto o pgx não acha plano de encode (`unknown type (OID ...):
+  cannot find encode plan`) — ele conhece os arrays built-in, não um ARRAY de ENUM nosso,
+  e registrar o tipo custaria um `AfterConnect` em `config/conn.go` por enum. O cast
+  **volta** para `status_os` antes de comparar, senão `idx_os_tecnico_status` para de valer.
+- ⚠️ **`horas_*` e `custo_*` são projetadas CRUAS, sem `::float8`** — e isso é o oposto do
+  reflexo. O `::float8` faz duas coisas ruins de uma vez: o sqlc perde o vínculo com a
+  coluna (então o override do `sqlc.yaml` deixa de casar, porque ele casa por NOME DE
+  COLUNA) **e** a expressão passa a ser tipada como NOT NULL — sai `float64` e o `Scan`
+  quebra no primeiro NULL, que é o caso comum (OS aberta não tem horas nem custo).
+  Coluna crua + override para `pgtype.Float8` resolve os dois. `pointer: true` não serve:
+  ele só vale onde o sqlc **já** concluiu que é nullable.
+  As quatro são NULL em estado legítimo: `horas_*` só existem em OS encerrada
+  (`vw_os_horas` é INNER em `os_encerramento`), `horas_parada` some também quando
+  `afeta_producao` é falsa (o front exibe "Não se aplica", que **não** é zero), e
+  `custo_hora_tecnico` é nulo por regra em reparo e terceiros (`ck_custo_por_tipo`).
+- ⚠️ **O override de `numeric` no `sqlc.yaml` nunca casou nada** — o `db_type` correto é
+  `pg_catalog.numeric`, não `numeric`. É por isso que `shopspring/decimal` não está no
+  `go.mod` e `models.go` seguia com `pgtype.Numeric`. Nunca doeu porque nenhuma query
+  tocava coluna `numeric` antes desta. Deixado como está de propósito: consertá-lo traria
+  `decimal.Decimal`, que serializa como **string** em JSON contra um front que tipa
+  `number`. Quem vai precisar dele direito é a **escrita** do custo (fase 2) — e aí são
+  DUAS entradas, uma com `nullable: true`, senão só a coluna NOT NULL vira decimal.
+- ⚠️ **`vw_os_horas` devolve `numeric`** mesmo sem coluna numeric envolvida:
+  `EXTRACT(EPOCH ...)` retorna numeric desde o Postgres 14.
+- **`area_tecnico` é LEFT JOIN aqui, INNER em `ListarTecnicos`.** Lá o `WHERE` já garante
+  `perfil = 'tecnico'` e `ck_usuario_area_tecnico` exige a coluna. Aqui não: `fk_os_tecnico`
+  aponta pra `usuario` sem checar perfil, e `AtualizarUsuario` zera `area_tecnico_id` ao
+  tirar alguém do perfil técnico. Com INNER, **promover a gestor um técnico com OS aberta
+  apagaria essas OS da listagem inteira**, calado — e é o Gestor quem olha a listagem. Há
+  teste trancando isso.
+- **`finalizada` é derivado, não coluna** (encerramento MAIS custo lançado). A expressão
+  aparece **duas vezes** — projeção e filtro — porque o Postgres não deixa referenciar
+  alias do SELECT no `WHERE`; divergir as duas dá uma listagem que se contradiz, e há
+  teste conferindo. `vw_os_finalizada` não serve: ela é `JOIN os_custo` e só devolve as
+  finalizadas. O `::boolean` no fim é obrigatório (sem ele vira `*bool`, mesma armadilha
+  do `vencida` em `preventiva.sql`).
+  ⚠️ A fila "Custos Pendentes" do Administrador é **`?status=Concluída`**, não
+  `?finalizada=false`: ela lista toda OS concluída, com ou sem custo, porque virou fila de
+  conferência contra a nota fiscal.
+- **`custoTotal` é somado no model, não no SELECT** — uma expressão a mais na query seria
+  mais uma chance de cair na armadilha do numeric, e a conta é uma soma.
+- **`os_pausa` vem por query separada** (`ObterPausasDasOrdensServico`, em lote): 1:N no
+  JOIN duplicaria a OS por pausa. Mesmo desenho de `ObterAnexosDasSolicitacoes`.
+  `pausaAtual` é a de `retomada_em` nulo (`uq_pausa_aberta` garante no máximo uma) e vem
+  **repetida** dentro de `pausas` — não substitui o histórico.
+- **`model.OrdemServico` é uma struct só para os dois caminhos** (`GET /ordens-servico` e
+  `POST /:id/abrir-os`), porque o front também tipa uma só: tudo que a OS recém-aberta não
+  tem ainda é opcional no contrato. Quem monta a completa é `MontarOrdemServico`; a da
+  abertura é `MontarOrdemServicoDaAbertura`.
+- Sem R2 nesta rota: o tipo `OrdemServico` do front não tem campo de mídia — a foto do
+  defeito é da **solicitação**, e é lá que o modal de detalhes vai buscá-la.
+- Testado: `internal/service/ordemServicoIntegracao_test.go` (escopo dos 5 perfis, filtros
+  combináveis, `finalizada` nos 4 estados, nulo como estado legítimo, **os dois relógios**
+  — solicitada 8h atrás, iniciada 5h, 1h de pausa → trabalhadas ~4h e parada ~8h, o que
+  tranca a migration `000002`), `internal/model/ordemServico_test.go` (serialização, campos
+  omitidos, `custoTotal`, pausas) e `controller/ordemServicoController_test.go` (mapa
+  erro→status, vírgula no `status`, filtros chegando no service, ator sempre do token).
+  ⚠️ O teste do controller monta a query com `url.Values`, não string crua:
+  `httptest.NewRequest` **panica** com o espaço de `"Em Andamento"` sem encoding.
 
 ## Notificação de solicitação por WhatsApp (feito — infra, código e wiring; falta o chip)
 
@@ -1032,6 +1128,13 @@ lento não pode atrasar as outras 200 no mesmo laço).
   - `controller/preventivaController_test.go` — o mapa erro → status e a assimetria do
     `maquinaId`: obrigatório no POST (cheque do controller, não tag — a struct é
     compartilhada com o corpo da máquina), ignorado no PUT.
+  - `controller/ordemServicoController_test.go` — o mapa erro → status e o que só existe
+    nesta rota: `?status=` separado por **vírgula** (é assim que `montarQuery` serializa
+    array no front — com `ctx.QueryArray` o filtro chegaria com a vírgula dentro e viraria
+    500), `?finalizada=` que é 400 quando não é booleano (ignorar devolveria a lista
+    inteira pra tela de OS Finalizadas) e `?finalizada=false` chegando como ponteiro, não
+    como nil. ⚠️ Monta a query com `url.Values`, não string crua: `httptest.NewRequest`
+    **panica** com o espaço de `"Em Andamento"` sem encoding.
   - `controller/solicitacaoController_test.go` — o mapa erro → status, foto obrigatória
     nas duas criações (sem tocar no service nem no R2), content-type de arquivo recusado
     antes do R2 (`chaveDoUpload`), upload sem R2 configurado → 500 sem criar nada,
@@ -1083,6 +1186,14 @@ lento não pode atrasar as outras 200 no mesmo laço).
     ciclo reabrindo depois que o Gestor converte a pendente.
     **Mutação conferida**: tirar `m.ativa` da query quebra 4 subtestes; tirar o
     `NOT EXISTS` **não quebra nenhum**, e isso é esperado — ver a seção do job.
+  - `ordemServicoIntegracao_test.go` — `GET /ordens-servico`, query e service no mesmo
+    teste (o setup de tenant/lojas/OS é caro pra repetir). Os subtestes rodam **em ordem**
+    e compartilham estado: os de filtro contam com todas as OS `Aberta`, e só depois o
+    "prepara o ciclo de vida" as encerra/pausa/lança custo. Esses INSERTs são na mão,
+    diferente das OS (que vão por `AbrirOS`), porque não existe caminho de escrita para
+    `os_encerramento`/`os_custo`/`os_pausa` ainda — quando existir, viram chamada de
+    service. O último subteste promove um técnico a gestor, então fica por último de
+    propósito.
   - `solicitacaoOsIntegracao_test.go` — as duas criações persistindo de verdade (não só
     o retorno, mesmo critério do próximo bullet), as 4 recusas (setor errado, máquina
     desativada/inexistente, marcador de impacto desconhecido), escopo nas duas
@@ -1193,8 +1304,10 @@ CORS (`middleware/cors.go`) também só libera `radaptech.com.br` e `localhost`.
 **Resolvido no front (23/08/2026):** os cards "Custos Pendentes" e "OS Finalizadas" do
 painel do Administrador chamavam `/ordens-servico`, que **não existe** aqui — o admin
 clicava e recebia toast de erro. Os dois **saíram da Home do painel**; as telas e as rotas
-do front continuam prontas, esperando este back. Quando a fase 2 (Ordem de serviço) subir,
-o gesto no front é um `git revert` do commit que os removeu — não recriar os cards na mão.
+do front continuam prontas, esperando este back. `GET /ordens-servico` já existe (ver a
+seção dela), mas as duas telas também escrevem — `AdministradorCustosPendentes` chama
+`POST /:id/custo` —, então o `git revert` do commit que os removeu só vale depois do ciclo
+de vida da fase 2. Não recriar os cards na mão.
 Deixa de ser aceite consciente para entregar o acesso.
 
 ### Antes de entregar pro admin

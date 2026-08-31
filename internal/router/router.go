@@ -23,6 +23,7 @@ type Container struct {
 	Prevent *controller.PreventivaController
 	Terceir *controller.EmpresaTerceirizadaController
 	Solicit *controller.SolicitacaoController
+	OrdemOS *controller.OrdemServicoController
 }
 
 func NewContainer(db *pgxpool.Pool) *Container {
@@ -34,6 +35,7 @@ func NewContainer(db *pgxpool.Pool) *Container {
 	servicePreventiva := service.NewRepoPreventiva(db)
 	serviceTerceirizada := service.NewRepoEmpresaTerceirizada(db)
 	serviceSolicitacao := service.NewRepoSolicitacao(db)
+	serviceOrdemServico := service.NewRepoOrdemServico(db)
 
 	// Notificador é opcional (campo público, não parâmetro de construtor -- ver
 	// o comentário em SolicitacaoService/PreventivaService): URL vazia faz
@@ -66,6 +68,7 @@ func NewContainer(db *pgxpool.Pool) *Container {
 		Prevent: controller.NewPreventivaController(servicePreventiva),
 		Terceir: controller.NewEmpresaTerceirizadaController(serviceTerceirizada),
 		Solicit: controller.NewSolicitacaoController(serviceSolicitacao, bucketOsServico, bucketPequenosReparos, bucketMaquinas),
+		OrdemOS: controller.NewOrdemServicoController(serviceOrdemServico),
 		queries: repository.New(db),
 	}
 }
@@ -187,4 +190,21 @@ func ConfigurarRotas(r *gin.Engine, c *Container) {
 	// GET /solicitacoes.
 	solicitacoes.POST("/:id/abrir-os", middleware.Permitir("gestor", "administrador"), c.Solicit.AbrirOS())
 	solicitacoes.POST("/:id/rejeitar", middleware.Permitir("gestor", "administrador"), c.Solicit.Rejeitar())
+
+	// GET /ordens-servico serve os TRÊS painéis, e o que muda é o filtro que
+	// cada um manda: o Gestor acompanha as OS do escopo dele (abas "OS em
+	// Andamento"/"OS Finalizadas"), o Técnico as dele (?tecnicoId=), o
+	// Administrador as do tenant (?status=Concluída em Custos Pendentes,
+	// ?finalizada=true em OS Finalizadas). Solicitante fica de fora: ele
+	// acompanha o pedido dele em /solicitacoes/minhas, não a execução.
+	//
+	// O recorte de loja/setor é o WHERE da query (escopoDe + EXISTS sobre
+	// usuario_escopo), não este Permitir -- ele só decide QUEM entra, nunca O
+	// QUE cada um vê. Mesmo desenho de /solicitacoes, /maquinas e /preventivas.
+	//
+	// Sem POST: a OS não nasce aqui, nasce de POST /solicitacoes/:id/abrir-os
+	// (a aprovação do Gestor, logo acima) -- uq_os_solicitacao garante que toda
+	// OS vem de uma solicitação, e criar direto pularia a aprovação. O ciclo de
+	// vida (iniciar/pausar/retomar/acionar-terceiro/encerrar/custo) é a fase 2.
+	api.GET("/ordens-servico", middleware.AutenticacaoJwt(), middleware.Permitir("gestor", "administrador", "tecnico"), c.OrdemOS.Listar())
 }

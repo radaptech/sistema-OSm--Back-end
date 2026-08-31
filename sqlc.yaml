@@ -11,8 +11,44 @@ sql:
         emit_interface: true 
         emit_pointers_for_null_types: true
         overrides:
+          # ⚠️ Este override NÃO CASA NADA e nunca casou: o db_type de numeric
+          # é "pg_catalog.numeric" -- por isso shopspring/decimal não está no
+          # go.mod e models.go continua com pgtype.Numeric. Nunca doeu porque
+          # até GET /ordens-servico nenhuma query tocava em coluna numeric.
+          # Não "conserte" sem ler as duas notas abaixo: o conserto muda o tipo
+          # de os_custo, e decimal.Decimal serializa como STRING em JSON contra
+          # um front que tipa `number`. Quem vai precisar dele é a ESCRITA do
+          # custo (POST /ordens-servico/:id/custo, fase 2), e aí são DUAS
+          # entradas -- uma delas com `nullable: true`, senão só a coluna NOT
+          # NULL vira decimal.
           - db_type: numeric
             go_type:
               import: "github.com/shopspring/decimal"
               type: "Decimal"
-              pointer: true 
+              pointer: true
+          # As quatro grandezas numéricas que ListarOrdensServico lê. pgtype.Float8
+          # e não float64 porque as quatro podem ser NULL, cada uma por um motivo
+          # de negócio: horas_* só existem em OS encerrada (vw_os_horas é INNER em
+          # os_encerramento), horas_parada some também quando afeta_producao é
+          # falsa (a máquina seguiu operando -- o front exibe "Não se aplica", que
+          # é diferente de zero), e os custos só existem depois do lançamento --
+          # custo_hora_tecnico nem isso, é nulo em reparo e terceiros.
+          #
+          # ⚠️ O override casa por NOME DE COLUNA do schema, então a query tem que
+          # projetar a coluna crua: `h.horas_parada`, nunca
+          # `h.horas_parada::float8`. Com o cast o sqlc perde o vínculo com a
+          # coluna, o override deixa de casar E a expressão passa a ser tipada
+          # como NOT NULL -- sai `float64` e o Scan quebra no primeiro NULL. Foi
+          # o que aconteceu na primeira versão. `pointer: true` não resolve: ele
+          # só vale onde o sqlc já concluiu que é nullable.
+          #
+          # ⚠️ vw_os_horas devolve numeric mesmo sem coluna numeric envolvida --
+          # EXTRACT(EPOCH ...) retorna numeric desde o Postgres 14.
+          - column: "*.horas_trabalhadas"
+            go_type: "github.com/jackc/pgx/v5/pgtype.Float8"
+          - column: "*.horas_parada"
+            go_type: "github.com/jackc/pgx/v5/pgtype.Float8"
+          - column: "*.custo_hora_tecnico"
+            go_type: "github.com/jackc/pgx/v5/pgtype.Float8"
+          - column: "*.custo_manutencao"
+            go_type: "github.com/jackc/pgx/v5/pgtype.Float8" 

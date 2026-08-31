@@ -340,6 +340,79 @@ type Querier interface {
 	//
 	// Array simples, sem paginação: o front pagina no cliente.
 	ListarMaquinas(ctx context.Context, arg ListarMaquinasParams) ([]ListarMaquinasRow, error)
+	// ==========================================================================
+	// Ordem de serviço -- leitura.
+	//
+	// A escrita mora em solicitacao_os.sql (CriarOrdemServicoDeSolicitacao, o
+	// POST /solicitacoes/:id/abrir-os): a OS nasce da aprovação do Gestor, não
+	// de um POST /ordens-servico. Este arquivo é só o outro lado -- a listagem
+	// que os três painéis consomem, e mais tarde o ciclo de vida
+	// (iniciar/pausar/encerrar/custo, fase 2).
+	// ==========================================================================
+	// GET /ordens-servico -- um endpoint para os três painéis, o que muda é o
+	// filtro (front-end/src/servicos/servicoOrdensServico.ts):
+	//   Gestor  (PainelGestor)                 -> sem filtro, recorta pelo escopo
+	//   Técnico (PainelTecnico)                -> ?tecnicoId=
+	//   Admin   (CustosPendentes/OSFinalizadas)-> ?status=Concluída / ?finalizada=true
+	// Array simples, sem paginação: o front tipa `OrdemServico[]` e pagina no
+	// cliente, mesmo padrão de ListarSolicitacoes/ListarMaquinas. `pagina` existe
+	// em ParametrosListagemOrdensServico mas nunca chega a uma query -- ignorar é
+	// o comportamento certo, não um esquecimento.
+	//
+	// os_pausa fica de fora: é 1:N e sairia duplicando a OS por pausa. Vem de
+	// ObterPausasDasOrdensServico (abaixo), em lote, mesmo padrão de
+	// ObterAnexosDasSolicitacoes.
+	//
+	// JOINs INNER onde a FK é NOT NULL (solicitação, setor, loja, técnico) e LEFT
+	// onde a coluna é nullable (máquina e solicitante -- reparo não tem máquina,
+	// preventiva não tem pessoa; empresa terceirizada -- só existe se o Técnico
+	// acionou uma) ou onde a linha inteira pode não existir ainda
+	// (os_encerramento até o Técnico encerrar, os_custo até o custo ser lançado,
+	// vw_os_horas que é INNER em os_encerramento por dentro).
+	//
+	// ⚠️ horas_* e custo_* são projetadas CRUAS, sem `::float8`, e isso não é
+	// descuido: o override que as transforma em pgtype.Float8 mora no sqlc.yaml e
+	// casa por NOME DE COLUNA. Com o cast o sqlc perde o vínculo com a coluna, o
+	// override não casa mais E a expressão passa a ser tipada como NOT NULL --
+	// sai `float64` e o Scan quebra no primeiro NULL (que é o caso comum: OS
+	// aberta não tem horas nem custo). Ver a nota longa no sqlc.yaml.
+	//
+	// `finalizada` é derivado, não coluna (docs/modelagem, seção 3.4): a OS está
+	// finalizada quando o Técnico encerrou E o custo foi lançado. Mesma regra de
+	// vw_os_finalizada, que não serve aqui porque ela é `JOIN os_custo` e só
+	// devolve as finalizadas -- a listagem precisa de todas.
+	// ⚠️ A expressão aparece DUAS vezes (projeção e filtro) porque o Postgres não
+	// deixa referenciar alias do SELECT no WHERE -- mesmo motivo de
+	// ListarUsuarios/ContarUsuarios repetirem o WHERE delas. Divergir as duas dá
+	// uma listagem que se contradiz.
+	// ⚠️ O `::boolean` no fim não é enfeite: expressão booleana composta sem cast
+	// vira `*bool` no sqlc, mesma armadilha do `vencida` em preventiva.sql.
+	//
+	// custoTotal NÃO é calculado aqui, de propósito: é a soma dos dois valores
+	// que já viajam na linha, e uma expressão a mais no SELECT seria mais uma
+	// chance de cair na armadilha do numeric/COALESCE. O model soma.
+	//
+	// ⚠️ area_tecnico é LEFT, diferente de ListarTecnicos, que a junta INNER. Lá
+	// o WHERE já garante perfil = 'tecnico', e ck_usuario_area_tecnico exige a
+	// coluna NOT NULL exatamente nesse perfil. Aqui não: fk_os_tecnico aponta pra
+	// `usuario`, sem checar o perfil, e AtualizarUsuario zera area_tecnico_id ao
+	// tirar alguém do perfil técnico. Com INNER, promover a gestor um técnico que
+	// já tem OS aberta apagaria essas OS da listagem inteira, calado. O front
+	// tipa tecnicoArea como opcional -- NULL cabe, sumir não.
+	//
+	// ⚠️ `status` entra como text[] e só vira status_os dentro do ANY. Como
+	// status_os[] direto, o pgx não acha plano de encode ("unknown type (OID
+	// ...): cannot find encode plan") -- ele conhece os tipos built-in, não um
+	// ARRAY de ENUM nosso, e registrar o tipo no pool custaria um AfterConnect
+	// em config/conn.go por enum. O cast volta para status_os antes da
+	// comparação de propósito: com `os.status::text = ANY(...)` o índice
+	// idx_os_tecnico_status pararia de valer para esta coluna.
+	//
+	// Escopo no WHERE via EXISTS, mesmo bloco de ListarSolicitacoes: NULL é o
+	// administrador (não filtra), os demais perfis só enxergam OS cujo setor eles
+	// alcançam. O setor é o da solicitação de origem -- ordem_servico não tem
+	// setor_id próprio, e nem deveria: a OS é da solicitação, não de um lugar.
+	ListarOrdensServico(ctx context.Context, arg ListarOrdensServicoParams) ([]ListarOrdensServicoRow, error)
 	// maquina_id é opcional (NULL não filtra): a aba "Manutenção Prev." do painel
 	// do gestor lista tudo, e a tela de edição de máquina pede só as dela
 	// (GET /preventivas?maquinaId=).
@@ -545,6 +618,19 @@ type Querier interface {
 	// NOT NULL com FK, então não existe máquina sem setor nem setor sem loja --
 	// LEFT só faria o Go receber ponteiro em campo que nunca é nulo.
 	ObterMaquinaPorID(ctx context.Context, arg ObterMaquinaPorIDParams) (ObterMaquinaPorIDRow, error)
+	// Pausas de uma página inteira de OS numa ida só, mesmo padrão de
+	// ObterAnexosDasSolicitacoes: 1:N não cabe na listagem sem duplicar a OS por
+	// pausa, e uma query por OS seria N+1.
+	//
+	// os_pausa não tem tenant_id (nem precisa: ela pende de ordem_servico, que
+	// tem) -- o recorte de tenant e de escopo já aconteceu em
+	// ListarOrdensServico, e é de lá que saem os ids. Nunca chame esta query com
+	// ids que não vieram de uma listagem já filtrada.
+	//
+	// ORDER BY pausada_em: o front lê `pausas` como histórico em ordem e tira
+	// `pausaAtual` da que tem retomada_em nulo (uq_pausa_aberta garante no máximo
+	// uma por OS).
+	ObterPausasDasOrdensServico(ctx context.Context, ordensServicoIds []int64) ([]OsPausa, error)
 	// Traz os denormalizados porque PreventivaListada (o retorno de POST e PUT
 	// /preventivas, não só do GET) exige maquinaNome/setorId/setorNome/lojaId/
 	// lojaNome. RETURNING não enxerga tabela juntada, então Criar/Atualizar releem
