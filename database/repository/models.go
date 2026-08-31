@@ -550,8 +550,8 @@ type OsCusto struct {
 	TenantID                 int64
 	OrdemServicoID           int64
 	Tipo                     TipoOs
-	CustoHoraTecnico         pgtype.Numeric
-	CustoManutencao          pgtype.Numeric
+	CustoHoraTecnico         pgtype.Float8
+	CustoManutencao          pgtype.Float8
 	NumeroNotaFiscal         *string
 	SerieNotaFiscal          *string
 	DescricaoServicoTerceiro *string
@@ -699,6 +699,6 @@ type VwOsFinalizada struct {
 
 type VwOsHora struct {
 	OrdemServicoID   int64
-	HorasParada      interface{}
-	HorasTrabalhadas int32
+	HorasParada      pgtype.Float8
+	HorasTrabalhadas pgtype.Float8
 }
