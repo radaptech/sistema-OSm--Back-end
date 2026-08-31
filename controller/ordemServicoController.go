@@ -17,10 +17,8 @@ type OrdemServicoServiceInterface interface {
 	ListarOrdensServico(ctx context.Context, tenantId, usuarioId int64, perfil string, filtros service.FiltrosOrdemServico) ([]model.OrdemServico, error)
 }
 
-// OrdemServicoController não guarda bucket nenhum, diferente de
-// SolicitacaoController e MaquinaController: o tipo OrdemServico do front não
-// tem campo de mídia (a foto do defeito é da SOLICITAÇÃO, e é lá que o modal
-// de detalhes vai buscá-la). Nada a assinar no R2 aqui.
+// Sem bucket, diferente dos outros controllers: OrdemServico não tem campo de
+// mídia -- a foto do defeito é da solicitação. Nada a assinar no R2 aqui.
 type OrdemServicoController struct {
 	service OrdemServicoServiceInterface
 }
@@ -32,24 +30,13 @@ func NewOrdemServicoController(service OrdemServicoServiceInterface) *OrdemServi
 	}
 }
 
-// statusOsValidos e tiposOsValidos são os ENUMs status_os/tipo_os do banco.
-// Mesmo motivo de statusSolicitacaoValidos em solicitacaoController.go: o
-// filtro entra num cast ::status_os/::tipo_os dentro da query, então valor
-// fora da lista viraria erro 22P02 do Postgres -- 500 para o que é erro do
-// cliente. Barra aqui e responde 400.
+// O filtro entra num cast ::status_os/::tipo_os na query: valor fora da lista
+// viraria 22P02 do Postgres, ou seja 500 para o que é erro do cliente.
 var statusOsValidos = []string{"Aberta", "Em Andamento", "Pausada", "Concluída"}
 var tiposOsValidos = []string{"maquinario", "terceiros", "reparo"}
 
-// statusDeQuery lê ?status= da fila de OS.
-//
-// ⚠️ Separado por VÍRGULA, não repetido: montarQuery no front faz
-// `busca.set(chave, valor.join(','))` para todo array (servicos/montarQuery.ts),
-// então ?status=Aberta,Em Andamento é uma chave só. ctx.QueryArray devolveria
-// um item só, com a vírgula dentro, e o cast no Postgres estouraria em 22P02.
-//
-// Devolve nil (não filtra) quando ausente ou vazio, mesmo critério de
-// idDeQuery -- o front já descarta filtro vazio, e "todas" é o modo normal do
-// Painel do Gestor.
+// ⚠️ Separado por VÍRGULA, não repetido: montarQuery no front serializa array
+// com join(','), então ctx.QueryArray traria um item só com a vírgula dentro.
 func statusDeQuery(ctx *gin.Context) ([]string, bool) {
 
 	bruto := ctx.Query("status")
@@ -59,9 +46,8 @@ func statusDeQuery(ctx *gin.Context) ([]string, bool) {
 
 	status := strings.Split(bruto, ",")
 	for i, s := range status {
-		// Um espaço depois da vírgula é o erro humano óbvio em teste manual
-		// (curl/Postman), e o encode do front já preserva o espaço DENTRO do
-		// valor ("Em Andamento") -- aparar a borda não estraga nenhum rótulo.
+		// Apara a borda pelo espaço-depois-da-vírgula do teste manual; o espaço
+		// DENTRO de "Em Andamento" sobrevive.
 		status[i] = strings.TrimSpace(s)
 		if !slices.Contains(statusOsValidos, status[i]) {
 			ctx.JSON(http.StatusBadRequest, gin.H{"error": "status inválido: " + status[i]})
@@ -72,20 +58,8 @@ func statusDeQuery(ctx *gin.Context) ([]string, bool) {
 	return status, true
 }
 
-// Listar é GET /ordens-servico -- um endpoint para os três painéis, recortado
-// pelo escopo de quem chama (o WHERE da query, nunca o filtro do cliente):
-//
-//	Gestor  (PainelGestor)                  -> sem filtro
-//	Técnico (PainelTecnico)                 -> ?tecnicoId=
-//	Admin   (CustosPendentes/OSFinalizadas) -> ?status=Concluída / ?finalizada=true
-//
-// Array simples, sem paginação -- o front pagina no cliente, mesmo padrão de
-// /solicitacoes, /maquinas e /preventivas. `?pagina=` é aceito e ignorado: o
-// front o inclui no objeto de parâmetros de algumas telas, e recusar seria
-// quebrar por um campo que não muda nada.
-//
-// Só lê -- o único erro possível é do banco, e ele vai 500 com o erro cru no
-// log (nome de constraint/coluna não pode ir no corpo da resposta).
+// Um endpoint para os três painéis; o que muda é o filtro. `?pagina=` é aceito
+// e ignorado -- o front o manda em algumas telas e recusar quebraria à toa.
 func (o *OrdemServicoController) Listar() gin.HandlerFunc {
 
 	return func(ctx *gin.Context) {
@@ -95,8 +69,7 @@ func (o *OrdemServicoController) Listar() gin.HandlerFunc {
 			return
 		}
 
-		// Do TOKEN, nunca da query: aceitar do cliente deixaria um Técnico
-		// listar a loja inteira mandando outro id.
+		// Do token, nunca da query: aceitar do cliente deixaria um Técnico listar a loja inteira.
 		usuarioId, perfil, ok := atorDaRota(ctx)
 		if !ok {
 			return
@@ -116,10 +89,8 @@ func (o *OrdemServicoController) Listar() gin.HandlerFunc {
 			tipo = &bruto
 		}
 
-		// Diferente de status/tipo, "finalizada" tem só dois valores válidos e
-		// quem os define é o ParseBool: qualquer outra coisa é erro de
-		// cliente, não "não filtrar" -- ?finalizada=sim silenciosamente
-		// ignorado devolveria a lista inteira para a tela de OS Finalizadas.
+		// ?finalizada=sim ignorado em silêncio devolveria a lista inteira para a
+		// tela de OS Finalizadas -- valor inválido é 400, não "não filtrar".
 		var finalizada *bool
 		if bruto := ctx.Query("finalizada"); bruto != "" {
 			v, err := strconv.ParseBool(bruto)
