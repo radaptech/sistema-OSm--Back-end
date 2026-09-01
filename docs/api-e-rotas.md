@@ -92,6 +92,7 @@ Leia antes de registrar rota nova, mexer em middleware ou montar corpo de respos
   | `GET /solicitacoes/:id` | **qualquer perfil autenticado** (escopo no `WHERE`) |
   | `POST /solicitacoes/:id/abrir-os`, `/:id/rejeitar` | gestor, administrador |
   | `GET /ordens-servico` | gestor, administrador, **técnico** (escopo no `WHERE`) |
+  | `GET /indicadores/maquinas/:id` | gestor, administrador (escopo no `WHERE`, 404 fora dele) |
 
 - **`GET /maquinas` e `GET /preventivas` são abertas mas não são amplas**: o RBAC libera
   qualquer perfil e o **escopo é aplicado no `WHERE`** (ver "Escopo no `WHERE`" em "Queries
@@ -137,6 +138,17 @@ Leia antes de registrar rota nova, mexer em middleware ou montar corpo de respos
   OS depois que ela existe. `GET /solicitacoes/:id` é aberta a qualquer perfil, recortada
   pelo escopo no `WHERE` (mesmo `EXISTS` de `ListarSolicitacoes`) — sem isso um
   Solicitante enumerando id leria foto/descrição de outro setor.
+- **`GET /indicadores/maquinas/:id` é do Gestor, e o `:id` é de MÁQUINA.** O Técnico
+  executa a OS, não acompanha indisponibilidade nem custo. A URL é `/indicadores/...` e
+  não `/maquinas/:id/indicadores` porque é a que o front já chama
+  (`servicos/servicoIndicadores.ts`) — o contrato manda. Quem responde é o
+  `OrdemServicoController`, pelo mesmo motivo de `GET /empresas` morar no de loja: o
+  painel inteiro sai do histórico de OS encerradas.
+  **Máquina fora do escopo é 404, não 200 com zeros** — o escopo entra como `narg`
+  opcional em `ObterMaquinaPorID` (NULL não filtra, que é o administrador e todos os
+  chamadores de escrita). Devolver zeros confirmaria a existência do id, que é o que a
+  enumeração procura; 403 faria o mesmo, e além disso 403 aqui é perfil errado, não
+  máquina alheia.
 - **`TenantMiddleware` entra só em `/autenticacao/login`** — é o único endpoint que lê o
   header `X-tenant-ID`; ver "Autenticação". Rota autenticada que precise de tenant usa
   `GetTenantIDToken`, não o middleware.

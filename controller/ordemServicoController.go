@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"log"
 	"net/http"
 	"slices"
@@ -9,12 +10,14 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"github.com/radaptech/sistema-OSm--Back-end/internal/helper"
 	"github.com/radaptech/sistema-OSm--Back-end/internal/model"
 	"github.com/radaptech/sistema-OSm--Back-end/internal/service"
 )
 
 type OrdemServicoServiceInterface interface {
 	ListarOrdensServico(ctx context.Context, tenantId, usuarioId int64, perfil string, filtros service.FiltrosOrdemServico) ([]model.OrdemServico, error)
+	ObterIndicadoresDaMaquina(ctx context.Context, tenantId, maquinaId, usuarioId int64, perfil string) (model.IndicadoresMaquina, error)
 }
 
 // OrdemServicoController não guarda bucket nenhum, diferente de
@@ -160,5 +163,50 @@ func (o *OrdemServicoController) Listar() gin.HandlerFunc {
 		}
 
 		ctx.JSON(http.StatusOK, ordens)
+	}
+}
+
+// Indicadores é GET /indicadores/maquinas/:id -- o Painel de Indicadores do
+// Gestor (DashboardGestor). O `:id` é de MÁQUINA, não de OS: a rota vive fora
+// de /ordens-servico porque é assim que o front a chama (servicoIndicadores),
+// mas o handler mora aqui pelo mesmo motivo do service -- tudo que ela lê é
+// histórico de OS.
+//
+// ErrNaoEncontrado é 404 e cobre os dois casos de uma vez: máquina que não
+// existe e máquina fora do escopo de quem chama. Distingui-los responderia
+// "esta existe, você é que não pode ver" -- que é justamente o que a
+// enumeração de ids procura. Não é 403: 403 é perfil errado (o RBAC da rota),
+// e aqui o perfil está certo.
+func (o *OrdemServicoController) Indicadores() gin.HandlerFunc {
+
+	return func(ctx *gin.Context) {
+
+		tenantId, ok := tenantDaRota(ctx)
+		if !ok {
+			return
+		}
+
+		maquinaId, ok := idDaRota(ctx)
+		if !ok {
+			return
+		}
+
+		usuarioId, perfil, ok := atorDaRota(ctx)
+		if !ok {
+			return
+		}
+
+		indicadores, err := o.service.ObterIndicadoresDaMaquina(ctx.Request.Context(), tenantId, maquinaId, usuarioId, perfil)
+		if err != nil {
+			if errors.Is(err, helper.ErrNaoEncontrado) {
+				ctx.JSON(http.StatusNotFound, gin.H{"error": "máquina não encontrada"})
+				return
+			}
+			log.Printf("indicadores da máquina %d tenant=%d: %v", maquinaId, tenantId, err)
+			ctx.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao obter indicadores da máquina"})
+			return
+		}
+
+		ctx.JSON(http.StatusOK, indicadores)
 	}
 }

@@ -163,3 +163,54 @@ SELECT id, ordem_servico_id, status_anterior, motivo, pausada_em, retomada_em
 FROM os_pausa
 WHERE ordem_servico_id = ANY(sqlc.arg(ordens_servico_ids)::bigint[])
 ORDER BY ordem_servico_id, pausada_em;
+
+-- name: ListarHistoricoOsDaMaquina :many
+-- GET /indicadores/maquinas/:id -- a matéria-prima do Painel de Indicadores do
+-- Gestor (front DashboardGestor). Uma linha por OS encerrada da máquina; as
+-- seis grandezas do painel (Horas Parada, MTTR, MTBF, Custo Total, rosca por
+-- tipo de defeito e barras de custo mensal) são somadas em
+-- MontarIndicadoresMaquina, não aqui.
+--
+-- Agregar no SELECT custaria seis expressões e três GROUP BY diferentes numa
+-- query só, e MTBF (média do intervalo entre aberturas) ainda pediria LAG --
+-- em Go são três laços sobre uma lista que já cabe na memória, testáveis sem
+-- Postgres. Mesmo espírito do custoTotal de ListarOrdensServico, que também é
+-- somado no model.
+--
+-- O JOIN com os_encerramento É o filtro de "concluída": a linha só existe
+-- quando o Técnico encerrou (uq_encerramento_os, data_fim NOT NULL) e não há
+-- reabertura no modelo. `os.status = 'Concluída'` seria o espelho
+-- denormalizado da mesma coisa -- e, se um dia divergirem, é a linha de
+-- encerramento que manda.
+--
+-- Sem escopo no WHERE aqui, e não é esquecimento: quem valida o acesso é o
+-- ObterMaquinaPorID que o service chama ANTES, com escopo_usuario_id. Máquina
+-- fora do escopo nem chega nesta query -- vira 404 lá em cima.
+--
+-- ⚠️ horas_* e custo_* CRUAS, sem ::float8 -- ver a nota longa em
+-- ListarOrdensServico e no sqlc.yaml: o cast quebra o override que as
+-- transforma em pgtype.Float8, e o Scan estoura no primeiro NULL (custo ainda
+-- não lançado, ou máquina que não parou).
+--
+-- O mês sai pronto do banco, em America/Sao_Paulo, mesmo tratamento de
+-- `vencida` em preventiva.sql: uma OS encerrada às 22h de 31/08 é agosto pro
+-- Gestor e setembro pro UTC. Formato YYYY-MM porque ordena como texto -- o
+-- 'MM/YYYY' do contrato é montado na hora de responder.
+SELECT
+    os.aberta_em,
+    e.tipo_defeito,
+    to_char(e.data_fim AT TIME ZONE 'America/Sao_Paulo', 'YYYY-MM') AS mes_encerramento,
+    h.horas_parada,
+    h.horas_trabalhadas,
+    c.custo_hora_tecnico,
+    c.custo_manutencao
+FROM ordem_servico os
+JOIN solicitacao_os s   ON s.tenant_id = os.tenant_id AND s.id = os.solicitacao_id
+JOIN os_encerramento e  ON e.tenant_id = os.tenant_id AND e.ordem_servico_id = os.id
+JOIN vw_os_horas h      ON h.ordem_servico_id = os.id
+LEFT JOIN os_custo c    ON c.tenant_id = os.tenant_id AND c.ordem_servico_id = os.id
+WHERE os.tenant_id = sqlc.arg(tenant_id)
+  AND s.maquina_id = sqlc.arg(maquina_id)::bigint
+-- Ascendente porque MTBF é a média do intervalo entre aberturas consecutivas:
+-- ordenado aqui, o Go só percorre. Trocar para DESC quebra o indicador calado.
+ORDER BY os.aberta_em;
