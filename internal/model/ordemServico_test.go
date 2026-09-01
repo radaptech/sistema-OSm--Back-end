@@ -43,11 +43,14 @@ func TestOrdemServicoSerializaDatasNoFormatoBr(t *testing.T) {
 		t.Fatalf("erro ao desserializar: %v", err)
 	}
 
-	if corpo["dataAbertura"] != "30/08/2026 14:30:00" {
-		t.Errorf("dataAbertura = %v, esperado dd/mm/yyyy HH:MM:SS", corpo["dataAbertura"])
+	// O fixture guarda 14:30 UTC, que é o que o pgx entrega num container sem
+	// TZ -- e sai 11:30 porque o contrato é horário de Brasília (config.DataBr).
+	// Esperar 14:30 aqui era esperar o fuso do host vazando na resposta.
+	if corpo["dataAbertura"] != "30/08/2026 11:30:00" {
+		t.Errorf("dataAbertura = %v, esperado 30/08/2026 11:30:00 (14:30 UTC em Brasília)", corpo["dataAbertura"])
 	}
-	if corpo["dataSolicitacao"] != "30/08/2026 06:30:00" {
-		t.Errorf("dataSolicitacao = %v", corpo["dataSolicitacao"])
+	if corpo["dataSolicitacao"] != "30/08/2026 03:30:00" {
+		t.Errorf("dataSolicitacao = %v, esperado 30/08/2026 03:30:00", corpo["dataSolicitacao"])
 	}
 }
 

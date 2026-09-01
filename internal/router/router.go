@@ -207,4 +207,18 @@ func ConfigurarRotas(r *gin.Engine, c *Container) {
 	// OS vem de uma solicitação, e criar direto pularia a aprovação. O ciclo de
 	// vida (iniciar/pausar/retomar/acionar-terceiro/encerrar/custo) é a fase 2.
 	api.GET("/ordens-servico", middleware.AutenticacaoJwt(), middleware.Permitir("gestor", "administrador", "tecnico"), c.OrdemOS.Listar())
+
+	// GET /indicadores/maquinas/:id -- o Painel de Indicadores (DashboardGestor,
+	// a ação rápida "Indicadores" do Painel do Gestor). O `:id` é de MÁQUINA;
+	// quem responde é o OrdemServicoController porque o painel inteiro sai do
+	// histórico de OS encerradas.
+	//
+	// Gestor e administrador, mesmo par de GET /solicitacoes: o Técnico executa
+	// a OS, não acompanha indisponibilidade nem custo, e o Solicitante muito
+	// menos. O recorte de loja/setor continua sendo o WHERE (aqui, o EXISTS de
+	// ObterMaquinaPorID) -- máquina fora do escopo é 404, não lista vazia.
+	//
+	// /indicadores em vez de /maquinas/:id/indicadores porque é a URL que o
+	// front já chama (servicos/servicoIndicadores.ts), e o contrato manda.
+	api.GET("/indicadores/maquinas/:id", middleware.AutenticacaoJwt(), middleware.Permitir("gestor", "administrador"), c.OrdemOS.Indicadores())
 }

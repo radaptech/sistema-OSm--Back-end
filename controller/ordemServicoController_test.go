@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
+	"github.com/radaptech/sistema-OSm--Back-end/internal/helper"
 	"github.com/radaptech/sistema-OSm--Back-end/internal/model"
 	"github.com/radaptech/sistema-OSm--Back-end/internal/service"
 	"github.com/radaptech/sistema-OSm--Back-end/middleware"
@@ -28,6 +29,8 @@ type ordemServicoFake struct {
 	filtros *service.FiltrosOrdemServico
 	// ator recebido, como "usuarioId/perfil".
 	ator *string
+	// maquinaId recebido por ObterIndicadoresDaMaquina.
+	maquinaId *int64
 }
 
 func (o ordemServicoFake) ListarOrdensServico(_ context.Context, _, usuarioId int64, perfil string, f service.FiltrosOrdemServico) ([]model.OrdemServico, error) {
@@ -45,6 +48,19 @@ func (o ordemServicoFake) ListarOrdensServico(_ context.Context, _, usuarioId in
 		Descricao: "Forno não aquece", SetorId: 4, SetorNome: "Padaria",
 		LojaId: 1, LojaNome: "Loja A",
 	}}, nil
+}
+
+func (o ordemServicoFake) ObterIndicadoresDaMaquina(_ context.Context, _, maquinaId, usuarioId int64, perfil string) (model.IndicadoresMaquina, error) {
+	if o.maquinaId != nil {
+		*o.maquinaId = maquinaId
+	}
+	if o.ator != nil {
+		*o.ator = perfil + "/" + strconv.FormatInt(usuarioId, 10)
+	}
+	if o.err != nil {
+		return model.IndicadoresMaquina{}, o.err
+	}
+	return model.MontarIndicadoresMaquina(maquinaId, nil), nil
 }
 
 // contextoOS monta a requisição já autenticada, como o AutenticacaoJwt
@@ -266,5 +282,109 @@ func TestOrdemServicoRespondeArray(t *testing.T) {
 	}
 	if corpo[0]["statusExecucao"] != "Aberta" || corpo[0]["lojaNome"] != "Loja A" {
 		t.Errorf("corpo = %+v", corpo[0])
+	}
+}
+
+// contextoIndicadores monta GET /indicadores/maquinas/:id já autenticado, com o
+// :id que o gin extrairia da rota.
+func contextoIndicadores(id string) (*gin.Context, *httptest.ResponseRecorder) {
+	gin.SetMode(gin.TestMode)
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/indicadores/maquinas/"+id, nil)
+	ctx.Params = gin.Params{{Key: "id", Value: id}}
+	ctx.Set(middleware.UserTenantId, int64(7))
+	ctx.Set(middleware.UserId, int64(5))
+	ctx.Set(middleware.UserPerfil, "gestor")
+	return ctx, rec
+}
+
+func TestIndicadoresStatus(t *testing.T) {
+
+	casos := []struct {
+		nome    string
+		id      string
+		err     error
+		esperar int
+	}{
+		{"sucesso", "9", nil, http.StatusOK},
+		// Máquina inexistente e máquina fora do escopo chegam aqui como o
+		// mesmo sentinela, e viram o mesmo 404 -- de propósito.
+		{"máquina fora do escopo ou inexistente", "9", helper.ErrNaoEncontrado, http.StatusNotFound},
+		// :id malformado é erro de cliente, não "não existe" -- mesmo critério
+		// de idDaRota no resto do projeto.
+		{"id não numérico", "abc", nil, http.StatusBadRequest},
+		{"id zero", "0", nil, http.StatusBadRequest},
+		{"erro do banco", "9", errors.New("connection refused"), http.StatusInternalServerError},
+	}
+
+	for _, caso := range casos {
+		t.Run(caso.nome, func(t *testing.T) {
+			ctx, rec := contextoIndicadores(caso.id)
+			NewOrdemServicoController(ordemServicoFake{err: caso.err}).Indicadores()(ctx)
+
+			if rec.Code != caso.esperar {
+				t.Errorf("status = %d, esperado %d (corpo: %s)", rec.Code, caso.esperar, rec.Body.String())
+			}
+			if caso.err != nil && strings.Contains(rec.Body.String(), caso.err.Error()) {
+				t.Errorf("o erro cru vazou na resposta: %s", rec.Body.String())
+			}
+		})
+	}
+}
+
+// O ator vem do TOKEN e a máquina da ROTA. Aceitar o usuário de qualquer outro
+// lugar deixaria um Gestor ler os indicadores das lojas de outro só trocando um
+// parâmetro -- o escopo é aplicado sobre esse id lá no service.
+func TestIndicadoresAtorDoTokenEMaquinaDaRota(t *testing.T) {
+
+	var ator string
+	var maquinaId int64
+
+	ctx, rec := contextoIndicadores("42")
+	NewOrdemServicoController(ordemServicoFake{ator: &ator, maquinaId: &maquinaId}).Indicadores()(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d (corpo: %s)", rec.Code, rec.Body.String())
+	}
+	if ator != "gestor/5" {
+		t.Errorf("ator = %q, esperado \"gestor/5\" (o do token)", ator)
+	}
+	if maquinaId != 42 {
+		t.Errorf("maquinaId = %d, esperado 42 (o da rota)", maquinaId)
+	}
+}
+
+// O corpo tem que sair com as duas listas montadas mesmo sem histórico: o front
+// tipa IndicadoresMaquina sem opcionais e faz .map nas duas -- `null` quebraria
+// o painel de uma máquina recém-cadastrada.
+func TestIndicadoresCorpoSemHistorico(t *testing.T) {
+
+	ctx, rec := contextoIndicadores("9")
+	NewOrdemServicoController(ordemServicoFake{}).Indicadores()(ctx)
+
+	var corpo struct {
+		MaquinaId      int64 `json:"maquinaId"`
+		PorTipoDefeito []struct {
+			TipoDefeito string  `json:"tipoDefeito"`
+			HorasParada float64 `json:"horasParada"`
+		} `json:"porTipoDefeito"`
+		PorMes []struct{} `json:"porMes"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &corpo); err != nil {
+		t.Fatalf("corpo inválido: %v (%s)", err, rec.Body.String())
+	}
+
+	if corpo.MaquinaId != 9 {
+		t.Errorf("maquinaId = %d, esperado 9", corpo.MaquinaId)
+	}
+	if len(corpo.PorTipoDefeito) != 2 {
+		t.Fatalf("porTipoDefeito = %d itens, esperado 2 (a rosca tem legenda fixa)", len(corpo.PorTipoDefeito))
+	}
+	if corpo.PorMes == nil {
+		t.Error("porMes veio null; o front faz .map e quebra")
+	}
+	if !strings.Contains(rec.Body.String(), `"porMes":[]`) {
+		t.Errorf("porMes deveria sair como array vazio: %s", rec.Body.String())
 	}
 }

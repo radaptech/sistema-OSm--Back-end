@@ -2,7 +2,9 @@ package service
 
 import (
 	"context"
+	"errors"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/radaptech/sistema-OSm--Back-end/database/repository"
 	"github.com/radaptech/sistema-OSm--Back-end/internal/helper"
@@ -106,4 +108,43 @@ func montarOrdensServicoEmLote(ctx context.Context, repo *repository.Queries, li
 	}
 
 	return dados, nil
+}
+
+// ObterIndicadoresDaMaquina é GET /indicadores/maquinas/:id -- o Painel de
+// Indicadores do Gestor. Mora aqui, e não num IndicadorService próprio, porque
+// tudo que ele lê é histórico de OS: o pacote já teria que expor a mesma query
+// para si mesmo.
+//
+// São duas idas ao banco de propósito. A primeira existe pelo ESCOPO: a máquina
+// tem que estar ao alcance de quem chama, e a segunda query sozinha não sabe
+// dizer a diferença entre "máquina de outra loja" e "máquina sem OS encerrada"
+// -- as duas devolvem zero linhas. Sem esse cheque, o Gestor leria custo e
+// indisponibilidade de qualquer máquina do tenant enumerando id, e ainda por
+// cima disfarçado de painel vazio.
+func (s *OrdemServicoService) ObterIndicadoresDaMaquina(ctx context.Context, tenantId, maquinaId, usuarioId int64, perfil string) (model.IndicadoresMaquina, error) {
+
+	repo := repository.New(s.Pool)
+
+	if _, err := repo.ObterMaquinaPorID(ctx, repository.ObterMaquinaPorIDParams{
+		ID:              maquinaId,
+		TenantID:        tenantId,
+		EscopoUsuarioID: escopoDe(usuarioId, perfil),
+	}); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return model.IndicadoresMaquina{}, helper.ErrNaoEncontrado
+		}
+		return model.IndicadoresMaquina{}, helper.TraduzErroPostgres(err)
+	}
+
+	historico, err := repo.ListarHistoricoOsDaMaquina(ctx, repository.ListarHistoricoOsDaMaquinaParams{
+		TenantID:  tenantId,
+		MaquinaID: maquinaId,
+	})
+	if err != nil {
+		return model.IndicadoresMaquina{}, helper.TraduzErroPostgres(err)
+	}
+
+	// Máquina existe e está no escopo, mas ainda não teve OS encerrada: zeros,
+	// não 404. É o estado normal de máquina recém-cadastrada.
+	return model.MontarIndicadoresMaquina(maquinaId, historico), nil
 }

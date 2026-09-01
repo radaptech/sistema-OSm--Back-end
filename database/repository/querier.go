@@ -325,6 +325,40 @@ type Querier interface {
 	// não manda parâmetro nenhum e a tela do Administrador pagina no cliente
 	// (front-end/CLAUDE.md item 12).
 	ListarEmpresasTerceirizadas(ctx context.Context, tenantID int64) ([]EmpresaTerceirizada, error)
+	// GET /indicadores/maquinas/:id -- a matéria-prima do Painel de Indicadores do
+	// Gestor (front DashboardGestor). Uma linha por OS encerrada da máquina; as
+	// seis grandezas do painel (Horas Parada, MTTR, MTBF, Custo Total, rosca por
+	// tipo de defeito e barras de custo mensal) são somadas em
+	// MontarIndicadoresMaquina, não aqui.
+	//
+	// Agregar no SELECT custaria seis expressões e três GROUP BY diferentes numa
+	// query só, e MTBF (média do intervalo entre aberturas) ainda pediria LAG --
+	// em Go são três laços sobre uma lista que já cabe na memória, testáveis sem
+	// Postgres. Mesmo espírito do custoTotal de ListarOrdensServico, que também é
+	// somado no model.
+	//
+	// O JOIN com os_encerramento É o filtro de "concluída": a linha só existe
+	// quando o Técnico encerrou (uq_encerramento_os, data_fim NOT NULL) e não há
+	// reabertura no modelo. `os.status = 'Concluída'` seria o espelho
+	// denormalizado da mesma coisa -- e, se um dia divergirem, é a linha de
+	// encerramento que manda.
+	//
+	// Sem escopo no WHERE aqui, e não é esquecimento: quem valida o acesso é o
+	// ObterMaquinaPorID que o service chama ANTES, com escopo_usuario_id. Máquina
+	// fora do escopo nem chega nesta query -- vira 404 lá em cima.
+	//
+	// ⚠️ horas_* e custo_* CRUAS, sem ::float8 -- ver a nota longa em
+	// ListarOrdensServico e no sqlc.yaml: o cast quebra o override que as
+	// transforma em pgtype.Float8, e o Scan estoura no primeiro NULL (custo ainda
+	// não lançado, ou máquina que não parou).
+	//
+	// O mês sai pronto do banco, em America/Sao_Paulo, mesmo tratamento de
+	// `vencida` em preventiva.sql: uma OS encerrada às 22h de 31/08 é agosto pro
+	// Gestor e setembro pro UTC. Formato YYYY-MM porque ordena como texto -- o
+	// 'MM/YYYY' do contrato é montado na hora de responder.
+	// Ascendente porque MTBF é a média do intervalo entre aberturas consecutivas:
+	// ordenado aqui, o Go só percorre. Trocar para DESC quebra o indicador calado.
+	ListarHistoricoOsDaMaquina(ctx context.Context, arg ListarHistoricoOsDaMaquinaParams) ([]ListarHistoricoOsDaMaquinaRow, error)
 	// Sem paginação nem filtro de busca de propósito: /lojas devolve array simples
 	// e o front pagina/filtra no cliente (front-end/CLAUDE.md item 12). Só
 	// /usuarios e /solicitacoes/minhas paginam no servidor.
@@ -617,6 +651,14 @@ type Querier interface {
 	// Os JOINs são INNER e não LEFT de propósito: setor_id e setor.loja_id são
 	// NOT NULL com FK, então não existe máquina sem setor nem setor sem loja --
 	// LEFT só faria o Go receber ponteiro em campo que nunca é nulo.
+	//
+	// O escopo é OPCIONAL aqui, diferente de ListarMaquinas: NULL não filtra, e é
+	// o que os chamadores de escrita mandam (CadastrarMaquina/AtualizarMaquina
+	// releem a linha que acabaram de gravar, o job de preventiva não tem sessão) e
+	// também o administrador, que não tem escopo. Quem passa o usuário é
+	// GET /indicadores/maquinas/:id, aberto ao Gestor: sem o EXISTS ele leria
+	// custo e indisponibilidade de máquina de outra loja enumerando id -- mesma
+	// lacuna que ObterSolicitacaoPorID fechou na fase 1.
 	ObterMaquinaPorID(ctx context.Context, arg ObterMaquinaPorIDParams) (ObterMaquinaPorIDRow, error)
 	// Pausas de uma página inteira de OS numa ida só, mesmo padrão de
 	// ObterAnexosDasSolicitacoes: 1:N não cabe na listagem sem duplicar a OS por

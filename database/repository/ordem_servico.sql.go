@@ -11,6 +11,101 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const listarHistoricoOsDaMaquina = `-- name: ListarHistoricoOsDaMaquina :many
+SELECT
+    os.aberta_em,
+    e.tipo_defeito,
+    to_char(e.data_fim AT TIME ZONE 'America/Sao_Paulo', 'YYYY-MM') AS mes_encerramento,
+    h.horas_parada,
+    h.horas_trabalhadas,
+    c.custo_hora_tecnico,
+    c.custo_manutencao
+FROM ordem_servico os
+JOIN solicitacao_os s   ON s.tenant_id = os.tenant_id AND s.id = os.solicitacao_id
+JOIN os_encerramento e  ON e.tenant_id = os.tenant_id AND e.ordem_servico_id = os.id
+JOIN vw_os_horas h      ON h.ordem_servico_id = os.id
+LEFT JOIN os_custo c    ON c.tenant_id = os.tenant_id AND c.ordem_servico_id = os.id
+WHERE os.tenant_id = $1
+  AND s.maquina_id = $2::bigint
+ORDER BY os.aberta_em
+`
+
+type ListarHistoricoOsDaMaquinaParams struct {
+	TenantID  int64
+	MaquinaID int64
+}
+
+type ListarHistoricoOsDaMaquinaRow struct {
+	AbertaEm         pgtype.Timestamptz
+	TipoDefeito      TipoDefeito
+	MesEncerramento  string
+	HorasParada      pgtype.Float8
+	HorasTrabalhadas pgtype.Float8
+	CustoHoraTecnico pgtype.Float8
+	CustoManutencao  pgtype.Float8
+}
+
+// GET /indicadores/maquinas/:id -- a matéria-prima do Painel de Indicadores do
+// Gestor (front DashboardGestor). Uma linha por OS encerrada da máquina; as
+// seis grandezas do painel (Horas Parada, MTTR, MTBF, Custo Total, rosca por
+// tipo de defeito e barras de custo mensal) são somadas em
+// MontarIndicadoresMaquina, não aqui.
+//
+// Agregar no SELECT custaria seis expressões e três GROUP BY diferentes numa
+// query só, e MTBF (média do intervalo entre aberturas) ainda pediria LAG --
+// em Go são três laços sobre uma lista que já cabe na memória, testáveis sem
+// Postgres. Mesmo espírito do custoTotal de ListarOrdensServico, que também é
+// somado no model.
+//
+// O JOIN com os_encerramento É o filtro de "concluída": a linha só existe
+// quando o Técnico encerrou (uq_encerramento_os, data_fim NOT NULL) e não há
+// reabertura no modelo. `os.status = 'Concluída'` seria o espelho
+// denormalizado da mesma coisa -- e, se um dia divergirem, é a linha de
+// encerramento que manda.
+//
+// Sem escopo no WHERE aqui, e não é esquecimento: quem valida o acesso é o
+// ObterMaquinaPorID que o service chama ANTES, com escopo_usuario_id. Máquina
+// fora do escopo nem chega nesta query -- vira 404 lá em cima.
+//
+// ⚠️ horas_* e custo_* CRUAS, sem ::float8 -- ver a nota longa em
+// ListarOrdensServico e no sqlc.yaml: o cast quebra o override que as
+// transforma em pgtype.Float8, e o Scan estoura no primeiro NULL (custo ainda
+// não lançado, ou máquina que não parou).
+//
+// O mês sai pronto do banco, em America/Sao_Paulo, mesmo tratamento de
+// `vencida` em preventiva.sql: uma OS encerrada às 22h de 31/08 é agosto pro
+// Gestor e setembro pro UTC. Formato YYYY-MM porque ordena como texto -- o
+// 'MM/YYYY' do contrato é montado na hora de responder.
+// Ascendente porque MTBF é a média do intervalo entre aberturas consecutivas:
+// ordenado aqui, o Go só percorre. Trocar para DESC quebra o indicador calado.
+func (q *Queries) ListarHistoricoOsDaMaquina(ctx context.Context, arg ListarHistoricoOsDaMaquinaParams) ([]ListarHistoricoOsDaMaquinaRow, error) {
+	rows, err := q.db.Query(ctx, listarHistoricoOsDaMaquina, arg.TenantID, arg.MaquinaID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListarHistoricoOsDaMaquinaRow
+	for rows.Next() {
+		var i ListarHistoricoOsDaMaquinaRow
+		if err := rows.Scan(
+			&i.AbertaEm,
+			&i.TipoDefeito,
+			&i.MesEncerramento,
+			&i.HorasParada,
+			&i.HorasTrabalhadas,
+			&i.CustoHoraTecnico,
+			&i.CustoManutencao,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listarOrdensServico = `-- name: ListarOrdensServico :many
 
 SELECT

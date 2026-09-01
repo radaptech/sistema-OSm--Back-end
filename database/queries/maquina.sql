@@ -49,11 +49,30 @@ RETURNING *;
 -- Os JOINs são INNER e não LEFT de propósito: setor_id e setor.loja_id são
 -- NOT NULL com FK, então não existe máquina sem setor nem setor sem loja --
 -- LEFT só faria o Go receber ponteiro em campo que nunca é nulo.
+--
+-- O escopo é OPCIONAL aqui, diferente de ListarMaquinas: NULL não filtra, e é
+-- o que os chamadores de escrita mandam (CadastrarMaquina/AtualizarMaquina
+-- releem a linha que acabaram de gravar, o job de preventiva não tem sessão) e
+-- também o administrador, que não tem escopo. Quem passa o usuário é
+-- GET /indicadores/maquinas/:id, aberto ao Gestor: sem o EXISTS ele leria
+-- custo e indisponibilidade de máquina de outra loja enumerando id -- mesma
+-- lacuna que ObterSolicitacaoPorID fechou na fase 1.
 SELECT m.*, s.nome AS setor_nome, s.loja_id, l.nome AS loja_nome
 FROM maquina m
 JOIN setor s ON s.tenant_id = m.tenant_id AND s.id = m.setor_id
 JOIN loja  l ON l.tenant_id = s.tenant_id AND l.id = s.loja_id
-WHERE m.id = $1 AND m.tenant_id = $2;
+WHERE m.id = sqlc.arg(id) AND m.tenant_id = sqlc.arg(tenant_id)
+  AND (
+    sqlc.narg(escopo_usuario_id)::bigint IS NULL
+    OR EXISTS (
+      SELECT 1
+      FROM usuario_escopo ue
+      LEFT JOIN usuario_escopo_setor ues ON ues.escopo_id = ue.id
+      WHERE ue.usuario_id = sqlc.narg(escopo_usuario_id)
+        AND ue.loja_id = s.loja_id
+        AND (ue.acesso_total_setores OR ues.setor_id = m.setor_id)
+    )
+  );
 
 -- name: ListarMaquinas :many
 -- setorId e lojaId são opcionais e combináveis (ParametrosListagemMaquinas no

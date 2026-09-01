@@ -11,22 +11,24 @@ Leia antes de implementar endpoint do miolo do fluxo (solicitação, OS, indicad
 
 Cadastros: **completos**. Solicitações (fase 1): **completo** — ver seção própria
 "Solicitações" abaixo. `GET /ordens-servico`: **completo** — com ele o Painel do Gestor
-fica inteiro (ver "Ordem de serviço — listagem" abaixo). Falta o resto do miolo do fluxo,
-na ordem em que o front precisa:
+fica inteiro (ver "Ordem de serviço — listagem" abaixo). `GET /indicadores/maquinas/:id`:
+**completo** — ver "Indicadores de máquina" abaixo.
 
-1. **Ciclo de vida da Ordem de serviço** — `iniciar`/`pausar`/`retomar`/
-   `acionar-terceiro`/`encerrar`/`custo`. É tudo ESCRITA, e nenhuma delas é do Gestor:
-   as cinco primeiras são do **Técnico** (`PainelTecnico`) e o `custo` é do
-   **Administrador** (`AdministradorCustosPendentes`). Destrava os dois cards mortos do
-   painel do Administrador.
-   O que já existe e NÃO precisa ser refeito: a criação da OS (`AbrirOS`, fase 1 — a OS
-   nasce da aprovação do Gestor, nunca de um `POST /ordens-servico`) e a **leitura**
-   (`GET /ordens-servico`, ver "Ordem de serviço — listagem" abaixo), que já projeta
-   encerramento, custo, horas e pausas para quando essas linhas existirem.
-2. **Indicadores** (`GET /indicadores/maquinas/:id`). O **job de preventiva vencida**
-   saiu desta lista — está pronto e testado, falta só o Cron Job no Railway (ver seção
-   abaixo). A **notificação por WhatsApp** também saiu — código pronto e testado, falta
-   só o chip dedicado (ver "Notificação de solicitação por WhatsApp" abaixo).
+Falta **uma coisa só**: o **ciclo de vida da Ordem de serviço** — `iniciar`/`pausar`/
+`retomar`/`acionar-terceiro`/`encerrar`/`custo`. É tudo ESCRITA, e nenhuma delas é do
+Gestor: as cinco primeiras são do **Técnico** (`PainelTecnico`) e o `custo` é do
+**Administrador** (`AdministradorCustosPendentes`). Destrava os dois cards mortos do
+painel do Administrador e, de quebra, tira do zero os indicadores (que hoje leem um
+histórico de encerramentos que ninguém escreve ainda).
+
+O que já existe e NÃO precisa ser refeito: a criação da OS (`AbrirOS`, fase 1 — a OS
+nasce da aprovação do Gestor, nunca de um `POST /ordens-servico`) e a **leitura**
+(`GET /ordens-servico`), que já projeta encerramento, custo, horas e pausas para quando
+essas linhas existirem.
+
+Prontos e testados, fora da lista: os **indicadores de máquina**, o **job de preventiva
+vencida** (falta só o Cron Job no Railway) e a **notificação por WhatsApp** (falta só o
+chip dedicado) — cada um com seção própria abaixo.
 
 Listagem nova que precise recortar por escopo usa `atorDaRota` no controller +
 `escopoDe(usuarioId, perfil)` no service, com o `EXISTS` no `WHERE` — ver "Escopo no
@@ -155,6 +157,53 @@ OS é da solicitação, não de um lugar.
   erro→status, vírgula no `status`, filtros chegando no service, ator sempre do token).
   ⚠️ O teste do controller monta a query com `url.Values`, não string crua:
   `httptest.NewRequest` **panica** com o espaço de `"Em Andamento"` sem encoding.
+
+## Indicadores de máquina (`GET /indicadores/maquinas/:id`, feito)
+
+O Painel de Indicadores do Gestor (`DashboardGestor`, a ação rápida "Indicadores"):
+Horas Parada, MTTR, MTBF e Custo Total da máquina, mais a rosca de paradas por tipo de
+defeito e as barras de custo mensal dos últimos 6 meses. Tudo sai do histórico de OS
+**encerradas** daquela máquina — `ListarHistoricoOsDaMaquina`, uma linha por OS.
+
+⚠️ **Hoje o painel responde só zeros, e isso está certo.** Nada preenche
+`os_encerramento`/`os_custo` ainda: quem vai fazer isso é o ciclo de vida da OS (fase 2,
+`/encerrar` e `/custo`). O endpoint está pronto e testado contra linhas inseridas na mão
+— quando a fase 2 existir, os números aparecem sozinhos, sem tocar aqui.
+
+- **A agregação é em Go, não no `SELECT`** (`MontarIndicadoresMaquina`, em
+  `internal/model/indicadorMaquina.go`). Seis grandezas seriam três `GROUP BY` numa
+  query só, e o MTBF (média do intervalo entre aberturas) ainda pediria `LAG`. Em Go são
+  três laços sobre uma lista que cabe na memória, e a matemática fica testável **sem
+  Postgres** (`internal/model/indicadorMaquina_test.go`). Mesmo espírito do `custoTotal`
+  de `ListarOrdensServico`, que também é somado no model.
+- **O `JOIN os_encerramento` É o filtro de "concluída"** — a linha só existe depois que o
+  Técnico encerrou (`uq_encerramento_os`) e não há reabertura no modelo. `status =
+  'Concluída'` seria o espelho denormalizado da mesma coisa; se um dia divergirem, manda
+  a linha de encerramento.
+- ⚠️ **Nulo conta como ZERO aqui, o oposto do que a listagem faz.** Em
+  `GET /ordens-servico` `horas_parada` nula vira `null` e a tela escreve "Não se aplica";
+  num gráfico não dá pra desenhar ausência. **Menos no MTTR**: OS sem `horas_trabalhadas`
+  fica fora do divisor, senão a média ganharia um conserto instantâneo que não aconteceu.
+- ⚠️ **O mês vem pronto do banco, em `America/Sao_Paulo`** (`to_char(... AT TIME ZONE
+  ...)`, mesmo tratamento de `vencida` em `preventiva.sql`): OS encerrada às 22h de 31/08
+  é agosto pro Gestor e setembro pro UTC. Formato `YYYY-MM` porque **ordena como texto** —
+  o `MM/YYYY` do contrato é montado só na hora de responder. Há teste trancando isso.
+- **Máquina fora do escopo é 404, não 200 com zeros.** O escopo entrou como `narg`
+  opcional em **`ObterMaquinaPorID`** (NULL não filtra — é o administrador e todos os
+  chamadores de escrita, que por isso não mudaram uma linha), e o service o chama **antes**
+  da query de histórico. As duas coisas são indistinguíveis pela query sozinha: máquina de
+  outra loja e máquina sem OS encerrada devolvem zero linhas. Mesma lacuna que
+  `ObterSolicitacaoPorID` fechou na fase 1.
+- **Máquina existente e sem histórico devolve zeros com as duas listas montadas** —
+  `porTipoDefeito` sempre com os dois tipos (a rosca tem legenda fixa; fatia que some é
+  lida como "não existe esse defeito") e `porMes` como array vazio, nunca `null`.
+- Mora no `OrdemServicoService`/`OrdemServicoController`, não num service próprio: tudo
+  que lê é histórico de OS. A URL é `/indicadores/...` e não `/maquinas/:id/indicadores`
+  porque é a que o front já chama.
+- Testado: `internal/model/indicadorMaquina_test.go` (a matemática, sem banco: MTTR
+  ignorando nulo, MTBF precisando de duas OS, corte de 6 meses com meses fora de ordem) e
+  `internal/service/indicadorIntegracao_test.go` (a query contra Postgres: OS aberta não
+  entra, os dois relógios, o mês em BRT, escopo → 404, administrador sem escopo).
 
 ## Notificação de solicitação por WhatsApp (feito — infra, código e wiring; falta o chip)
 
