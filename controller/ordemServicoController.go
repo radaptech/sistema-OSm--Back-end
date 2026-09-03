@@ -18,6 +18,15 @@ import (
 type OrdemServicoServiceInterface interface {
 	ListarOrdensServico(ctx context.Context, tenantId, usuarioId int64, perfil string, filtros service.FiltrosOrdemServico) ([]model.OrdemServico, error)
 	ObterIndicadoresDaMaquina(ctx context.Context, tenantId, maquinaId, usuarioId int64, perfil string) (model.IndicadoresMaquina, error)
+	// Ciclo de vida da OS (fase 2) -- todo método aqui recebe atorId como o
+	// TÉCNICO do token, nunca do corpo (mesmo motivo do resto do sistema): é
+	// o service que confere que atorId é o dono da OS, devolvendo
+	// ErrNaoEncontrado quando não é (ver a nota em ObterOrdemServicoPorID).
+	Iniciar(ctx context.Context, tenantId, atorId, ordemServicoId int64) (model.OrdemServico, error)
+	Pausar(ctx context.Context, tenantId, atorId, ordemServicoId int64, motivo string) (model.OrdemServico, error)
+	Retomar(ctx context.Context, tenantId, atorId, ordemServicoId int64) (model.OrdemServico, error)
+	AcionarTerceiro(ctx context.Context, tenantId, atorId, ordemServicoId, empresaTerceirizadaId int64) (model.OrdemServico, error)
+	Encerrar(ctx context.Context, tenantId, atorId, ordemServicoId int64, payload model.EncerramentoOrdemServicoPayload) (model.OrdemServico, error)
 }
 
 // OrdemServicoController não guarda bucket nenhum, diferente de
@@ -208,5 +217,227 @@ func (o *OrdemServicoController) Indicadores() gin.HandlerFunc {
 		}
 
 		ctx.JSON(http.StatusOK, indicadores)
+	}
+}
+
+// Iniciar é POST /ordens-servico/:id/iniciar -- Aberta -> Em Andamento.
+// Sem corpo. 200, não 201: atualiza uma OS que já existe (quem cria é
+// SolicitacaoController.AbrirOS), mesmo critério de Rejeitar.
+func (o *OrdemServicoController) Iniciar() gin.HandlerFunc {
+
+	return func(ctx *gin.Context) {
+
+		id, ok := idDaRota(ctx)
+		if !ok {
+			return
+		}
+
+		tenantId, ok := tenantDaRota(ctx)
+		if !ok {
+			return
+		}
+
+		atorId, _, ok := atorDaRota(ctx)
+		if !ok {
+			return
+		}
+
+		os, err := o.service.Iniciar(ctx.Request.Context(), tenantId, atorId, id)
+		if err != nil {
+
+			switch {
+			case errors.Is(err, helper.ErrNaoEncontrado):
+				ctx.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+			case errors.Is(err, helper.ErrConflitoIntegridade):
+				ctx.JSON(http.StatusUnprocessableEntity, gin.H{"error": err.Error()})
+			default:
+				log.Printf("iniciar ordem de serviço=%d tenant=%d: %v", id, tenantId, err)
+				ctx.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao iniciar ordem de serviço"})
+			}
+			return
+		}
+
+		ctx.JSON(http.StatusOK, os)
+	}
+}
+
+// Pausar é POST /ordens-servico/:id/pausar -- (Aberta ou Em Andamento) ->
+// Pausada, com `{motivo}` no corpo.
+func (o *OrdemServicoController) Pausar() gin.HandlerFunc {
+
+	return func(ctx *gin.Context) {
+
+		id, ok := idDaRota(ctx)
+		if !ok {
+			return
+		}
+
+		tenantId, ok := tenantDaRota(ctx)
+		if !ok {
+			return
+		}
+
+		atorId, _, ok := atorDaRota(ctx)
+		if !ok {
+			return
+		}
+
+		input, ok := corpoJSON[model.PausaOrdemServicoPayload](ctx)
+		if !ok {
+			return
+		}
+
+		os, err := o.service.Pausar(ctx.Request.Context(), tenantId, atorId, id, input.Motivo)
+		if err != nil {
+
+			switch {
+			case errors.Is(err, helper.ErrValidacao):
+				ctx.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			case errors.Is(err, helper.ErrNaoEncontrado):
+				ctx.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+			case errors.Is(err, helper.ErrConflitoIntegridade):
+				ctx.JSON(http.StatusUnprocessableEntity, gin.H{"error": err.Error()})
+			default:
+				log.Printf("pausar ordem de serviço=%d tenant=%d: %v", id, tenantId, err)
+				ctx.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao pausar ordem de serviço"})
+			}
+			return
+		}
+
+		ctx.JSON(http.StatusOK, os)
+	}
+}
+
+// Retomar é POST /ordens-servico/:id/retomar -- Pausada -> o status que ela
+// tinha antes de pausar. Sem corpo.
+func (o *OrdemServicoController) Retomar() gin.HandlerFunc {
+
+	return func(ctx *gin.Context) {
+
+		id, ok := idDaRota(ctx)
+		if !ok {
+			return
+		}
+
+		tenantId, ok := tenantDaRota(ctx)
+		if !ok {
+			return
+		}
+
+		atorId, _, ok := atorDaRota(ctx)
+		if !ok {
+			return
+		}
+
+		os, err := o.service.Retomar(ctx.Request.Context(), tenantId, atorId, id)
+		if err != nil {
+
+			switch {
+			case errors.Is(err, helper.ErrNaoEncontrado):
+				ctx.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+			case errors.Is(err, helper.ErrConflitoIntegridade):
+				ctx.JSON(http.StatusUnprocessableEntity, gin.H{"error": err.Error()})
+			default:
+				log.Printf("retomar ordem de serviço=%d tenant=%d: %v", id, tenantId, err)
+				ctx.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao retomar ordem de serviço"})
+			}
+			return
+		}
+
+		ctx.JSON(http.StatusOK, os)
+	}
+}
+
+// AcionarTerceiro é POST /ordens-servico/:id/acionar-terceiro -- promove tipo
+// pra 'terceiros', com `{empresaTerceirizadaId}` no corpo. Não muda status de
+// execução (ver a nota no service).
+func (o *OrdemServicoController) AcionarTerceiro() gin.HandlerFunc {
+
+	return func(ctx *gin.Context) {
+
+		id, ok := idDaRota(ctx)
+		if !ok {
+			return
+		}
+
+		tenantId, ok := tenantDaRota(ctx)
+		if !ok {
+			return
+		}
+
+		atorId, _, ok := atorDaRota(ctx)
+		if !ok {
+			return
+		}
+
+		input, ok := corpoJSON[model.AcionamentoTerceiroPayload](ctx)
+		if !ok {
+			return
+		}
+
+		os, err := o.service.AcionarTerceiro(ctx.Request.Context(), tenantId, atorId, id, input.EmpresaTerceirizadaId)
+		if err != nil {
+
+			switch {
+			case errors.Is(err, helper.ErrNaoEncontrado):
+				ctx.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+			case errors.Is(err, helper.ErrConflitoIntegridade):
+				ctx.JSON(http.StatusUnprocessableEntity, gin.H{"error": err.Error()})
+			default:
+				log.Printf("acionar terceiro ordem de serviço=%d tenant=%d: %v", id, tenantId, err)
+				ctx.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao acionar terceiro"})
+			}
+			return
+		}
+
+		ctx.JSON(http.StatusOK, os)
+	}
+}
+
+// Encerrar é POST /ordens-servico/:id/encerrar -- Em Andamento -> Concluída,
+// gravando o que o Técnico apurou e o custo na mesma escrita (ver a nota no
+// service).
+func (o *OrdemServicoController) Encerrar() gin.HandlerFunc {
+
+	return func(ctx *gin.Context) {
+
+		id, ok := idDaRota(ctx)
+		if !ok {
+			return
+		}
+
+		tenantId, ok := tenantDaRota(ctx)
+		if !ok {
+			return
+		}
+
+		atorId, _, ok := atorDaRota(ctx)
+		if !ok {
+			return
+		}
+
+		input, ok := corpoJSON[model.EncerramentoOrdemServicoPayload](ctx)
+		if !ok {
+			return
+		}
+
+		os, err := o.service.Encerrar(ctx.Request.Context(), tenantId, atorId, id, input)
+		if err != nil {
+
+			switch {
+			case errors.Is(err, helper.ErrValidacao):
+				ctx.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			case errors.Is(err, helper.ErrNaoEncontrado):
+				ctx.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+			case errors.Is(err, helper.ErrConflitoIntegridade):
+				ctx.JSON(http.StatusUnprocessableEntity, gin.H{"error": err.Error()})
+			default:
+				log.Printf("encerrar ordem de serviço=%d tenant=%d: %v", id, tenantId, err)
+				ctx.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao encerrar ordem de serviço"})
+			}
+			return
+		}
+
+		ctx.JSON(http.StatusOK, os)
 	}
 }

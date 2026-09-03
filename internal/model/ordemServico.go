@@ -56,6 +56,48 @@ type CustoOrdemServico struct {
 	LancadoEm                *config.DataBr `json:"lancadoEm"`
 }
 
+// EncerramentoOrdemServicoPayload é o corpo de POST /ordens-servico/:id/encerrar
+// -- espelha EncerramentoOrdemServicoPayload do front, menos OrdemServicoId
+// (vem do `:id` da rota, mesmo padrão de AberturaOrdemServicoPayload). Grava
+// os_encerramento E os_custo na mesma escrita (docs/modelagem, 2.3 revisão 4)
+// -- por isso carrega os dois custos aqui, não só o que o Técnico apurou.
+//
+// `binding:"gte=0"` em vez de `required` nos dois custos: 0 é valor de
+// negócio legítimo (ck_custo_nao_negativo permite, ex. peça em garantia), e
+// `required` do validator rejeita zero em campo numérico -- trataria um
+// conserto de graça como campo vazio.
+//
+// CustoHoraTecnico continua *float64 (ver CustoOrdemServico acima): só existe
+// em 'maquinario' (ck_custo_por_tipo), e o service -- que já leu o tipo da OS
+// -- é quem confere que a presença bate com o tipo, não este binding.
+type EncerramentoOrdemServicoPayload struct {
+	TipoDefeito       string   `json:"tipoDefeito" binding:"required,oneof=Predial Corretiva"`
+	DefeitoConstatado string   `json:"defeitoConstatado" binding:"required"`
+	CausaRaiz         string   `json:"causaRaiz" binding:"required"`
+	Solucao           string   `json:"solucao" binding:"required"`
+	CustoHoraTecnico  *float64 `json:"custoHoraTecnico" binding:"omitempty,gte=0"`
+	CustoManutencao   float64  `json:"custoManutencao" binding:"gte=0"`
+}
+
+// PausaOrdemServicoPayload é o corpo de POST /ordens-servico/:id/pausar --
+// mesmo padrão de RejeicaoSolicitacaoPayload (`{motivo}`). O `binding:"required"`
+// aqui só barra ausente/vazio; espaço em branco ("   ") passa pelo bind e cai
+// no `campoObrigatorio` do service, que apara antes de validar -- mesma
+// divisão de responsabilidade de Rejeitar.
+type PausaOrdemServicoPayload struct {
+	Motivo string `json:"motivo" binding:"required"`
+}
+
+// AcionamentoTerceiroPayload é o corpo de
+// POST /ordens-servico/:id/acionar-terceiro -- espelha AcionamentoTerceiroPayload
+// do front, menos OrdemServicoId (vem do `:id`). `gt=0` mesmo padrão de
+// TecnicoId em AberturaOrdemServicoPayload: id de banco começa em 1, um zero
+// aqui já é corpo mal formado, não vale gastar uma ida ao banco (a FK
+// composta) só pra descobrir isso.
+type AcionamentoTerceiroPayload struct {
+	EmpresaTerceirizadaId int64 `json:"empresaTerceirizadaId" binding:"required,gt=0"`
+}
+
 // OrdemServico espelha OrdemServico do front (ordemServico.ts) e serve os DOIS
 // caminhos que devolvem uma OS: GET /ordens-servico (completa) e
 // POST /solicitacoes/:id/abrir-os (recém-criada). Uma struct só, e não duas,
