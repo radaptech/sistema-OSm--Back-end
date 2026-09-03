@@ -305,11 +305,23 @@ FROM maquina m
 JOIN setor s ON s.tenant_id = m.tenant_id AND s.id = m.setor_id
 JOIN loja  l ON l.tenant_id = s.tenant_id AND l.id = s.loja_id
 WHERE m.id = $1 AND m.tenant_id = $2
+  AND (
+    $3::bigint IS NULL
+    OR EXISTS (
+      SELECT 1
+      FROM usuario_escopo ue
+      LEFT JOIN usuario_escopo_setor ues ON ues.escopo_id = ue.id
+      WHERE ue.usuario_id = $3
+        AND ue.loja_id = s.loja_id
+        AND (ue.acesso_total_setores OR ues.setor_id = m.setor_id)
+    )
+  )
 `
 
 type ObterMaquinaPorIDParams struct {
-	ID       int64
-	TenantID int64
+	ID              int64
+	TenantID        int64
+	EscopoUsuarioID *int64
 }
 
 type ObterMaquinaPorIDRow struct {
@@ -337,8 +349,16 @@ type ObterMaquinaPorIDRow struct {
 // Os JOINs são INNER e não LEFT de propósito: setor_id e setor.loja_id são
 // NOT NULL com FK, então não existe máquina sem setor nem setor sem loja --
 // LEFT só faria o Go receber ponteiro em campo que nunca é nulo.
+//
+// O escopo é OPCIONAL aqui, diferente de ListarMaquinas: NULL não filtra, e é
+// o que os chamadores de escrita mandam (CadastrarMaquina/AtualizarMaquina
+// releem a linha que acabaram de gravar, o job de preventiva não tem sessão) e
+// também o administrador, que não tem escopo. Quem passa o usuário é
+// GET /indicadores/maquinas/:id, aberto ao Gestor: sem o EXISTS ele leria
+// custo e indisponibilidade de máquina de outra loja enumerando id -- mesma
+// lacuna que ObterSolicitacaoPorID fechou na fase 1.
 func (q *Queries) ObterMaquinaPorID(ctx context.Context, arg ObterMaquinaPorIDParams) (ObterMaquinaPorIDRow, error) {
-	row := q.db.QueryRow(ctx, obterMaquinaPorID, arg.ID, arg.TenantID)
+	row := q.db.QueryRow(ctx, obterMaquinaPorID, arg.ID, arg.TenantID, arg.EscopoUsuarioID)
 	var i ObterMaquinaPorIDRow
 	err := row.Scan(
 		&i.ID,

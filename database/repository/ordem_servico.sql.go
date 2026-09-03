@@ -11,8 +11,420 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
-const listarOrdensServico = `-- name: ListarOrdensServico :many
+const acionarTerceiro = `-- name: AcionarTerceiro :one
+UPDATE ordem_servico
+SET tipo = 'terceiros',
+    empresa_terceirizada_id = $1,
+    terceiro_acionado_em = now()
+WHERE id = $2 AND tenant_id = $3
+  AND tipo <> 'terceiros' AND status <> 'Concluída'
+RETURNING id, tenant_id, solicitacao_id, tipo, tecnico_id, empresa_terceirizada_id, terceiro_acionado_em, aberta_por_id, afeta_producao, status, aberta_em, iniciada_em, criado_em, urgencia
+`
 
+type AcionarTerceiroParams struct {
+	EmpresaTerceirizadaID *int64
+	ID                    int64
+	TenantID              int64
+}
+
+// POST /ordens-servico/:id/acionar-terceiro -- promove tipo pra 'terceiros'
+// e grava a empresa + o instante do encaminhamento. Não mexe em `status`
+// de propósito (docs/modelagem, 1.4.2): acionar não é uma transição de
+// execução, a OS continua no ciclo iniciar/pausar/retomar/encerrar por
+// cima -- se o atendimento vai demorar, quem sinaliza isso é `pausar`.
+//
+// `tipo <> 'terceiros'` no WHERE trava dois casos: (1) idempotência -- não
+// deixa acionar duas vezes a mesma OS, o que pisaria em
+// terceiro_acionado_em sem avisar; (2) trg_os_tipo_promocao só barra
+// DEMOTE (tipo <> 'terceiros' tentando virar outra coisa), uma promoção
+// repetida passaria batida pra ele, então a trava tem que estar aqui.
+// `status <> 'Concluída'` porque não faz sentido terceirizar uma OS que já
+// encerrou.
+//
+// empresa_terceirizada_id não é checado aqui: a FK composta
+// (tenant_id, empresa_terceirizada_id) -> empresa_terceirizada garante
+// tenant certo e existência ao mesmo tempo -- violação vira
+// ErrConflitoIntegridade via TraduzErroPostgres, mesmo caminho de
+// CriarOrdemServicoDeSolicitacao com tecnico_id inexistente.
+func (q *Queries) AcionarTerceiro(ctx context.Context, arg AcionarTerceiroParams) (OrdemServico, error) {
+	row := q.db.QueryRow(ctx, acionarTerceiro, arg.EmpresaTerceirizadaID, arg.ID, arg.TenantID)
+	var i OrdemServico
+	err := row.Scan(
+		&i.ID,
+		&i.TenantID,
+		&i.SolicitacaoID,
+		&i.Tipo,
+		&i.TecnicoID,
+		&i.EmpresaTerceirizadaID,
+		&i.TerceiroAcionadoEm,
+		&i.AbertaPorID,
+		&i.AfetaProducao,
+		&i.Status,
+		&i.AbertaEm,
+		&i.IniciadaEm,
+		&i.CriadoEm,
+		&i.Urgencia,
+	)
+	return i, err
+}
+
+const criarCusto = `-- name: CriarCusto :one
+INSERT INTO os_custo (
+    tenant_id, ordem_servico_id, tipo,
+    custo_hora_tecnico, custo_manutencao, lancado_por_id
+) VALUES (
+    $1, $2, $3,
+    $4, $5, $6
+)
+RETURNING id, tenant_id, ordem_servico_id, tipo, custo_hora_tecnico, custo_manutencao, numero_nota_fiscal, serie_nota_fiscal, descricao_servico_terceiro, lancado_por_id, lancado_em
+`
+
+type CriarCustoParams struct {
+	TenantID         int64
+	OrdemServicoID   int64
+	Tipo             TipoOs
+	CustoHoraTecnico pgtype.Float8
+	CustoManutencao  pgtype.Float8
+	LancadoPorID     int64
+}
+
+// Nasce na mesma transação do encerramento (docs/modelagem, 2.3 revisão 4:
+// "os dois momentos deixaram de ser sequenciais"), lancado_por_id = o
+// próprio Técnico -- o Administrador só CORRIGE depois, em
+// POST /ordens-servico/:id/custo (fase 2, fora daqui), inclusive as três
+// colunas de nota fiscal, que por isso nem entram neste INSERT (ficam
+// NULL, satisfeito por ck_custo_por_tipo quando tipo <> 'terceiros' --
+// e quando É 'terceiros', são opcionais mesmo até o Administrador
+// conferir contra a nota).
+//
+// custo_hora_tecnico é quem o service decide se manda ou NULL
+// (pgtype.Float8{Valid: false}): só existe em 'maquinario'
+// (ck_custo_por_tipo), reparo e terceiros não cobram hora técnica. Os dois
+// (e custo_manutencao, sempre obrigatório) já saem tipados
+// `pgtype.Float8` pelos overrides de coluna em sqlc.yaml -- não
+// `shopspring/decimal`, que sairia como string no JSON contra um front
+// que tipa `number` (ver a nota longa no override de `numeric` no
+// sqlc.yaml, que por isso continua morto de propósito).
+func (q *Queries) CriarCusto(ctx context.Context, arg CriarCustoParams) (OsCusto, error) {
+	row := q.db.QueryRow(ctx, criarCusto,
+		arg.TenantID,
+		arg.OrdemServicoID,
+		arg.Tipo,
+		arg.CustoHoraTecnico,
+		arg.CustoManutencao,
+		arg.LancadoPorID,
+	)
+	var i OsCusto
+	err := row.Scan(
+		&i.ID,
+		&i.TenantID,
+		&i.OrdemServicoID,
+		&i.Tipo,
+		&i.CustoHoraTecnico,
+		&i.CustoManutencao,
+		&i.NumeroNotaFiscal,
+		&i.SerieNotaFiscal,
+		&i.DescricaoServicoTerceiro,
+		&i.LancadoPorID,
+		&i.LancadoEm,
+	)
+	return i, err
+}
+
+const criarEncerramento = `-- name: CriarEncerramento :one
+INSERT INTO os_encerramento (
+    tenant_id, ordem_servico_id, tipo, tipo_defeito,
+    encerrado_por_id, defeito_constatado, causa_raiz, solucao
+) VALUES (
+    $1, $2, $3, $4,
+    $5, $6, $7, $8
+)
+RETURNING id, tenant_id, ordem_servico_id, tipo, tipo_defeito, encerrado_por_id, data_fim, defeito_constatado, causa_raiz, solucao, criado_em
+`
+
+type CriarEncerramentoParams struct {
+	TenantID          int64
+	OrdemServicoID    int64
+	Tipo              TipoOs
+	TipoDefeito       TipoDefeito
+	EncerradoPorID    int64
+	DefeitoConstatado string
+	CausaRaiz         string
+	Solucao           string
+}
+
+// Grava o que o Técnico apurou (docs/modelagem, 1.4.3 -- universal pros
+// três tipos, inclusive terceiros: quem recebe o serviço da empresa
+// externa continua sendo ele). `tipo` vem do RETURNING de
+// EncerrarOrdemServico acima, nunca escolhido aqui de novo. data_fim sai
+// do DEFAULT now() -- é o instante que ListarOrdensServico projeta como
+// `dataFim` e vw_os_horas usa pra fechar o relógio de horas trabalhadas.
+func (q *Queries) CriarEncerramento(ctx context.Context, arg CriarEncerramentoParams) (OsEncerramento, error) {
+	row := q.db.QueryRow(ctx, criarEncerramento,
+		arg.TenantID,
+		arg.OrdemServicoID,
+		arg.Tipo,
+		arg.TipoDefeito,
+		arg.EncerradoPorID,
+		arg.DefeitoConstatado,
+		arg.CausaRaiz,
+		arg.Solucao,
+	)
+	var i OsEncerramento
+	err := row.Scan(
+		&i.ID,
+		&i.TenantID,
+		&i.OrdemServicoID,
+		&i.Tipo,
+		&i.TipoDefeito,
+		&i.EncerradoPorID,
+		&i.DataFim,
+		&i.DefeitoConstatado,
+		&i.CausaRaiz,
+		&i.Solucao,
+		&i.CriadoEm,
+	)
+	return i, err
+}
+
+const criarPausa = `-- name: CriarPausa :one
+INSERT INTO os_pausa (ordem_servico_id, status_anterior, motivo)
+VALUES ($1, $2, $3)
+RETURNING id, ordem_servico_id, status_anterior, motivo, pausada_em, retomada_em
+`
+
+type CriarPausaParams struct {
+	OrdemServicoID int64
+	StatusAnterior StatusOs
+	Motivo         string
+}
+
+// Registra o intervalo parado (docs/modelagem, "pausa é histórico, não
+// campo sobrescrito"): pausada_em sai do DEFAULT now(), retomada_em fica
+// NULL até FecharPausaAberta (retomar). uq_pausa_aberta (índice único
+// parcial em ordem_servico_id WHERE retomada_em IS NULL) garante no máximo
+// uma pausa aberta por OS -- se PausarOrdemServico acima já travou o status
+// em 'Pausada', não deveria haver corrida até aqui, mas a violação, se
+// acontecer, vira ErrDadoDuplicado via TraduzErroPostgres, nunca 500.
+func (q *Queries) CriarPausa(ctx context.Context, arg CriarPausaParams) (OsPausa, error) {
+	row := q.db.QueryRow(ctx, criarPausa, arg.OrdemServicoID, arg.StatusAnterior, arg.Motivo)
+	var i OsPausa
+	err := row.Scan(
+		&i.ID,
+		&i.OrdemServicoID,
+		&i.StatusAnterior,
+		&i.Motivo,
+		&i.PausadaEm,
+		&i.RetomadaEm,
+	)
+	return i, err
+}
+
+const encerrarOrdemServico = `-- name: EncerrarOrdemServico :one
+UPDATE ordem_servico
+SET status = 'Concluída'
+WHERE id = $1 AND tenant_id = $2 AND status = 'Em Andamento'
+RETURNING id, tenant_id, solicitacao_id, tipo, tecnico_id, empresa_terceirizada_id, terceiro_acionado_em, aberta_por_id, afeta_producao, status, aberta_em, iniciada_em, criado_em, urgencia
+`
+
+type EncerrarOrdemServicoParams struct {
+	ID       int64
+	TenantID int64
+}
+
+// POST /ordens-servico/:id/encerrar -- Em Andamento -> Concluída. Só esse
+// estado de origem: front-end/PainelTecnico só oferece "Finalizar" quando
+// statusExecucao === 'Em Andamento' (uma OS Pausada tem que ser retomada
+// primeiro, uma Aberta nem começou). RETURNING * devolve o `tipo` atual da
+// OS (não muda aqui) -- é esse valor que o service repassa pra
+// CriarEncerramento e CriarCusto abaixo, sem reler a linha: tipo pode já
+// estar 'terceiros' se AcionarTerceiro rodou antes, e as duas FKs
+// compostas (fk_encerramento_os_tipo, fk_custo_os_tipo) exigem o par
+// (ordem_servico_id, tipo) bater exatamente com o da OS.
+func (q *Queries) EncerrarOrdemServico(ctx context.Context, arg EncerrarOrdemServicoParams) (OrdemServico, error) {
+	row := q.db.QueryRow(ctx, encerrarOrdemServico, arg.ID, arg.TenantID)
+	var i OrdemServico
+	err := row.Scan(
+		&i.ID,
+		&i.TenantID,
+		&i.SolicitacaoID,
+		&i.Tipo,
+		&i.TecnicoID,
+		&i.EmpresaTerceirizadaID,
+		&i.TerceiroAcionadoEm,
+		&i.AbertaPorID,
+		&i.AfetaProducao,
+		&i.Status,
+		&i.AbertaEm,
+		&i.IniciadaEm,
+		&i.CriadoEm,
+		&i.Urgencia,
+	)
+	return i, err
+}
+
+const fecharPausaAberta = `-- name: FecharPausaAberta :one
+UPDATE os_pausa
+SET retomada_em = now()
+WHERE id = $1 AND retomada_em IS NULL
+RETURNING id, ordem_servico_id, status_anterior, motivo, pausada_em, retomada_em
+`
+
+// Fecha a pausa que ObterPausaAbertaDaOrdemServico acabou de achar.
+// `retomada_em IS NULL` no WHERE (e não só `id`) é a mesma rede de corrida
+// das outras transições: se a linha já foi fechada entre a leitura e aqui,
+// RETURNING devolve pgx.ErrNoRows em vez de fechar de novo calado.
+func (q *Queries) FecharPausaAberta(ctx context.Context, id int64) (OsPausa, error) {
+	row := q.db.QueryRow(ctx, fecharPausaAberta, id)
+	var i OsPausa
+	err := row.Scan(
+		&i.ID,
+		&i.OrdemServicoID,
+		&i.StatusAnterior,
+		&i.Motivo,
+		&i.PausadaEm,
+		&i.RetomadaEm,
+	)
+	return i, err
+}
+
+const iniciarOrdemServico = `-- name: IniciarOrdemServico :one
+UPDATE ordem_servico
+SET status = 'Em Andamento', iniciada_em = now()
+WHERE id = $1 AND tenant_id = $2 AND status = 'Aberta'
+RETURNING id, tenant_id, solicitacao_id, tipo, tecnico_id, empresa_terceirizada_id, terceiro_acionado_em, aberta_por_id, afeta_producao, status, aberta_em, iniciada_em, criado_em, urgencia
+`
+
+type IniciarOrdemServicoParams struct {
+	ID       int64
+	TenantID int64
+}
+
+// POST /ordens-servico/:id/iniciar -- Aberta -> Em Andamento, grava
+// iniciada_em. O `status = 'Aberta'` no WHERE é a rede contra corrida: o
+// service já leu o estado via ObterOrdemServicoPorID e decidiu que a
+// transição vale, mas entre a leitura e este UPDATE outra request pode ter
+// mudado a linha (duas abas do mesmo Técnico). RETURNING * devolve
+// pgx.ErrNoRows quando a corrida perde, e o service traduz isso pra
+// ErrConflitoIntegridade -- nunca 500.
+func (q *Queries) IniciarOrdemServico(ctx context.Context, arg IniciarOrdemServicoParams) (OrdemServico, error) {
+	row := q.db.QueryRow(ctx, iniciarOrdemServico, arg.ID, arg.TenantID)
+	var i OrdemServico
+	err := row.Scan(
+		&i.ID,
+		&i.TenantID,
+		&i.SolicitacaoID,
+		&i.Tipo,
+		&i.TecnicoID,
+		&i.EmpresaTerceirizadaID,
+		&i.TerceiroAcionadoEm,
+		&i.AbertaPorID,
+		&i.AfetaProducao,
+		&i.Status,
+		&i.AbertaEm,
+		&i.IniciadaEm,
+		&i.CriadoEm,
+		&i.Urgencia,
+	)
+	return i, err
+}
+
+const listarHistoricoOsDaMaquina = `-- name: ListarHistoricoOsDaMaquina :many
+SELECT
+    os.aberta_em,
+    e.tipo_defeito,
+    to_char(e.data_fim AT TIME ZONE 'America/Sao_Paulo', 'YYYY-MM') AS mes_encerramento,
+    h.horas_parada,
+    h.horas_trabalhadas,
+    c.custo_hora_tecnico,
+    c.custo_manutencao
+FROM ordem_servico os
+JOIN solicitacao_os s   ON s.tenant_id = os.tenant_id AND s.id = os.solicitacao_id
+JOIN os_encerramento e  ON e.tenant_id = os.tenant_id AND e.ordem_servico_id = os.id
+JOIN vw_os_horas h      ON h.ordem_servico_id = os.id
+LEFT JOIN os_custo c    ON c.tenant_id = os.tenant_id AND c.ordem_servico_id = os.id
+WHERE os.tenant_id = $1
+  AND s.maquina_id = $2::bigint
+ORDER BY os.aberta_em
+`
+
+type ListarHistoricoOsDaMaquinaParams struct {
+	TenantID  int64
+	MaquinaID int64
+}
+
+type ListarHistoricoOsDaMaquinaRow struct {
+	AbertaEm         pgtype.Timestamptz
+	TipoDefeito      TipoDefeito
+	MesEncerramento  string
+	HorasParada      pgtype.Float8
+	HorasTrabalhadas pgtype.Float8
+	CustoHoraTecnico pgtype.Float8
+	CustoManutencao  pgtype.Float8
+}
+
+// GET /indicadores/maquinas/:id -- a matéria-prima do Painel de Indicadores do
+// Gestor (front DashboardGestor). Uma linha por OS encerrada da máquina; as
+// seis grandezas do painel (Horas Parada, MTTR, MTBF, Custo Total, rosca por
+// tipo de defeito e barras de custo mensal) são somadas em
+// MontarIndicadoresMaquina, não aqui.
+//
+// Agregar no SELECT custaria seis expressões e três GROUP BY diferentes numa
+// query só, e MTBF (média do intervalo entre aberturas) ainda pediria LAG --
+// em Go são três laços sobre uma lista que já cabe na memória, testáveis sem
+// Postgres. Mesmo espírito do custoTotal de ListarOrdensServico, que também é
+// somado no model.
+//
+// O JOIN com os_encerramento É o filtro de "concluída": a linha só existe
+// quando o Técnico encerrou (uq_encerramento_os, data_fim NOT NULL) e não há
+// reabertura no modelo. `os.status = 'Concluída'` seria o espelho
+// denormalizado da mesma coisa -- e, se um dia divergirem, é a linha de
+// encerramento que manda.
+//
+// Sem escopo no WHERE aqui, e não é esquecimento: quem valida o acesso é o
+// ObterMaquinaPorID que o service chama ANTES, com escopo_usuario_id. Máquina
+// fora do escopo nem chega nesta query -- vira 404 lá em cima.
+//
+// ⚠️ horas_* e custo_* CRUAS, sem ::float8 -- ver a nota longa em
+// ListarOrdensServico e no sqlc.yaml: o cast quebra o override que as
+// transforma em pgtype.Float8, e o Scan estoura no primeiro NULL (custo ainda
+// não lançado, ou máquina que não parou).
+//
+// O mês sai pronto do banco, em America/Sao_Paulo, mesmo tratamento de
+// `vencida` em preventiva.sql: uma OS encerrada às 22h de 31/08 é agosto pro
+// Gestor e setembro pro UTC. Formato YYYY-MM porque ordena como texto -- o
+// 'MM/YYYY' do contrato é montado na hora de responder.
+// Ascendente porque MTBF é a média do intervalo entre aberturas consecutivas:
+// ordenado aqui, o Go só percorre. Trocar para DESC quebra o indicador calado.
+func (q *Queries) ListarHistoricoOsDaMaquina(ctx context.Context, arg ListarHistoricoOsDaMaquinaParams) ([]ListarHistoricoOsDaMaquinaRow, error) {
+	rows, err := q.db.Query(ctx, listarHistoricoOsDaMaquina, arg.TenantID, arg.MaquinaID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListarHistoricoOsDaMaquinaRow
+	for rows.Next() {
+		var i ListarHistoricoOsDaMaquinaRow
+		if err := rows.Scan(
+			&i.AbertaEm,
+			&i.TipoDefeito,
+			&i.MesEncerramento,
+			&i.HorasParada,
+			&i.HorasTrabalhadas,
+			&i.CustoHoraTecnico,
+			&i.CustoManutencao,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listarOrdensServico = `-- name: ListarOrdensServico :many
 SELECT
     os.id, os.tenant_id, os.solicitacao_id, os.tipo, os.tecnico_id, os.empresa_terceirizada_id, os.terceiro_acionado_em, os.aberta_por_id, os.afeta_producao, os.status, os.aberta_em, os.iniciada_em, os.criado_em, os.urgencia,
     s.descricao,
@@ -60,27 +472,35 @@ LEFT JOIN os_custo c               ON c.tenant_id = os.tenant_id AND c.ordem_ser
 LEFT JOIN usuario lanc             ON lanc.tenant_id = c.tenant_id AND lanc.id = c.lancado_por_id
 LEFT JOIN vw_os_horas h            ON h.ordem_servico_id = os.id
 WHERE os.tenant_id = $1
+  -- ` + "`" + `id` + "`" + ` não é filtro de GET /ordens-servico (não existe em
+  -- ParametrosListagemOrdensServico, front-end/servicoOrdensServico.ts) --
+  -- é OrdemServicoService.Iniciar/Pausar/Retomar/AcionarTerceiro/Encerrar
+  -- que chama esta query direto (fora do método ListarOrdensServico, sem
+  -- passar por FiltrosOrdemServico) pra remontar a OrdemServico completa e
+  -- denormalizada depois de escrever, dentro da mesma transação -- reaproveita
+  -- o SELECT com todos os JOINs em vez de duplicá-lo numa query só pra isso.
+  AND ($2::bigint IS NULL OR os.id = $2)
   AND (
-    $2::boolean IS NULL
-    OR (os.status = 'Concluída' AND c.id IS NOT NULL) = $2
+    $3::boolean IS NULL
+    OR (os.status = 'Concluída' AND c.id IS NOT NULL) = $3
   )
-  AND ($3::text[] IS NULL OR os.status = ANY($3::text[]::status_os[]))
-  AND ($4::tipo_os IS NULL OR os.tipo = $4)
-  AND ($5::bigint IS NULL OR sc.loja_id = $5)
-  AND ($6::bigint IS NULL OR os.tecnico_id = $6)
+  AND ($4::text[] IS NULL OR os.status = ANY($4::text[]::status_os[]))
+  AND ($5::tipo_os IS NULL OR os.tipo = $5)
+  AND ($6::bigint IS NULL OR sc.loja_id = $6)
+  AND ($7::bigint IS NULL OR os.tecnico_id = $7)
   AND (
-    $7::text IS NULL
-    OR s.descricao ILIKE '%' || $7 || '%'
-    OR m.nome ILIKE '%' || $7 || '%'
-    OR s.item_descricao ILIKE '%' || $7 || '%'
+    $8::text IS NULL
+    OR s.descricao ILIKE '%' || $8 || '%'
+    OR m.nome ILIKE '%' || $8 || '%'
+    OR s.item_descricao ILIKE '%' || $8 || '%'
   )
   AND (
-    $8::bigint IS NULL
+    $9::bigint IS NULL
     OR EXISTS (
       SELECT 1
       FROM usuario_escopo ue
       LEFT JOIN usuario_escopo_setor ues ON ues.escopo_id = ue.id
-      WHERE ue.usuario_id = $8
+      WHERE ue.usuario_id = $9
         AND ue.loja_id = sc.loja_id
         AND (ue.acesso_total_setores OR ues.setor_id = s.setor_id)
     )
@@ -90,6 +510,7 @@ ORDER BY os.aberta_em DESC
 
 type ListarOrdensServicoParams struct {
 	TenantID        int64
+	ID              *int64
 	Finalizada      *bool
 	Status          []string
 	Tipo            *TipoOs
@@ -146,15 +567,6 @@ type ListarOrdensServicoRow struct {
 	LancadoPorNome           *string
 }
 
-// ==========================================================================
-// Ordem de serviço -- leitura.
-//
-// A escrita mora em solicitacao_os.sql (CriarOrdemServicoDeSolicitacao, o
-// POST /solicitacoes/:id/abrir-os): a OS nasce da aprovação do Gestor, não
-// de um POST /ordens-servico. Este arquivo é só o outro lado -- a listagem
-// que os três painéis consomem, e mais tarde o ciclo de vida
-// (iniciar/pausar/encerrar/custo, fase 2).
-// ==========================================================================
 // GET /ordens-servico -- um endpoint para os três painéis, o que muda é o
 // filtro (front-end/src/servicos/servicoOrdensServico.ts):
 //
@@ -223,6 +635,7 @@ type ListarOrdensServicoRow struct {
 func (q *Queries) ListarOrdensServico(ctx context.Context, arg ListarOrdensServicoParams) ([]ListarOrdensServicoRow, error) {
 	rows, err := q.db.Query(ctx, listarOrdensServico,
 		arg.TenantID,
+		arg.ID,
 		arg.Finalizada,
 		arg.Status,
 		arg.Tipo,
@@ -294,6 +707,93 @@ func (q *Queries) ListarOrdensServico(ctx context.Context, arg ListarOrdensServi
 	return items, nil
 }
 
+const obterOrdemServicoPorID = `-- name: ObterOrdemServicoPorID :one
+
+SELECT id, tenant_id, solicitacao_id, tipo, tecnico_id, empresa_terceirizada_id, terceiro_acionado_em, aberta_por_id, afeta_producao, status, aberta_em, iniciada_em, criado_em, urgencia FROM ordem_servico
+WHERE id = $1 AND tenant_id = $2
+`
+
+type ObterOrdemServicoPorIDParams struct {
+	ID       int64
+	TenantID int64
+}
+
+// ==========================================================================
+// Ordem de serviço -- leitura e ciclo de vida.
+//
+// A criação mora em solicitacao_os.sql (CriarOrdemServicoDeSolicitacao, o
+// POST /solicitacoes/:id/abrir-os): a OS nasce da aprovação do Gestor, não
+// de um POST /ordens-servico. Este arquivo é a listagem que os três painéis
+// consomem, ObterOrdemServicoPorID (a leitura crua que toda transição usa
+// pra checar dono e status atual antes de escrever) e, a partir daqui, as
+// próprias transições do ciclo de vida
+// (iniciar/pausar/retomar/acionar-terceiro/encerrar/custo, fase 2).
+// ==========================================================================
+// Leitura crua (`os.*`, sem os JOINs denormalizados de ListarOrdensServico):
+// todo método de transição (Iniciar/Pausar/Retomar/AcionarTerceiro/Encerrar)
+// chama esta query dentro da própria transação, antes de escrever, pra
+// checar duas coisas que o WHERE de cada UPDATE não checa sozinho -- ele só
+// devolve 0 linhas, sem dizer POR QUÊ: (1) TecnicoID bate com o ator do
+// token (dono da OS -- senão ErrNaoEncontrado, 404, nunca 403: mesmo
+// critério de "existe mas você não pode ver" de Indicadores/escopo, 403 é
+// só perfil errado, e o perfil aqui está certo) e (2) Status está no
+// estado que a transição espera (senão ErrConflitoIntegridade, 409 --
+// nunca 500).
+//
+// Sem escopo de loja/setor no WHERE: quem chama já é o técnico dono
+// (checagem 1 acima) ou o administrador (sem escopo, mesmo critério do
+// resto do sistema) -- a rota nunca é aberta a gestor/solicitante.
+func (q *Queries) ObterOrdemServicoPorID(ctx context.Context, arg ObterOrdemServicoPorIDParams) (OrdemServico, error) {
+	row := q.db.QueryRow(ctx, obterOrdemServicoPorID, arg.ID, arg.TenantID)
+	var i OrdemServico
+	err := row.Scan(
+		&i.ID,
+		&i.TenantID,
+		&i.SolicitacaoID,
+		&i.Tipo,
+		&i.TecnicoID,
+		&i.EmpresaTerceirizadaID,
+		&i.TerceiroAcionadoEm,
+		&i.AbertaPorID,
+		&i.AfetaProducao,
+		&i.Status,
+		&i.AbertaEm,
+		&i.IniciadaEm,
+		&i.CriadoEm,
+		&i.Urgencia,
+	)
+	return i, err
+}
+
+const obterPausaAbertaDaOrdemServico = `-- name: ObterPausaAbertaDaOrdemServico :one
+SELECT id, ordem_servico_id, status_anterior, motivo, pausada_em, retomada_em FROM os_pausa
+WHERE ordem_servico_id = $1 AND retomada_em IS NULL
+`
+
+// POST /ordens-servico/:id/retomar chama esta query pra saber pra ONDE
+// voltar: status_anterior aqui é 'Aberta' ou 'Em Andamento' (quem pausou
+// estava num desses dois -- ver PausarOrdemServico), nunca fixo. uq_pausa_aberta
+// garante no máximo uma linha com retomada_em NULL por OS.
+//
+// Sem tenant_id/WHERE de escopo: os_pausa não tem tenant_id (não precisa --
+// pende de ordem_servico, que tem), e quem chama já validou a OS (dono +
+// tenant) via ObterOrdemServicoPorID antes. Nunca chame com um
+// ordem_servico_id que não veio de uma leitura já filtrada, mesmo aviso de
+// ObterPausasDasOrdensServico acima.
+func (q *Queries) ObterPausaAbertaDaOrdemServico(ctx context.Context, ordemServicoID int64) (OsPausa, error) {
+	row := q.db.QueryRow(ctx, obterPausaAbertaDaOrdemServico, ordemServicoID)
+	var i OsPausa
+	err := row.Scan(
+		&i.ID,
+		&i.OrdemServicoID,
+		&i.StatusAnterior,
+		&i.Motivo,
+		&i.PausadaEm,
+		&i.RetomadaEm,
+	)
+	return i, err
+}
+
 const obterPausasDasOrdensServico = `-- name: ObterPausasDasOrdensServico :many
 SELECT id, ordem_servico_id, status_anterior, motivo, pausada_em, retomada_em
 FROM os_pausa
@@ -338,4 +838,88 @@ func (q *Queries) ObterPausasDasOrdensServico(ctx context.Context, ordensServico
 		return nil, err
 	}
 	return items, nil
+}
+
+const pausarOrdemServico = `-- name: PausarOrdemServico :one
+UPDATE ordem_servico
+SET status = 'Pausada'
+WHERE id = $1 AND tenant_id = $2
+  AND status IN ('Aberta', 'Em Andamento')
+RETURNING id, tenant_id, solicitacao_id, tipo, tecnico_id, empresa_terceirizada_id, terceiro_acionado_em, aberta_por_id, afeta_producao, status, aberta_em, iniciada_em, criado_em, urgencia
+`
+
+type PausarOrdemServicoParams struct {
+	ID       int64
+	TenantID int64
+}
+
+// POST /ordens-servico/:id/pausar -- (Aberta ou Em Andamento) -> Pausada.
+// Aceita as duas de origem porque o Técnico pode pausar antes mesmo de
+// iniciar (ex.: falta peça, ainda nem começou) -- ck_pausa_status_anterior
+// em os_pausa é quem define o universo válido, aqui só espelha. RETURNING *
+// não devolve o status ANTERIOR (a coluna já vem 'Pausada'); é o service
+// que lê o estado antes de chamar esta query (ObterOrdemServicoPorID) e
+// repassa esse valor pra CriarPausa.status_anterior logo abaixo.
+func (q *Queries) PausarOrdemServico(ctx context.Context, arg PausarOrdemServicoParams) (OrdemServico, error) {
+	row := q.db.QueryRow(ctx, pausarOrdemServico, arg.ID, arg.TenantID)
+	var i OrdemServico
+	err := row.Scan(
+		&i.ID,
+		&i.TenantID,
+		&i.SolicitacaoID,
+		&i.Tipo,
+		&i.TecnicoID,
+		&i.EmpresaTerceirizadaID,
+		&i.TerceiroAcionadoEm,
+		&i.AbertaPorID,
+		&i.AfetaProducao,
+		&i.Status,
+		&i.AbertaEm,
+		&i.IniciadaEm,
+		&i.CriadoEm,
+		&i.Urgencia,
+	)
+	return i, err
+}
+
+const retomarOrdemServico = `-- name: RetomarOrdemServico :one
+UPDATE ordem_servico
+SET status = $1::status_os
+WHERE id = $2 AND tenant_id = $3 AND status = 'Pausada'
+RETURNING id, tenant_id, solicitacao_id, tipo, tecnico_id, empresa_terceirizada_id, terceiro_acionado_em, aberta_por_id, afeta_producao, status, aberta_em, iniciada_em, criado_em, urgencia
+`
+
+type RetomarOrdemServicoParams struct {
+	Status   StatusOs
+	ID       int64
+	TenantID int64
+}
+
+// POST /ordens-servico/:id/retomar -- Pausada -> status_anterior da pausa
+// que acabou de fechar ('Aberta' ou 'Em Andamento', nunca um valor fixo
+// como em IniciarOrdemServico/PausarOrdemServico -- por isso `status` entra
+// como parâmetro, não como literal). O cast `::status_os` é explícito de
+// propósito: fora de um INSERT ... VALUES, que sqlc já resolve pelo tipo da
+// coluna (ver CriarPausa acima), um SET com sqlc.arg cru fica ambíguo pro
+// sqlc -- mesma cautela de sqlc.narg(tipo)::tipo_os em ListarOrdensServico.
+func (q *Queries) RetomarOrdemServico(ctx context.Context, arg RetomarOrdemServicoParams) (OrdemServico, error) {
+	row := q.db.QueryRow(ctx, retomarOrdemServico, arg.Status, arg.ID, arg.TenantID)
+	var i OrdemServico
+	err := row.Scan(
+		&i.ID,
+		&i.TenantID,
+		&i.SolicitacaoID,
+		&i.Tipo,
+		&i.TecnicoID,
+		&i.EmpresaTerceirizadaID,
+		&i.TerceiroAcionadoEm,
+		&i.AbertaPorID,
+		&i.AfetaProducao,
+		&i.Status,
+		&i.AbertaEm,
+		&i.IniciadaEm,
+		&i.CriadoEm,
+		&i.Urgencia,
+	)
+	return i, err
 }

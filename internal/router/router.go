@@ -202,9 +202,36 @@ func ConfigurarRotas(r *gin.Engine, c *Container) {
 	// usuario_escopo), não este Permitir -- ele só decide QUEM entra, nunca O
 	// QUE cada um vê. Mesmo desenho de /solicitacoes, /maquinas e /preventivas.
 	//
-	// Sem POST: a OS não nasce aqui, nasce de POST /solicitacoes/:id/abrir-os
-	// (a aprovação do Gestor, logo acima) -- uq_os_solicitacao garante que toda
-	// OS vem de uma solicitação, e criar direto pularia a aprovação. O ciclo de
-	// vida (iniciar/pausar/retomar/acionar-terceiro/encerrar/custo) é a fase 2.
+	// A OS não NASCE aqui, nasce de POST /solicitacoes/:id/abrir-os (a
+	// aprovação do Gestor, logo acima) -- uq_os_solicitacao garante que toda
+	// OS vem de uma solicitação, e criar direto pularia a aprovação. O ciclo
+	// de vida dela (iniciar/pausar/retomar/acionar-terceiro/encerrar), sim,
+	// é POST em sub-recurso, logo abaixo -- nunca PATCH de um campo `status`
+	// genérico, mesmo critério do resto da API.
 	api.GET("/ordens-servico", middleware.AutenticacaoJwt(), middleware.Permitir("gestor", "administrador", "tecnico"), c.OrdemOS.Listar())
+
+	// Ciclo de vida da OS -- só o Técnico DONO (checagem no service, não
+	// aqui: OS de outro técnico é 404, não 403 -- ver a nota em
+	// ObterOrdemServicoPorID). custo (Administrador, correção pós-encerramento)
+	// fica de fora por enquanto -- ainda não existe.
+	acoesOS := api.Group("/ordens-servico/:id", middleware.AutenticacaoJwt(), middleware.Permitir("tecnico"))
+	acoesOS.POST("/iniciar", c.OrdemOS.Iniciar())
+	acoesOS.POST("/pausar", c.OrdemOS.Pausar())
+	acoesOS.POST("/retomar", c.OrdemOS.Retomar())
+	acoesOS.POST("/acionar-terceiro", c.OrdemOS.AcionarTerceiro())
+	acoesOS.POST("/encerrar", c.OrdemOS.Encerrar())
+
+	// GET /indicadores/maquinas/:id -- o Painel de Indicadores (DashboardGestor,
+	// a ação rápida "Indicadores" do Painel do Gestor). O `:id` é de MÁQUINA;
+	// quem responde é o OrdemServicoController porque o painel inteiro sai do
+	// histórico de OS encerradas.
+	//
+	// Gestor e administrador, mesmo par de GET /solicitacoes: o Técnico executa
+	// a OS, não acompanha indisponibilidade nem custo, e o Solicitante muito
+	// menos. O recorte de loja/setor continua sendo o WHERE (aqui, o EXISTS de
+	// ObterMaquinaPorID) -- máquina fora do escopo é 404, não lista vazia.
+	//
+	// /indicadores em vez de /maquinas/:id/indicadores porque é a URL que o
+	// front já chama (servicos/servicoIndicadores.ts), e o contrato manda.
+	api.GET("/indicadores/maquinas/:id", middleware.AutenticacaoJwt(), middleware.Permitir("gestor", "administrador"), c.OrdemOS.Indicadores())
 }
