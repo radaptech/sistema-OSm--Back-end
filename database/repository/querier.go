@@ -9,6 +9,26 @@ import (
 )
 
 type Querier interface {
+	// POST /ordens-servico/:id/acionar-terceiro -- promove tipo pra 'terceiros'
+	// e grava a empresa + o instante do encaminhamento. Não mexe em `status`
+	// de propósito (docs/modelagem, 1.4.2): acionar não é uma transição de
+	// execução, a OS continua no ciclo iniciar/pausar/retomar/encerrar por
+	// cima -- se o atendimento vai demorar, quem sinaliza isso é `pausar`.
+	//
+	// `tipo <> 'terceiros'` no WHERE trava dois casos: (1) idempotência -- não
+	// deixa acionar duas vezes a mesma OS, o que pisaria em
+	// terceiro_acionado_em sem avisar; (2) trg_os_tipo_promocao só barra
+	// DEMOTE (tipo <> 'terceiros' tentando virar outra coisa), uma promoção
+	// repetida passaria batida pra ele, então a trava tem que estar aqui.
+	// `status <> 'Concluída'` porque não faz sentido terceirizar uma OS que já
+	// encerrou.
+	//
+	// empresa_terceirizada_id não é checado aqui: a FK composta
+	// (tenant_id, empresa_terceirizada_id) -> empresa_terceirizada garante
+	// tenant certo e existência ao mesmo tempo -- violação vira
+	// ErrConflitoIntegridade via TraduzErroPostgres, mesmo caminho de
+	// CriarOrdemServicoDeSolicitacao com tecnico_id inexistente.
+	AcionarTerceiro(ctx context.Context, arg AcionarTerceiroParams) (OrdemServico, error)
 	// Todos os campos editáveis de uma vez (o front manda o objeto inteiro no PUT).
 	// `ativa` fica de fora: reativar não existe pela API, e desativar tem rota
 	// própria -- ver DesativarEmpresaTerceirizada.
@@ -49,6 +69,24 @@ type Querier interface {
 	// back-end/CLAUDE.md "R2 -- storage de anexos"). mime_type e tamanho_bytes
 	// saem de graça do header do multipart, sem custo de I/O extra.
 	CriarAnexoSolicitacao(ctx context.Context, arg CriarAnexoSolicitacaoParams) error
+	// Nasce na mesma transação do encerramento (docs/modelagem, 2.3 revisão 4:
+	// "os dois momentos deixaram de ser sequenciais"), lancado_por_id = o
+	// próprio Técnico -- o Administrador só CORRIGE depois, em
+	// POST /ordens-servico/:id/custo (fase 2, fora daqui), inclusive as três
+	// colunas de nota fiscal, que por isso nem entram neste INSERT (ficam
+	// NULL, satisfeito por ck_custo_por_tipo quando tipo <> 'terceiros' --
+	// e quando É 'terceiros', são opcionais mesmo até o Administrador
+	// conferir contra a nota).
+	//
+	// custo_hora_tecnico é quem o service decide se manda ou NULL
+	// (pgtype.Float8{Valid: false}): só existe em 'maquinario'
+	// (ck_custo_por_tipo), reparo e terceiros não cobram hora técnica. Os dois
+	// (e custo_manutencao, sempre obrigatório) já saem tipados
+	// `pgtype.Float8` pelos overrides de coluna em sqlc.yaml -- não
+	// `shopspring/decimal`, que sairia como string no JSON contra um front
+	// que tipa `number` (ver a nota longa no override de `numeric` no
+	// sqlc.yaml, que por isso continua morto de propósito).
+	CriarCusto(ctx context.Context, arg CriarCustoParams) (OsCusto, error)
 	// Empresa terceirizada é a prestadora externa que o TÉCNICO aciona quando
 	// decide não resolver a OS internamente (front-end/CLAUDE.md item 9:
 	// "terceirizar é decisão do Técnico"). Entidade simples: não pende de loja nem
@@ -69,6 +107,13 @@ type Querier interface {
 	// e vira ErrDadoDuplicado no helper, sem switch em pgErr.Code no service.
 	// especialidade e telefone são opcionais (NULL) -- o front tipa os dois como `?`.
 	CriarEmpresaTerceirizada(ctx context.Context, arg CriarEmpresaTerceirizadaParams) (EmpresaTerceirizada, error)
+	// Grava o que o Técnico apurou (docs/modelagem, 1.4.3 -- universal pros
+	// três tipos, inclusive terceiros: quem recebe o serviço da empresa
+	// externa continua sendo ele). `tipo` vem do RETURNING de
+	// EncerrarOrdemServico acima, nunca escolhido aqui de novo. data_fim sai
+	// do DEFAULT now() -- é o instante que ListarOrdensServico projeta como
+	// `dataFim` e vw_os_horas usa pra fechar o relógio de horas trabalhadas.
+	CriarEncerramento(ctx context.Context, arg CriarEncerramentoParams) (OsEncerramento, error)
 	// Escopo de acesso (loja + setor) dos 4 perfis -- ver "3.8 Escopo de acesso
 	// unificado" em docs/modelagem-banco-dados.md:
 	//   Solicitante: 1 escopo, acesso_total_setores = false, exatamente 1 setor.
@@ -157,6 +202,14 @@ type Querier interface {
 	// now() sem precisar reler a linha inteira, mesmo espírito de
 	// CriarSolicitacaoMaquinario devolvendo `criado_em` junto do `id`.
 	CriarOrdemServicoDeSolicitacao(ctx context.Context, arg CriarOrdemServicoDeSolicitacaoParams) (CriarOrdemServicoDeSolicitacaoRow, error)
+	// Registra o intervalo parado (docs/modelagem, "pausa é histórico, não
+	// campo sobrescrito"): pausada_em sai do DEFAULT now(), retomada_em fica
+	// NULL até FecharPausaAberta (retomar). uq_pausa_aberta (índice único
+	// parcial em ordem_servico_id WHERE retomada_em IS NULL) garante no máximo
+	// uma pausa aberta por OS -- se PausarOrdemServico acima já travou o status
+	// em 'Pausada', não deveria haver corrida até aqui, mas a violação, se
+	// acontecer, vira ErrDadoDuplicado via TraduzErroPostgres, nunca 500.
+	CriarPausa(ctx context.Context, arg CriarPausaParams) (OsPausa, error)
 	// Manutenção preventiva de uma máquina. Máquina exige pelo menos uma
 	// (regra de negócio do front: esquemaCadastrarMaquina, preventivas min(1)), e
 	// elas viajam na mesma requisição da máquina -- CriarPreventiva é chamada
@@ -318,6 +371,29 @@ type Querier interface {
 	// repository.Usuario, que montarSessao consome inteiro -- virar Row ali
 	// espalharia a mudança por todo o caminho da sessão.
 	EmpresaAtiva(ctx context.Context, id int64) (bool, error)
+	// POST /ordens-servico/:id/encerrar -- Em Andamento -> Concluída. Só esse
+	// estado de origem: front-end/PainelTecnico só oferece "Finalizar" quando
+	// statusExecucao === 'Em Andamento' (uma OS Pausada tem que ser retomada
+	// primeiro, uma Aberta nem começou). RETURNING * devolve o `tipo` atual da
+	// OS (não muda aqui) -- é esse valor que o service repassa pra
+	// CriarEncerramento e CriarCusto abaixo, sem reler a linha: tipo pode já
+	// estar 'terceiros' se AcionarTerceiro rodou antes, e as duas FKs
+	// compostas (fk_encerramento_os_tipo, fk_custo_os_tipo) exigem o par
+	// (ordem_servico_id, tipo) bater exatamente com o da OS.
+	EncerrarOrdemServico(ctx context.Context, arg EncerrarOrdemServicoParams) (OrdemServico, error)
+	// Fecha a pausa que ObterPausaAbertaDaOrdemServico acabou de achar.
+	// `retomada_em IS NULL` no WHERE (e não só `id`) é a mesma rede de corrida
+	// das outras transições: se a linha já foi fechada entre a leitura e aqui,
+	// RETURNING devolve pgx.ErrNoRows em vez de fechar de novo calado.
+	FecharPausaAberta(ctx context.Context, id int64) (OsPausa, error)
+	// POST /ordens-servico/:id/iniciar -- Aberta -> Em Andamento, grava
+	// iniciada_em. O `status = 'Aberta'` no WHERE é a rede contra corrida: o
+	// service já leu o estado via ObterOrdemServicoPorID e decidiu que a
+	// transição vale, mas entre a leitura e este UPDATE outra request pode ter
+	// mudado a linha (duas abas do mesmo Técnico). RETURNING * devolve
+	// pgx.ErrNoRows quando a corrida perde, e o service traduz isso pra
+	// ErrConflitoIntegridade -- nunca 500.
+	IniciarOrdemServico(ctx context.Context, arg IniciarOrdemServicoParams) (OrdemServico, error)
 	// Só as ativas: a lista alimenta o select do ModalAcionarTerceiro, e oferecer
 	// uma empresa desativada é oferecer o que o Administrador acabou de tirar do ar.
 	//
@@ -374,15 +450,6 @@ type Querier interface {
 	//
 	// Array simples, sem paginação: o front pagina no cliente.
 	ListarMaquinas(ctx context.Context, arg ListarMaquinasParams) ([]ListarMaquinasRow, error)
-	// ==========================================================================
-	// Ordem de serviço -- leitura.
-	//
-	// A escrita mora em solicitacao_os.sql (CriarOrdemServicoDeSolicitacao, o
-	// POST /solicitacoes/:id/abrir-os): a OS nasce da aprovação do Gestor, não
-	// de um POST /ordens-servico. Este arquivo é só o outro lado -- a listagem
-	// que os três painéis consomem, e mais tarde o ciclo de vida
-	// (iniciar/pausar/encerrar/custo, fase 2).
-	// ==========================================================================
 	// GET /ordens-servico -- um endpoint para os três painéis, o que muda é o
 	// filtro (front-end/src/servicos/servicoOrdensServico.ts):
 	//   Gestor  (PainelGestor)                 -> sem filtro, recorta pelo escopo
@@ -660,6 +727,43 @@ type Querier interface {
 	// custo e indisponibilidade de máquina de outra loja enumerando id -- mesma
 	// lacuna que ObterSolicitacaoPorID fechou na fase 1.
 	ObterMaquinaPorID(ctx context.Context, arg ObterMaquinaPorIDParams) (ObterMaquinaPorIDRow, error)
+	// ==========================================================================
+	// Ordem de serviço -- leitura e ciclo de vida.
+	//
+	// A criação mora em solicitacao_os.sql (CriarOrdemServicoDeSolicitacao, o
+	// POST /solicitacoes/:id/abrir-os): a OS nasce da aprovação do Gestor, não
+	// de um POST /ordens-servico. Este arquivo é a listagem que os três painéis
+	// consomem, ObterOrdemServicoPorID (a leitura crua que toda transição usa
+	// pra checar dono e status atual antes de escrever) e, a partir daqui, as
+	// próprias transições do ciclo de vida
+	// (iniciar/pausar/retomar/acionar-terceiro/encerrar/custo, fase 2).
+	// ==========================================================================
+	// Leitura crua (`os.*`, sem os JOINs denormalizados de ListarOrdensServico):
+	// todo método de transição (Iniciar/Pausar/Retomar/AcionarTerceiro/Encerrar)
+	// chama esta query dentro da própria transação, antes de escrever, pra
+	// checar duas coisas que o WHERE de cada UPDATE não checa sozinho -- ele só
+	// devolve 0 linhas, sem dizer POR QUÊ: (1) TecnicoID bate com o ator do
+	// token (dono da OS -- senão ErrNaoEncontrado, 404, nunca 403: mesmo
+	// critério de "existe mas você não pode ver" de Indicadores/escopo, 403 é
+	// só perfil errado, e o perfil aqui está certo) e (2) Status está no
+	// estado que a transição espera (senão ErrConflitoIntegridade, 409 --
+	// nunca 500).
+	//
+	// Sem escopo de loja/setor no WHERE: quem chama já é o técnico dono
+	// (checagem 1 acima) ou o administrador (sem escopo, mesmo critério do
+	// resto do sistema) -- a rota nunca é aberta a gestor/solicitante.
+	ObterOrdemServicoPorID(ctx context.Context, arg ObterOrdemServicoPorIDParams) (OrdemServico, error)
+	// POST /ordens-servico/:id/retomar chama esta query pra saber pra ONDE
+	// voltar: status_anterior aqui é 'Aberta' ou 'Em Andamento' (quem pausou
+	// estava num desses dois -- ver PausarOrdemServico), nunca fixo. uq_pausa_aberta
+	// garante no máximo uma linha com retomada_em NULL por OS.
+	//
+	// Sem tenant_id/WHERE de escopo: os_pausa não tem tenant_id (não precisa --
+	// pende de ordem_servico, que tem), e quem chama já validou a OS (dono +
+	// tenant) via ObterOrdemServicoPorID antes. Nunca chame com um
+	// ordem_servico_id que não veio de uma leitura já filtrada, mesmo aviso de
+	// ObterPausasDasOrdensServico acima.
+	ObterPausaAbertaDaOrdemServico(ctx context.Context, ordemServicoID int64) (OsPausa, error)
 	// Pausas de uma página inteira de OS numa ida só, mesmo padrão de
 	// ObterAnexosDasSolicitacoes: 1:N não cabe na listagem sem duplicar a OS por
 	// pausa, e uma query por OS seria N+1.
@@ -732,12 +836,28 @@ type Querier interface {
 	// Usado no login: email é citext (case-insensitive) e único por tenant.
 	ObterUsuarioPorEmail(ctx context.Context, arg ObterUsuarioPorEmailParams) (Usuario, error)
 	ObterUsuarioPorID(ctx context.Context, arg ObterUsuarioPorIDParams) (Usuario, error)
+	// POST /ordens-servico/:id/pausar -- (Aberta ou Em Andamento) -> Pausada.
+	// Aceita as duas de origem porque o Técnico pode pausar antes mesmo de
+	// iniciar (ex.: falta peça, ainda nem começou) -- ck_pausa_status_anterior
+	// em os_pausa é quem define o universo válido, aqui só espelha. RETURNING *
+	// não devolve o status ANTERIOR (a coluna já vem 'Pausada'); é o service
+	// que lê o estado antes de chamar esta query (ObterOrdemServicoPorID) e
+	// repassa esse valor pra CriarPausa.status_anterior logo abaixo.
+	PausarOrdemServico(ctx context.Context, arg PausarOrdemServicoParams) (OrdemServico, error)
 	RegistrarUltimoAcesso(ctx context.Context, arg RegistrarUltimoAcessoParams) error
 	// ck_rejeicao exige os três juntos (motivo, autor, instante) -- por isso
 	// entram juntos aqui, nunca um UPDATE incremental. Mesmo filtro
 	// `status = 'Pendente'` de MarcarSolicitacaoConvertida e pelo mesmo motivo:
 	// não rejeitar (nem re-rejeitar) o que já saiu do estado inicial.
 	RejeitarSolicitacao(ctx context.Context, arg RejeitarSolicitacaoParams) (int64, error)
+	// POST /ordens-servico/:id/retomar -- Pausada -> status_anterior da pausa
+	// que acabou de fechar ('Aberta' ou 'Em Andamento', nunca um valor fixo
+	// como em IniciarOrdemServico/PausarOrdemServico -- por isso `status` entra
+	// como parâmetro, não como literal). O cast `::status_os` é explícito de
+	// propósito: fora de um INSERT ... VALUES, que sqlc já resolve pelo tipo da
+	// coluna (ver CriarPausa acima), um SET com sqlc.arg cru fica ambíguo pro
+	// sqlc -- mesma cautela de sqlc.narg(tipo)::tipo_os em ListarOrdensServico.
+	RetomarOrdemServico(ctx context.Context, arg RetomarOrdemServicoParams) (OrdemServico, error)
 }
 
 var _ Querier = (*Queries)(nil)
