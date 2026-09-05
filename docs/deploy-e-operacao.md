@@ -203,6 +203,105 @@ Deixa de ser aceite consciente para entregar o acesso.
   vira `ALTER` com dado. Dois já apareceram assim: empresa×loja (resolvido: empresa É o
   tenant) e o `os_evento` que `docs/modelagem-banco-dados.md` lista em "Pontos em aberto".
 
+### Subir a `000008` (preventiva direto para o técnico) com dado dentro
+
+O passo a passo desta migration específica, porque ela é a primeira que sobe com
+preventiva já cadastrada em produção. O porquê de cada decisão está em "Abertura
+automática de OS por preventiva" (`docs/fluxo-de-negocio.md`).
+
+**A migration em si é segura**, e isso foi medido, não suposto: aplicada num banco com
+empresa, lojas, setores, máquinas, preventivas e uma solicitação de preventiva já
+gravada, as cinco operações levaram ~37ms no total. Nenhuma reescreve tabela. A coluna
+nova é nullable sem default (metadata-only desde o Postgres 11), a FK composta não valida
+nada porque `tecnico_id` chega NULL em toda linha existente (MATCH SIMPLE não checa par
+com NULL), e `DROP NOT NULL` mais `DROP INDEX` são metadata. Não há risco de crash loop
+no boot por causa dela.
+
+⚠️ **A ordem dos dois deploys importa, e é FRONT PRIMEIRO.**
+- Back novo + front velho **quebra**: o front antigo não manda `tecnicoId`, e
+  `validarTecnicoPreventiva` recusa com 400 — ou seja, cadastrar e **editar máquina**
+  param de funcionar para o Administrador enquanto o front não subir.
+- Front novo + back velho **funciona**: campo extra no JSON é ignorado pelo binding. O
+  Administrador consegue salvar máquina normalmente; o técnico escolhido só não é gravado
+  ainda, e a tela de edição mostra o campo vazio depois — visível, não silencioso.
+
+⚠️ **Solicitação de preventiva ainda `Pendente` vira OS duplicada.** É a pegadinha real
+desta subida, e foi reproduzida: a fila do Gestor pode ter solicitações de preventiva do
+fluxo antigo esperando aprovação. Depois da migration, o job abre uma solicitação
+`Convertida` **nova** com a OS junto, e a antiga continua lá — o Gestor aprovando aquela
+cria uma **segunda OS para o mesmo ciclo**. Drene antes de subir o back (aprovar ou
+rejeitar cada uma pela tela):
+
+```sql
+SELECT s.id, l.nome AS loja, m.nome AS maquina, s.criado_em::date AS aberta_em
+  FROM solicitacao_os s
+  JOIN maquina m ON m.id = s.maquina_id
+  JOIN setor   x ON x.id = m.setor_id
+  JOIN loja    l ON l.id = x.loja_id
+ WHERE s.origem = 'preventiva' AND s.status = 'Pendente'
+ ORDER BY s.criado_em;
+```
+
+**Preventiva existente fica sem técnico**, e o job a recusa com erro nomeando a linha,
+saindo com código != 0 — de propósito: pular em silêncio faria a máquina parar de ser
+mantida sem ninguém notar. Diagnóstico, para saber o tamanho do problema antes de subir:
+
+```sql
+SELECT l.nome AS loja,
+       count(*) AS preventivas_sem_tecnico,
+       (SELECT count(*) FROM usuario u
+         WHERE u.tenant_id = p.tenant_id AND u.perfil = 'tecnico' AND u.ativo
+           AND EXISTS (SELECT 1 FROM usuario_escopo ue
+                        WHERE ue.usuario_id = u.id AND ue.loja_id = s.loja_id)) AS tecnicos_na_loja
+  FROM preventiva p
+  JOIN maquina m ON m.tenant_id = p.tenant_id AND m.id = p.maquina_id
+  JOIN setor   s ON s.tenant_id = m.tenant_id AND s.id = m.setor_id
+  JOIN loja    l ON l.tenant_id = s.tenant_id AND l.id = s.loja_id
+ WHERE p.tecnico_id IS NULL AND p.ativa AND m.ativa
+ GROUP BY l.nome, p.tenant_id, s.loja_id
+ ORDER BY l.nome;
+```
+
+Backfill **só onde não há ambiguidade** — exatamente um técnico ativo atende a loja da
+máquina. Loja com dois técnicos fica NULL de propósito: escolher um no chute grava uma
+atribuição errada que ninguém vai revisar, e a lista do diagnóstico acima já diz quais
+sobraram para o Administrador resolver pela tela de edição da máquina.
+
+```sql
+UPDATE preventiva p
+   SET tecnico_id = (
+        SELECT u.id FROM usuario u
+          JOIN maquina m ON m.tenant_id = p.tenant_id AND m.id = p.maquina_id
+          JOIN setor   s ON s.tenant_id = m.tenant_id AND s.id = m.setor_id
+         WHERE u.tenant_id = p.tenant_id AND u.perfil = 'tecnico' AND u.ativo
+           AND EXISTS (SELECT 1 FROM usuario_escopo ue
+                        WHERE ue.usuario_id = u.id AND ue.loja_id = s.loja_id))
+ WHERE p.tecnico_id IS NULL
+   AND (SELECT count(*) FROM usuario u
+          JOIN maquina m ON m.tenant_id = p.tenant_id AND m.id = p.maquina_id
+          JOIN setor   s ON s.tenant_id = m.tenant_id AND s.id = m.setor_id
+         WHERE u.tenant_id = p.tenant_id AND u.perfil = 'tecnico' AND u.ativo
+           AND EXISTS (SELECT 1 FROM usuario_escopo ue
+                        WHERE ue.usuario_id = u.id AND ue.loja_id = s.loja_id)) = 1;
+```
+
+**Ordem de execução:**
+
+1. Drenar as solicitações de preventiva `Pendente` (query acima), pela tela.
+2. Rodar o diagnóstico e guardar o resultado — é a lista de trabalho do passo 6.
+3. Deploy do **front** (merge para `master` no repo do front).
+4. Deploy do **back** (merge para `master`); a migration roda no boot.
+5. Rodar o backfill.
+6. Administrador completa o técnico das preventivas que sobraram, pela edição da máquina.
+7. Só então deixar o Cron rodar. Para conferir antes, `railway run ./main
+   preventivas-vencidas` — ele imprime quantas abriu e lista nome a nome as que falharam.
+
+⚠️ **A partir da primeira OS de preventiva, o `down.sql` não desce mais**: `aberta_por_id`
+volta a `NOT NULL` e essas linhas são justamente as que têm NULL ali. O rollback do
+Railway reverte o binário, não o schema. Enquanto nenhuma OS de preventiva tiver nascido
+(entre o passo 4 e o 7) o down funciona limpo; depois disso, reverter exige decidir antes
+o que fazer com essas OS.
+
 ### Riscos operacionais conhecidos
 - ⚠️ **Migration falha = produção fora do ar, não feature quebrada.** `main.go` roda
   `RunMigrationPostgress` no boot e faz `log.Fatal` no erro — a API não sobe, e com
