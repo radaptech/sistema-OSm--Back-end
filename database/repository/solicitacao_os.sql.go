@@ -92,6 +92,79 @@ func (q *Queries) CriarImpactoSolicitacao(ctx context.Context, arg CriarImpactoS
 	return err
 }
 
+const criarOrdemServicoDePreventiva = `-- name: CriarOrdemServicoDePreventiva :one
+INSERT INTO ordem_servico (tenant_id, solicitacao_id, tipo, tecnico_id, urgencia, aberta_por_id, afeta_producao)
+VALUES (
+    $1,
+    $2,
+    'maquinario',
+    $3,
+    'Baixa',
+    NULL,
+    false
+)
+RETURNING id, aberta_em
+`
+
+type CriarOrdemServicoDePreventivaParams struct {
+	TenantID      int64
+	SolicitacaoID int64
+	TecnicoID     int64
+}
+
+type CriarOrdemServicoDePreventivaRow struct {
+	ID       int64
+	AbertaEm pgtype.Timestamptz
+}
+
+// Insere a OS da preventiva vencida, na mesma transação de
+// CriarSolicitacaoPreventiva e AvancarProximaData. É o irmão automático de
+// CriarOrdemServicoDeSolicitacao: o mesmo INSERT, sem os campos que só um
+// Gestor clicando saberia preencher.
+//
+// Query separada, e não um parâmetro a mais na outra, pelo mesmo motivo que
+// CriarSolicitacaoPreventiva é separada de CriarSolicitacaoMaquinario: aqui
+// três dos sete valores são literais que as constraints (ou o fluxo) não
+// deixam variar, e passá-los como parâmetro só criaria a chance de o job
+// mandar o valor errado.
+//
+//	`tipo` é sempre 'maquinario' -- preventiva é de máquina cadastrada
+//	(ck_solicitacao_alvo já garante isso do lado da solicitação), e
+//	'terceiros' é promoção posterior, decidida pelo Técnico;
+//
+//	`urgencia` é sempre 'Baixa'. Preventiva é trabalho planejado com data
+//	marcada: se fosse urgente não teria esperado o calendário. Deixar o job
+//	escolher exigiria uma regra ("crítica vira Alta"?) que ninguém pediu, e a
+//	criticidade da máquina já é visível no card do Técnico;
+//
+//	`aberta_por_id` é NULL -- ninguém abriu, foi a data. A coluna deixou de
+//	ser NOT NULL na migration 000008 exatamente para isto. Inventar um ator
+//	(o Administrador que cadastrou a preventiva, o técnico que vai executar)
+//	gravaria autoria falsa na coluna que existe para responder "quem abriu".
+//	NULL aqui é o mesmo NULL de solicitante_id na solicitação de origem
+//	'preventiva': o sistema.
+//
+// `afeta_producao` é false e não parâmetro: a solicitação de preventiva nasce
+// sem nenhuma linha em solicitacao_impacto (não há Solicitante para marcar
+// nada), então ler a tabela devolveria false sempre. O efeito é que a OS de
+// preventiva não acumula horas de máquina parada -- a tela escreve "Não se
+// aplica". Se um dia a preventiva precisar parar a máquina de propósito, isto
+// vira um campo do cadastro da preventiva, não uma leitura de impacto.
+//
+// `tecnico_id` é o único parâmetro de verdade: vem de preventiva.tecnico_id,
+// escolhido pelo Administrador no cadastro (migration 000008). O service
+// confere que ele ainda é um técnico ativo antes de chegar aqui -- a FK só
+// garante que é um usuário do tenant.
+//
+// RETURNING id, aberta_em pelo mesmo motivo de CriarOrdemServicoDeSolicitacao:
+// é tudo que o chamador precisa, sem reler a linha inteira.
+func (q *Queries) CriarOrdemServicoDePreventiva(ctx context.Context, arg CriarOrdemServicoDePreventivaParams) (CriarOrdemServicoDePreventivaRow, error) {
+	row := q.db.QueryRow(ctx, criarOrdemServicoDePreventiva, arg.TenantID, arg.SolicitacaoID, arg.TecnicoID)
+	var i CriarOrdemServicoDePreventivaRow
+	err := row.Scan(&i.ID, &i.AbertaEm)
+	return i, err
+}
+
 const criarOrdemServicoDeSolicitacao = `-- name: CriarOrdemServicoDeSolicitacao :one
 INSERT INTO ordem_servico (tenant_id, solicitacao_id, tipo, tecnico_id, urgencia, aberta_por_id, afeta_producao)
 VALUES (
@@ -112,7 +185,7 @@ type CriarOrdemServicoDeSolicitacaoParams struct {
 	Tipo          TipoOs
 	TecnicoID     int64
 	Urgencia      NivelUrgencia
-	AbertaPorID   int64
+	AbertaPorID   *int64
 	AfetaProducao bool
 }
 
@@ -121,7 +194,9 @@ type CriarOrdemServicoDeSolicitacaoRow struct {
 	AbertaEm pgtype.Timestamptz
 }
 
-// Nasce da aprovação do Gestor (POST /:id/abrir-os): só o INSERT mínimo que
+// Nasce da aprovação do Gestor (POST /:id/abrir-os) -- o caminho humano; a OS
+// de preventiva tem o seu próprio INSERT, CriarOrdemServicoDePreventiva. Só o
+// INSERT mínimo que
 // faz a linha existir, ck_os_executor validando o resto (tecnico_id e
 // urgencia NOT NULL, e como tipo aqui nunca é 'terceiros' -- solicitacao_os
 // só produz 'maquinario'/'reparo' -- empresa_terceirizada_id e
@@ -214,7 +289,7 @@ func (q *Queries) CriarSolicitacaoMaquinario(ctx context.Context, arg CriarSolic
 
 const criarSolicitacaoPreventiva = `-- name: CriarSolicitacaoPreventiva :one
 
-INSERT INTO solicitacao_os (tenant_id, tipo, maquina_id, setor_id, preventiva_id, origem, descricao)
+INSERT INTO solicitacao_os (tenant_id, tipo, maquina_id, setor_id, preventiva_id, origem, status, descricao)
 VALUES (
     $1,
     'maquinario',
@@ -222,6 +297,7 @@ VALUES (
     $3,
     $4::bigint,
     'preventiva',
+    'Convertida',
     $5
 )
 RETURNING id
@@ -263,9 +339,17 @@ type CriarSolicitacaoPreventivaParams struct {
 //	                       é proibido -- por isso nem aparece na lista de
 //	                       colunas.
 //
-// `status` fica no DEFAULT 'Pendente': a OS só nasce quando o Gestor aprova com
-// técnico e urgência (POST /solicitacoes/:id/abrir-os). Criar OS direto pularia
-// a aprovação, que é o ponto inteiro do fluxo.
+// `status` é literal 'Convertida', não o DEFAULT 'Pendente': preventiva não
+// passa mais pela fila do Gestor. O trabalho já foi aprovado quando a máquina
+// foi cadastrada -- procedimento, intervalo e data saíram de lá --, e pedir uma
+// segunda aprovação a cada ciclo não decide nada. A OS nasce na mesma
+// transação (CriarOrdemServicoDePreventiva), com o técnico que a preventiva já
+// carrega, então a solicitação nunca chega a existir Pendente.
+//
+// Ela CONTINUA existindo, e isso é o ponto: horas_parada é medida desde
+// solicitacao_os.criado_em (vw_os_horas), uq_os_solicitacao exige uma
+// solicitação por OS, e o card do Técnico busca a origem para mostrar o
+// problema. A solicitação não é burocracia da aprovação, é o fato de origem.
 //
 // `setor_id` é NOT NULL e vem da máquina (a solicitação não guarda loja -- ela
 // sai via setor). Quem lê é ListarPreventivasVencidas, que já projeta
@@ -274,13 +358,14 @@ type CriarSolicitacaoPreventivaParams struct {
 // Sem foto e sem ON CONFLICT, os dois de propósito:
 //   - trg_solicitacao_tem_foto exige anexo só para origem = 'solicitante'
 //     desde a migration 000005 -- antes dela este INSERT falhava no COMMIT;
-//   - uq_preventiva_pendente (índice único parcial em preventiva_id WHERE
-//     status = 'Pendente') é a rede contra execução duplicada do cron, e é ele
-//     -- não o NOT EXISTS da query que alimenta este INSERT -- quem garante a
-//     regra quando duas réplicas rodam juntas. Deixar o 23505 subir e o service
-//     tratar como benigno é mais simples que um ON CONFLICT com predicado
-//     parcial, que devolveria zero linhas e faria o :one virar pgx.ErrNoRows --
-//     um segundo caso de erro para o mesmo evento.
+//   - a rede contra execução duplicada do cron deixou de ser um índice e
+//     passou a ser o lock de ObterPreventivaVencidaParaAbertura (SELECT ...
+//     FOR UPDATE, na mesma transação). uq_preventiva_pendente filtrava por
+//     status = 'Pendente' e parou de casar quando a solicitação passou a
+//     nascer 'Convertida'; ampliar o filtro não serviria, porque uma
+//     preventiva PODE ter várias solicitações ao longo do tempo, uma por
+//     ciclo. O lock é mais forte: cobre o INSERT e o AvancarProximaData
+//     juntos, não só o INSERT (migration 000008).
 //
 // Os casts ::bigint em maquina_id e preventiva_id não são decoração: as duas
 // colunas são nullable no schema (precisam ser, para 'reparo' e para a origem

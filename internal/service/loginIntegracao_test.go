@@ -91,6 +91,35 @@ func bancoDeTeste(t *testing.T) *pgxpool.Pool {
 	return pool
 }
 
+// tecnicoParaPreventiva insere um técnico direto no banco e devolve o id,
+// para os testes que só precisam de um técnico VÁLIDO para pendurar na
+// preventiva da máquina que estão montando (obrigatório desde a migration
+// 000008: é ele quem recebe a OS quando a preventiva vence).
+//
+// SQL cru e não svcUsuario.CadastrarUsuario de propósito: cadastrar usuário
+// pela API exige loja, escopo e área, e nenhum desses três diz respeito ao que
+// estes testes estão provando -- seria montar meia empresa para preencher um
+// campo. Os testes que exercitam o cadastro de técnico de verdade
+// (loginIntegracao_test.go, escopoListagemIntegracao_test.go) continuam
+// passando pelo service.
+//
+// area_tecnico_id sai de area_tecnico, que a empresa já tem populada pelo
+// trigger de seed (migration 000006) -- ck_usuario_area_tecnico exige a coluna
+// preenchida exatamente para o perfil 'tecnico'.
+func tecnicoParaPreventiva(t *testing.T, ctx context.Context, pool *pgxpool.Pool, tenantID int64) int64 {
+	t.Helper()
+
+	var id int64
+	err := pool.QueryRow(ctx, `
+		INSERT INTO usuario (tenant_id, perfil, area_tecnico_id, nome, email, senha_hash)
+		VALUES ($1, 'tecnico', (SELECT id FROM area_tecnico WHERE tenant_id = $1 ORDER BY id LIMIT 1), 'Técnico da Preventiva', 'tecnico.preventiva@teste.com', 'x')
+		RETURNING id`, tenantID).Scan(&id)
+	if err != nil {
+		t.Fatalf("erro ao criar técnico da preventiva: %v", err)
+	}
+	return id
+}
+
 func TestLogin(t *testing.T) {
 	t.Setenv("JWT_SECRET", "segredo-de-teste-nao-usar-em-producao")
 

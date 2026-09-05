@@ -16,9 +16,10 @@ UPDATE preventiva
 SET descricao = $3,
     intervalo_dias = $4,
     proxima_data = $5,
-    ativa = $6
+    ativa = $6,
+    tecnico_id = $7::bigint
 WHERE id = $1 AND tenant_id = $2
-RETURNING id, tenant_id, maquina_id, descricao, intervalo_dias, proxima_data, ativa, criado_em
+RETURNING id, tenant_id, maquina_id, descricao, intervalo_dias, proxima_data, ativa, criado_em, tecnico_id
 `
 
 type AtualizarPreventivaParams struct {
@@ -28,12 +29,18 @@ type AtualizarPreventivaParams struct {
 	IntervaloDias int32
 	ProximaData   pgtype.Date
 	Ativa         bool
+	TecnicoID     *int64
 }
 
 // Sem maquina_id, mesmo motivo de AtualizarSetor não mexer em loja_id: mover a
 // preventiva de máquina deixaria as solicitações que ela já gerou apontando
 // para uma máquina que não é mais a dela. O front manda o campo no PUT; o
 // service ignora.
+//
+// tecnico_id ENTRA aqui, diferente de maquina_id: trocar quem atende a
+// preventiva é justamente o que a edição serve para fazer (técnico saiu da
+// empresa, mudou de área), e não desfaz nada -- as OS já abertas guardam o
+// técnico delas em ordem_servico.tecnico_id, não olham mais para cá.
 func (q *Queries) AtualizarPreventiva(ctx context.Context, arg AtualizarPreventivaParams) (Preventiva, error) {
 	row := q.db.QueryRow(ctx, atualizarPreventiva,
 		arg.ID,
@@ -42,6 +49,7 @@ func (q *Queries) AtualizarPreventiva(ctx context.Context, arg AtualizarPreventi
 		arg.IntervaloDias,
 		arg.ProximaData,
 		arg.Ativa,
+		arg.TecnicoID,
 	)
 	var i Preventiva
 	err := row.Scan(
@@ -53,6 +61,7 @@ func (q *Queries) AtualizarPreventiva(ctx context.Context, arg AtualizarPreventi
 		&i.ProximaData,
 		&i.Ativa,
 		&i.CriadoEm,
+		&i.TecnicoID,
 	)
 	return i, err
 }
@@ -61,7 +70,7 @@ const avancarProximaData = `-- name: AvancarProximaData :one
 UPDATE preventiva
 SET proxima_data = proxima_data + (intervalo_dias * INTERVAL '1 day')
 WHERE id = $1 AND tenant_id = $2
-RETURNING id, tenant_id, maquina_id, descricao, intervalo_dias, proxima_data, ativa, criado_em
+RETURNING id, tenant_id, maquina_id, descricao, intervalo_dias, proxima_data, ativa, criado_em, tecnico_id
 `
 
 type AvancarProximaDataParams struct {
@@ -84,15 +93,16 @@ func (q *Queries) AvancarProximaData(ctx context.Context, arg AvancarProximaData
 		&i.ProximaData,
 		&i.Ativa,
 		&i.CriadoEm,
+		&i.TecnicoID,
 	)
 	return i, err
 }
 
 const criarPreventiva = `-- name: CriarPreventiva :one
 
-INSERT INTO preventiva (tenant_id, maquina_id, descricao, intervalo_dias, proxima_data, ativa)
-VALUES ($1, $2, $3, $4, $5, $6)
-RETURNING id, tenant_id, maquina_id, descricao, intervalo_dias, proxima_data, ativa, criado_em
+INSERT INTO preventiva (tenant_id, maquina_id, descricao, intervalo_dias, proxima_data, ativa, tecnico_id)
+VALUES ($1, $2, $3, $4, $5, $6, $7::bigint)
+RETURNING id, tenant_id, maquina_id, descricao, intervalo_dias, proxima_data, ativa, criado_em, tecnico_id
 `
 
 type CriarPreventivaParams struct {
@@ -102,6 +112,7 @@ type CriarPreventivaParams struct {
 	IntervaloDias int32
 	ProximaData   pgtype.Date
 	Ativa         bool
+	TecnicoID     *int64
 }
 
 // Manutenção preventiva de uma máquina. Máquina exige pelo menos uma
@@ -128,6 +139,11 @@ type CriarPreventivaParams struct {
 // fk_preventiva_maquina é composta (tenant_id, maquina_id): o banco recusa
 // sozinho pendurar preventiva em máquina de outro tenant.
 // ck_intervalo (intervalo_dias > 0) volta 23514 e vira ErrConflitoIntegridade.
+//
+// tecnico_id é quem vai receber a OS quando esta preventiva vencer (migration
+// 000008): o job não escolhe técnico, lê o que está aqui. A coluna é nullable
+// no schema para a migration não falhar com dado dentro, mas o service exige
+// o campo -- preventiva sem técnico não tem para quem abrir OS.
 func (q *Queries) CriarPreventiva(ctx context.Context, arg CriarPreventivaParams) (Preventiva, error) {
 	row := q.db.QueryRow(ctx, criarPreventiva,
 		arg.TenantID,
@@ -136,6 +152,7 @@ func (q *Queries) CriarPreventiva(ctx context.Context, arg CriarPreventivaParams
 		arg.IntervaloDias,
 		arg.ProximaData,
 		arg.Ativa,
+		arg.TecnicoID,
 	)
 	var i Preventiva
 	err := row.Scan(
@@ -147,6 +164,7 @@ func (q *Queries) CriarPreventiva(ctx context.Context, arg CriarPreventivaParams
 		&i.ProximaData,
 		&i.Ativa,
 		&i.CriadoEm,
+		&i.TecnicoID,
 	)
 	return i, err
 }
@@ -198,17 +216,19 @@ func (q *Queries) DesativarPreventivasDaMaquina(ctx context.Context, arg Desativ
 
 const listarPreventivas = `-- name: ListarPreventivas :many
 SELECT
-    p.id, p.tenant_id, p.maquina_id, p.descricao, p.intervalo_dias, p.proxima_data, p.ativa, p.criado_em,
+    p.id, p.tenant_id, p.maquina_id, p.descricao, p.intervalo_dias, p.proxima_data, p.ativa, p.criado_em, p.tecnico_id,
     m.nome AS maquina_nome,
     m.setor_id,
     s.nome AS setor_nome,
     s.loja_id,
     l.nome AS loja_nome,
+    t.nome AS tecnico_nome,
     COALESCE(p.ativa AND p.proxima_data <= (now() AT TIME ZONE 'America/Sao_Paulo')::date, false)::boolean AS vencida
 FROM preventiva p
 JOIN maquina m ON m.tenant_id = p.tenant_id AND m.id = p.maquina_id
 JOIN setor   s ON s.tenant_id = m.tenant_id AND s.id = m.setor_id
 JOIN loja    l ON l.tenant_id = s.tenant_id AND l.id = s.loja_id
+LEFT JOIN usuario t ON t.tenant_id = p.tenant_id AND t.id = p.tecnico_id
 WHERE p.tenant_id = $1
   AND p.ativa
   AND ($2::bigint IS NULL OR p.maquina_id = $2)
@@ -251,11 +271,13 @@ type ListarPreventivasRow struct {
 	ProximaData   pgtype.Date
 	Ativa         bool
 	CriadoEm      pgtype.Timestamptz
+	TecnicoID     *int64
 	MaquinaNome   string
 	SetorID       int64
 	SetorNome     string
 	LojaID        int64
 	LojaNome      string
+	TecnicoNome   *string
 	Vencida       bool
 }
 
@@ -272,6 +294,9 @@ type ListarPreventivasRow struct {
 // Ordena por proxima_data: o que interessa na fila é o que vence antes, não a
 // ordem alfabética da máquina. Array simples, sem paginação -- o front pagina
 // no cliente.
+// LEFT e não INNER: tecnico_id é nullable (preventiva anterior à migration
+// 000008 não tem técnico). Com INNER essas linhas sumiriam da listagem, que é
+// exatamente onde o Administrador precisa vê-las para corrigir.
 func (q *Queries) ListarPreventivas(ctx context.Context, arg ListarPreventivasParams) ([]ListarPreventivasRow, error) {
 	rows, err := q.db.Query(ctx, listarPreventivas, arg.TenantID, arg.MaquinaID, arg.EscopoUsuarioID)
 	if err != nil {
@@ -290,11 +315,13 @@ func (q *Queries) ListarPreventivas(ctx context.Context, arg ListarPreventivasPa
 			&i.ProximaData,
 			&i.Ativa,
 			&i.CriadoEm,
+			&i.TecnicoID,
 			&i.MaquinaNome,
 			&i.SetorID,
 			&i.SetorNome,
 			&i.LojaID,
 			&i.LojaNome,
+			&i.TecnicoNome,
 			&i.Vencida,
 		); err != nil {
 			return nil, err
@@ -310,36 +337,26 @@ func (q *Queries) ListarPreventivas(ctx context.Context, arg ListarPreventivasPa
 const listarPreventivasVencidas = `-- name: ListarPreventivasVencidas :many
 SELECT
     p.id,
-    p.tenant_id,
-    p.descricao,
-    p.maquina_id,
-    m.setor_id
+    p.tenant_id
 FROM preventiva p
 JOIN maquina m ON m.tenant_id = p.tenant_id AND m.id = p.maquina_id
 WHERE p.ativa
   AND m.ativa
   AND p.proxima_data <= (now() AT TIME ZONE 'America/Sao_Paulo')::date
-  AND NOT EXISTS (
-      SELECT 1
-      FROM solicitacao_os s
-      WHERE s.preventiva_id = p.id
-        AND s.status = 'Pendente'
-  )
 ORDER BY p.proxima_data, p.id
 `
 
 type ListarPreventivasVencidasRow struct {
-	ID        int64
-	TenantID  int64
-	Descricao string
-	MaquinaID int64
-	SetorID   int64
+	ID       int64
+	TenantID int64
 }
 
 // Alimenta o job de abertura automática de solicitação (subcomando de CLI
 // `preventivas-vencidas`, chamado pelo Railway Cron -- ver "Abertura automática
 // de solicitação por preventiva" no CLAUDE.md). Cada linha daqui vira uma
-// solicitação com origem = 'preventiva' na fila do Gestor.
+// solicitação com origem = 'preventiva' e a OS dela, já atribuída ao técnico
+// da própria preventiva -- desde a migration 000008 isto não passa pela fila
+// do Gestor.
 //
 // ⚠️ É a única query do projeto SEM tenant_id no WHERE, e isso é proposital:
 // não há request, não há token, não há tenant. O job varre todos os tenants de
@@ -348,24 +365,18 @@ type ListarPreventivasVencidasRow struct {
 //
 // Sem parâmetro nenhum, pelo mesmo motivo.
 //
-// Sobre o NOT EXISTS e uq_preventiva_pendente (índice único parcial em
-// solicitacao_os (preventiva_id) WHERE status = 'Pendente'), que fazem coisas
-// diferentes e é fácil confundir:
+// ⚠️ O NOT EXISTS sobre solicitação 'Pendente' que morava aqui SAIU, junto com
+// uq_preventiva_pendente (migration 000008), e os dois pelo mesmo motivo: a
+// solicitação de preventiva não passa mais pela fila do Gestor, nasce
+// 'Convertida' com a OS junto. O filtro existia para pular a preventiva que
+// estava parada esperando aprovação -- estado que deixou de existir, porque
+// AvancarProximaData roda na mesma transação e joga a data para o próximo
+// ciclo. Não devolva o filtro: ele nunca casaria e esconderia essa mudança.
 //
-//	o índice é quem garante a regra -- uma preventiva não tem duas
-//	solicitações pendentes ao mesmo tempo (pode ter várias ao longo do tempo,
-//	uma por ciclo). Ele vale inclusive contra duas réplicas do cron rodando
-//	juntas, que é justamente o que a query sozinha não pega;
-//
-//	o NOT EXISTS evita o trabalho condenado. Enquanto o Gestor não converte
-//	nem rejeita, a preventiva continua com proxima_data no passado, então sem
-//	este filtro ela voltaria em toda execução para tomar 23505 no INSERT --
-//	uma transação inútil por preventiva parada na fila, todo dia.
-//
-// Ou seja: tirar o NOT EXISTS não corrompe nada (o service trata o 23505 como
-// benigno e a transação inteira volta), só desperdiça. Tirar o índice é que
-// quebra. É por isso que nenhum teste falha se este filtro sumir -- não tente
-// escrever um sem antes tornar o desperdício observável.
+// Quem protege contra duas réplicas do cron abrindo o mesmo ciclo duas vezes
+// agora é ObterPreventivaVencidaParaAbertura (SELECT ... FOR UPDATE) na
+// transação de cada preventiva -- esta query aqui é só a varredura, e ler uma
+// linha que outra réplica já processou é esperado.
 //
 // m.ativa é igualmente obrigatório: DesativarMaquina NÃO desativa as
 // preventivas da máquina (maquina.sql, e não há ON DELETE/trigger fazendo
@@ -377,9 +388,11 @@ type ListarPreventivasVencidasRow struct {
 // `vencida` nas outras duas queries: o container roda em UTC, e a preventiva
 // apareceria vencida até 3h antes da virada do dia no Brasil.
 //
-// Projeta só o que o INSERT da solicitação precisa (o setor_id vem da máquina:
-// solicitacao_os.setor_id é NOT NULL e a solicitação não guarda loja). Não usa
-// p.* como as outras: aqui ninguém monta resposta de contrato.
+// Projeta só id e tenant_id: o resto (descrição, máquina, setor, técnico) é
+// relido sob lock por ObterPreventivaVencidaParaAbertura, dentro da transação
+// de cada preventiva. Carregar os campos aqui seria carregar um retrato que
+// pode estar velho quando o INSERT acontecer. Não usa p.* como as outras:
+// aqui ninguém monta resposta de contrato.
 func (q *Queries) ListarPreventivasVencidas(ctx context.Context) ([]ListarPreventivasVencidasRow, error) {
 	rows, err := q.db.Query(ctx, listarPreventivasVencidas)
 	if err != nil {
@@ -389,13 +402,7 @@ func (q *Queries) ListarPreventivasVencidas(ctx context.Context) ([]ListarPreven
 	var items []ListarPreventivasVencidasRow
 	for rows.Next() {
 		var i ListarPreventivasVencidasRow
-		if err := rows.Scan(
-			&i.ID,
-			&i.TenantID,
-			&i.Descricao,
-			&i.MaquinaID,
-			&i.SetorID,
-		); err != nil {
+		if err := rows.Scan(&i.ID, &i.TenantID); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
@@ -408,17 +415,19 @@ func (q *Queries) ListarPreventivasVencidas(ctx context.Context) ([]ListarPreven
 
 const obterPreventivaPorID = `-- name: ObterPreventivaPorID :one
 SELECT
-    p.id, p.tenant_id, p.maquina_id, p.descricao, p.intervalo_dias, p.proxima_data, p.ativa, p.criado_em,
+    p.id, p.tenant_id, p.maquina_id, p.descricao, p.intervalo_dias, p.proxima_data, p.ativa, p.criado_em, p.tecnico_id,
     m.nome AS maquina_nome,
     m.setor_id,
     s.nome AS setor_nome,
     s.loja_id,
     l.nome AS loja_nome,
+    t.nome AS tecnico_nome,
     COALESCE(p.ativa AND p.proxima_data <= (now() AT TIME ZONE 'America/Sao_Paulo')::date, false)::boolean AS vencida
 FROM preventiva p
 JOIN maquina m ON m.tenant_id = p.tenant_id AND m.id = p.maquina_id
 JOIN setor   s ON s.tenant_id = m.tenant_id AND s.id = m.setor_id
 JOIN loja    l ON l.tenant_id = s.tenant_id AND l.id = s.loja_id
+LEFT JOIN usuario t ON t.tenant_id = p.tenant_id AND t.id = p.tecnico_id
 WHERE p.id = $1 AND p.tenant_id = $2
 `
 
@@ -436,11 +445,13 @@ type ObterPreventivaPorIDRow struct {
 	ProximaData   pgtype.Date
 	Ativa         bool
 	CriadoEm      pgtype.Timestamptz
+	TecnicoID     *int64
 	MaquinaNome   string
 	SetorID       int64
 	SetorNome     string
 	LojaID        int64
 	LojaNome      string
+	TecnicoNome   *string
 	Vencida       bool
 }
 
@@ -450,6 +461,9 @@ type ObterPreventivaPorIDRow struct {
 // por aqui dentro da mesma transação para responder na forma do contrato.
 //
 // Sem filtro de `ativa`: a tela de edição precisa carregar o registro.
+// LEFT e não INNER: tecnico_id é nullable (preventiva anterior à migration
+// 000008 não tem técnico). Com INNER essas linhas sumiriam da listagem, que é
+// exatamente onde o Administrador precisa vê-las para corrigir.
 func (q *Queries) ObterPreventivaPorID(ctx context.Context, arg ObterPreventivaPorIDParams) (ObterPreventivaPorIDRow, error) {
 	row := q.db.QueryRow(ctx, obterPreventivaPorID, arg.ID, arg.TenantID)
 	var i ObterPreventivaPorIDRow
@@ -462,12 +476,87 @@ func (q *Queries) ObterPreventivaPorID(ctx context.Context, arg ObterPreventivaP
 		&i.ProximaData,
 		&i.Ativa,
 		&i.CriadoEm,
+		&i.TecnicoID,
 		&i.MaquinaNome,
 		&i.SetorID,
 		&i.SetorNome,
 		&i.LojaID,
 		&i.LojaNome,
+		&i.TecnicoNome,
 		&i.Vencida,
+	)
+	return i, err
+}
+
+const obterPreventivaVencidaParaAbertura = `-- name: ObterPreventivaVencidaParaAbertura :one
+SELECT
+    p.id,
+    p.tenant_id,
+    p.descricao,
+    p.maquina_id,
+    p.tecnico_id,
+    m.setor_id
+FROM preventiva p
+JOIN maquina m ON m.tenant_id = p.tenant_id AND m.id = p.maquina_id
+WHERE p.id = $1
+  AND p.tenant_id = $2
+  AND p.ativa
+  AND m.ativa
+  AND p.proxima_data <= (now() AT TIME ZONE 'America/Sao_Paulo')::date
+FOR UPDATE OF p
+`
+
+type ObterPreventivaVencidaParaAberturaParams struct {
+	ID       int64
+	TenantID int64
+}
+
+type ObterPreventivaVencidaParaAberturaRow struct {
+	ID        int64
+	TenantID  int64
+	Descricao string
+	MaquinaID int64
+	TecnicoID *int64
+	SetorID   int64
+}
+
+// Relê uma preventiva vencida sob lock, dentro da transação que vai abrir a
+// solicitação e a OS dela. É a segunda metade de ListarPreventivasVencidas: a
+// primeira varre, esta confirma e trava.
+//
+// ⚠️ O FOR UPDATE é o que impede duas réplicas do cron de abrirem o mesmo
+// ciclo duas vezes, e substitui uq_preventiva_pendente (migration 000008). A
+// sequência é: a réplica A trava a linha, insere solicitação + OS e avança
+// proxima_data no mesmo commit; a réplica B fica bloqueada no SELECT até esse
+// commit, e quando enfim lê a linha a data já está no futuro -- o WHERE não
+// casa, a query devolve pgx.ErrNoRows e o job trata como "outra execução já
+// pegou", não como falha. Sem o lock as duas leriam a data antiga e as duas
+// escreveriam.
+//
+// FOR UPDATE OF p, não FOR UPDATE puro: o lock é da preventiva, que é a linha
+// que muda. Travar `maquina` junto seria bloquear a edição da máquina pelo
+// Administrador durante o job, sem necessidade nenhuma.
+//
+// Repete os filtros de ListarPreventivasVencidas de propósito (p.ativa,
+// m.ativa, a data com fuso explícito) em vez de confiar no que a varredura já
+// filtrou: entre uma e outra o Administrador pode ter desativado a preventiva
+// ou a máquina. É a mesma releitura sob lock que ObterLojaParaEscrita faz
+// antes de criar setor, pelo mesmo motivo.
+//
+// tecnico_id sai como *int64 (a coluna é nullable -- ver migration 000008) e o
+// service recusa a preventiva sem técnico com erro visível, em vez de pular
+// calado. Não force ::bigint aqui: o NULL é um estado real desta coluna, não
+// uma folga do sqlc.
+func (q *Queries) ObterPreventivaVencidaParaAbertura(ctx context.Context, arg ObterPreventivaVencidaParaAberturaParams) (ObterPreventivaVencidaParaAberturaRow, error) {
+	row := q.db.QueryRow(ctx, obterPreventivaVencidaParaAbertura, arg.ID, arg.TenantID)
+	var i ObterPreventivaVencidaParaAberturaRow
+	err := row.Scan(
+		&i.ID,
+		&i.TenantID,
+		&i.Descricao,
+		&i.MaquinaID,
+		&i.TecnicoID,
+		&i.SetorID,
 	)
 	return i, err
 }

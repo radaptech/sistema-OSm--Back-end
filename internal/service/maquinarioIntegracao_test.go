@@ -25,6 +25,8 @@ func TestMaquinarioCrud(t *testing.T) {
 		t.Fatalf("erro ao criar empresa: %v", err)
 	}
 
+	tecnicoPrev := tecnicoParaPreventiva(t, ctx, pool, tenantID)
+
 	loja, err := svcLoja.CadastrarLoja(ctx, tenantID, model.NovaLojaPayload{Nome: "Loja A"})
 	if err != nil {
 		t.Fatalf("erro ao criar loja: %v", err)
@@ -43,6 +45,7 @@ func TestMaquinarioCrud(t *testing.T) {
 			NumeroPatrimonio: patrimonio,
 			Nome:             nome,
 			Preventivas: []model.PreventivaPayload{{
+				TecnicoId:     tecnicoPrev,
 				Descricao:     "Trocar filtro",
 				IntervaloDias: 30,
 				ProximaData:   config.NewDataBrPtr(time.Now().AddDate(0, 0, 7)),
@@ -137,6 +140,7 @@ func TestMaquinarioCrud(t *testing.T) {
 			NumeroPatrimonio: "P1",
 			Nome:             "Forno Novo",
 			Preventivas: []model.PreventivaPayload{{
+				TecnicoId:     tecnicoPrev,
 				Descricao:     "Lubrificar",
 				IntervaloDias: 15,
 				ProximaData:   config.NewDataBrPtr(time.Now().AddDate(0, 0, 3)),
@@ -197,6 +201,7 @@ func TestMaquinarioCrud(t *testing.T) {
 		if _, err := svc.AtualizarMaquina(ctx, tenantID, 9999, model.AtualizarMaquina{
 			SetorID: setor.Id, Criticidade: "Baixa", NumeroPatrimonio: "PX", Nome: "X",
 			Preventivas: []model.PreventivaPayload{{
+				TecnicoId: tecnicoPrev,
 				Descricao: "X", IntervaloDias: 1,
 				ProximaData: config.NewDataBrPtr(time.Now()), Ativa: true,
 			}},

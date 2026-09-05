@@ -273,22 +273,58 @@ não ficou no repo) que confirmou `CadastrarSolicitacaoMaquinario` voltando em ~
 (`POST /instance/connect/sistema-os-notificacoes` contra a Evolution API). Nenhum código
 pendente.
 
-## Abertura automática de solicitação por preventiva (feito; falta o Cron no Railway)
-Ao vencer a `proxima_data` de uma preventiva **ativa**, o sistema abre uma **Solicitação**
-(não uma OS) que cai na fila do Gestor. Ela nasce com `origem = 'preventiva'`,
-`preventiva_id` preenchido e `solicitante_id` **nulo** — não houve pessoa. A OS só nasce
-depois, quando o Gestor aprova com técnico + urgência: criar OS direto pularia a aprovação.
+## Abertura automática de OS por preventiva (feito; falta o Cron no Railway)
+Ao vencer a `proxima_data` de uma preventiva **ativa**, o sistema abre a **Solicitação e
+a Ordem de Serviço juntas**, na mesma transação. A solicitação nasce com
+`origem = 'preventiva'`, `preventiva_id` preenchido, `solicitante_id` **nulo** (não houve
+pessoa) e status **`Convertida`**; a OS nasce `Aberta` no nome do técnico que a própria
+preventiva carrega.
 
-**Implementado e testado (28/08/2026)**, ponta a ponta contra Postgres de verdade:
-`ListarPreventivasVencidas` (`preventiva.sql`), `CriarSolicitacaoPreventiva`
-(`solicitacao_os.sql`, arquivo novo), `AbrirSolicitacoesDePreventivasVencidas` +
+⚠️ **Preventiva não passa pela fila do Gestor (mudou na migration `000008`).** Até então
+a solicitação nascia `Pendente` e esperava aprovação. O trabalho, porém, já foi aprovado
+quando a máquina foi cadastrada — procedimento, intervalo e data saíram de lá —, então a
+segunda aprovação a cada ciclo não decidia nada, só atrasava. O Gestor continua vendo
+tudo pelas abas de **OS em Andamento** e **Manutenção Prev.**; ele só perdeu o passo de
+clicar em "Abrir OS".
+
+- **A solicitação continua existindo, e isso não é cerimônia.** `horas_parada` é medida
+  desde `solicitacao_os.criado_em` (`vw_os_horas`), `uq_os_solicitacao` exige uma
+  solicitação por OS, e o card do Técnico busca a origem para mostrar o problema. Tirá-la
+  quebraria as três coisas de uma vez.
+- **Quem escolhe o técnico é o Administrador, no cadastro** (`preventiva.tecnico_id`). O
+  job não sorteia: preventiva é trabalho recorrente e previsível, e sortear por área e
+  loja exigiria uma regra de desempate que ninguém pediu, além de poder cair em alguém
+  afastado. O service recusa técnico que não existe, que não é mais técnico ou que está
+  desativado — a FK garante só que é usuário do tenant.
+- **`urgencia` é sempre `Baixa` e `aberta_por_id` é `NULL`**, os dois literais na query
+  (`CriarOrdemServicoDePreventiva`). Preventiva é trabalho planejado com data marcada, e
+  ninguém abriu a OS — foi o calendário. Inventar um ator gravaria autoria falsa na
+  coluna que existe para responder "quem abriu"; por isso a `000008` tirou o `NOT NULL`.
+- **`afeta_producao` é `false`**, então a OS de preventiva não acumula horas de máquina
+  parada e a tela escreve "Não se aplica". Não é decisão nova: a solicitação de preventiva
+  nunca teve linha em `solicitacao_impacto` (não há Solicitante para marcar). Se um dia a
+  preventiva precisar parar a máquina de propósito, isso vira um campo do cadastro.
+- ⚠️ **Consequência assumida: sumiu o freio humano.** Antes, uma preventiva vencida ficava
+  parada esperando o Gestor e não disparava de novo. Agora o ciclo avança sempre, então
+  preventiva de intervalo curto com técnico lento acumula OS abertas em cima do mesmo
+  técnico. Há subteste cobrindo isso (`ciclo seguinte abre outra OS`) — se virar problema,
+  o lugar de resolver é o cadastro (intervalo maior) ou uma regra nova de "não abre com a
+  anterior ainda em aberto", que hoje não existe de propósito.
+
+**Implementado e testado (28/08/2026, revisto em 04/09/2026)**, ponta a ponta contra
+Postgres de verdade: `ListarPreventivasVencidas` e `ObterPreventivaVencidaParaAbertura`
+(`preventiva.sql`), `CriarSolicitacaoPreventiva` e `CriarOrdemServicoDePreventiva`
+(`solicitacao_os.sql`), `AbrirSolicitacoesDePreventivasVencidas` +
 `abrirSolicitacaoDaPreventiva` (`preventivaService.go`), `cli_preventivas_vencidas.go`
 e `make preventivas-vencidas`. Falta **só** criar o Cron Job no Railway.
 
 Desde a fase de notificação (ver seção própria acima), `abrirSolicitacaoDaPreventiva`
 também chama `notificarPreventivaVencida` no fim — mesmo `Notificador` opcional de
 `SolicitacaoService`, mesmo motivo de rodar em goroutine (uma preventiva com WhatsApp
-lento não pode atrasar as outras 200 no mesmo laço).
+lento não pode atrasar as outras 200 no mesmo laço). ⚠️ **Quem recebe é o técnico
+designado, não os gestores do setor** (`NotificarOSPreventiva`): a OS já nasce atribuída,
+então o Gestor não tem ação pendente e a mensagem seria ruído diário — o caminho mais
+curto para ninguém mais ler a notificação de solicitação de verdade.
 
 - **A migration `000005` destravou isso.** `fn_check_solicitacao_tem_foto` exigia foto em
   *toda* solicitação, e a de preventiva não tem nem como ter — ninguém fotografou nada.
@@ -310,17 +346,17 @@ lento não pode atrasar as outras 200 no mesmo laço).
   inserir sem avançar faria a preventiva disparar de novo no instante em que o Gestor
   convertesse a solicitação. As falhas voltam juntas num `errors.Join`: erro não-nil do
   job é resultado **parcial**, não fracasso.
-- ⚠️ **`uq_preventiva_pendente` × `NOT EXISTS` fazem coisas diferentes**, e a versão
-  anterior desta seção confundia as duas. O **índice** (único parcial em
-  `solicitacao_os (preventiva_id) WHERE status = 'Pendente'`) é quem **garante a regra** —
-  uma preventiva não tem duas solicitações pendentes ao mesmo tempo (pode ter várias ao
-  longo do tempo, uma por ciclo) — inclusive contra duas réplicas do cron rodando juntas,
-  que é justamente o que a query sozinha nunca pegaria. O **`NOT EXISTS`** na query só
-  evita trabalho condenado: sem ele, toda preventiva parada na fila do Gestor volta a cada
-  execução para tomar 23505 no INSERT, uma transação inútil por dia por preventiva.
-  Tirar o `NOT EXISTS` **não corrompe nada** (o service trata 23505 como benigno e a
-  transação volta inteira) — por isso **nenhum teste falha se ele sumir**. Tirar o índice
-  é que quebra.
+- ⚠️ **A proteção contra ciclo duplicado mudou de lugar na `000008`.** Era o índice único
+  parcial `uq_preventiva_pendente` (`solicitacao_os (preventiva_id) WHERE status =
+  'Pendente'`), e ele parou de valer no instante em que a solicitação passou a nascer
+  `Convertida` — o filtro nunca mais casa. Ampliar o filtro também não serve: uma
+  preventiva **pode** ter várias solicitações ao longo do tempo, uma por ciclo, então
+  nenhum `UNIQUE` sobre `preventiva_id` sozinho resolve. Quem protege agora é o
+  `SELECT ... FOR UPDATE` de `ObterPreventivaVencidaParaAbertura`, dentro da transação de
+  cada preventiva: a segunda réplica fica bloqueada até o commit da primeira, lê a data já
+  avançada e sai sem escrever. É mais forte que o índice, porque cobre o INSERT **e** o
+  `AvancarProximaData`, não só o INSERT. O `NOT EXISTS` da query de varredura saiu junto,
+  pelo mesmo motivo.
 - ⚠️ **`m.ativa` na query é obrigatório e esse SIM está trancado por teste.**
   `DesativarMaquina` não desativa as preventivas da máquina, então sem esse filtro máquina
   desativada abriria solicitação a cada ciclo, para sempre, sem jeito de parar pela API
