@@ -536,7 +536,7 @@ type OrdemServico struct {
 	TecnicoID             int64
 	EmpresaTerceirizadaID *int64
 	TerceiroAcionadoEm    pgtype.Timestamptz
-	AbertaPorID           int64
+	AbertaPorID           *int64
 	AfetaProducao         bool
 	Status                StatusOs
 	AbertaEm              pgtype.Timestamptz
@@ -591,6 +591,7 @@ type Preventiva struct {
 	ProximaData   pgtype.Date
 	Ativa         bool
 	CriadoEm      pgtype.Timestamptz
+	TecnicoID     *int64
 }
 
 type Setor struct {

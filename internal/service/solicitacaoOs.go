@@ -397,7 +397,10 @@ func (s *SolicitacaoService) AbrirOS(ctx context.Context, tenantId, atorId int64
 		Tipo:          tipoOs,
 		TecnicoID:     payload.TecnicoId,
 		Urgencia:      urgencia,
-		AbertaPorID:   atorId,
+		// Ponteiro desde a migration 000008, que tornou aberta_por_id nullable
+		// para a OS de preventiva (aberta por ninguém, ver
+		// CriarOrdemServicoDePreventiva). Aqui é sempre o Gestor que clicou.
+		AbertaPorID:   &atorId,
 		AfetaProducao: afetaProducao,
 	})
 	if err != nil {

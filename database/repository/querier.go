@@ -42,6 +42,11 @@ type Querier interface {
 	// preventiva de máquina deixaria as solicitações que ela já gerou apontando
 	// para uma máquina que não é mais a dela. O front manda o campo no PUT; o
 	// service ignora.
+	//
+	// tecnico_id ENTRA aqui, diferente de maquina_id: trocar quem atende a
+	// preventiva é justamente o que a edição serve para fazer (técnico saiu da
+	// empresa, mudou de área), e não desfaz nada -- as OS já abertas guardam o
+	// técnico delas em ordem_servico.tecnico_id, não olham mais para cá.
 	AtualizarPreventiva(ctx context.Context, arg AtualizarPreventivaParams) (Preventiva, error)
 	AtualizarSenhaUsuario(ctx context.Context, arg AtualizarSenhaUsuarioParams) error
 	// Sem loja_id: mudar o setor de loja moveria junto as máquinas, o histórico de
@@ -176,7 +181,51 @@ type Querier interface {
 	// o banco já recusa sozinho um setor de outro tenant, sem checagem extra
 	// aqui.
 	CriarMaquina(ctx context.Context, arg CriarMaquinaParams) (Maquina, error)
-	// Nasce da aprovação do Gestor (POST /:id/abrir-os): só o INSERT mínimo que
+	// Insere a OS da preventiva vencida, na mesma transação de
+	// CriarSolicitacaoPreventiva e AvancarProximaData. É o irmão automático de
+	// CriarOrdemServicoDeSolicitacao: o mesmo INSERT, sem os campos que só um
+	// Gestor clicando saberia preencher.
+	//
+	// Query separada, e não um parâmetro a mais na outra, pelo mesmo motivo que
+	// CriarSolicitacaoPreventiva é separada de CriarSolicitacaoMaquinario: aqui
+	// três dos sete valores são literais que as constraints (ou o fluxo) não
+	// deixam variar, e passá-los como parâmetro só criaria a chance de o job
+	// mandar o valor errado.
+	//
+	//   `tipo` é sempre 'maquinario' -- preventiva é de máquina cadastrada
+	//   (ck_solicitacao_alvo já garante isso do lado da solicitação), e
+	//   'terceiros' é promoção posterior, decidida pelo Técnico;
+	//
+	//   `urgencia` é sempre 'Baixa'. Preventiva é trabalho planejado com data
+	//   marcada: se fosse urgente não teria esperado o calendário. Deixar o job
+	//   escolher exigiria uma regra ("crítica vira Alta"?) que ninguém pediu, e a
+	//   criticidade da máquina já é visível no card do Técnico;
+	//
+	//   `aberta_por_id` é NULL -- ninguém abriu, foi a data. A coluna deixou de
+	//   ser NOT NULL na migration 000008 exatamente para isto. Inventar um ator
+	//   (o Administrador que cadastrou a preventiva, o técnico que vai executar)
+	//   gravaria autoria falsa na coluna que existe para responder "quem abriu".
+	//   NULL aqui é o mesmo NULL de solicitante_id na solicitação de origem
+	//   'preventiva': o sistema.
+	//
+	// `afeta_producao` é false e não parâmetro: a solicitação de preventiva nasce
+	// sem nenhuma linha em solicitacao_impacto (não há Solicitante para marcar
+	// nada), então ler a tabela devolveria false sempre. O efeito é que a OS de
+	// preventiva não acumula horas de máquina parada -- a tela escreve "Não se
+	// aplica". Se um dia a preventiva precisar parar a máquina de propósito, isto
+	// vira um campo do cadastro da preventiva, não uma leitura de impacto.
+	//
+	// `tecnico_id` é o único parâmetro de verdade: vem de preventiva.tecnico_id,
+	// escolhido pelo Administrador no cadastro (migration 000008). O service
+	// confere que ele ainda é um técnico ativo antes de chegar aqui -- a FK só
+	// garante que é um usuário do tenant.
+	//
+	// RETURNING id, aberta_em pelo mesmo motivo de CriarOrdemServicoDeSolicitacao:
+	// é tudo que o chamador precisa, sem reler a linha inteira.
+	CriarOrdemServicoDePreventiva(ctx context.Context, arg CriarOrdemServicoDePreventivaParams) (CriarOrdemServicoDePreventivaRow, error)
+	// Nasce da aprovação do Gestor (POST /:id/abrir-os) -- o caminho humano; a OS
+	// de preventiva tem o seu próprio INSERT, CriarOrdemServicoDePreventiva. Só o
+	// INSERT mínimo que
 	// faz a linha existir, ck_os_executor validando o resto (tecnico_id e
 	// urgencia NOT NULL, e como tipo aqui nunca é 'terceiros' -- solicitacao_os
 	// só produz 'maquinario'/'reparo' -- empresa_terceirizada_id e
@@ -234,6 +283,11 @@ type Querier interface {
 	// fk_preventiva_maquina é composta (tenant_id, maquina_id): o banco recusa
 	// sozinho pendurar preventiva em máquina de outro tenant.
 	// ck_intervalo (intervalo_dias > 0) volta 23514 e vira ErrConflitoIntegridade.
+	//
+	// tecnico_id é quem vai receber a OS quando esta preventiva vencer (migration
+	// 000008): o job não escolhe técnico, lê o que está aqui. A coluna é nullable
+	// no schema para a migration não falhar com dado dentro, mas o service exige
+	// o campo -- preventiva sem técnico não tem para quem abrir OS.
 	CriarPreventiva(ctx context.Context, arg CriarPreventivaParams) (Preventiva, error)
 	// Setor pertence a uma loja. Exclusão é soft delete (ativo = false) -- ver
 	// "Soft delete" em docs/modelagem-banco-dados.md: máquina, solicitação e o
@@ -286,9 +340,17 @@ type Querier interface {
 	//                          é proibido -- por isso nem aparece na lista de
 	//                          colunas.
 	//
-	// `status` fica no DEFAULT 'Pendente': a OS só nasce quando o Gestor aprova com
-	// técnico e urgência (POST /solicitacoes/:id/abrir-os). Criar OS direto pularia
-	// a aprovação, que é o ponto inteiro do fluxo.
+	// `status` é literal 'Convertida', não o DEFAULT 'Pendente': preventiva não
+	// passa mais pela fila do Gestor. O trabalho já foi aprovado quando a máquina
+	// foi cadastrada -- procedimento, intervalo e data saíram de lá --, e pedir uma
+	// segunda aprovação a cada ciclo não decide nada. A OS nasce na mesma
+	// transação (CriarOrdemServicoDePreventiva), com o técnico que a preventiva já
+	// carrega, então a solicitação nunca chega a existir Pendente.
+	//
+	// Ela CONTINUA existindo, e isso é o ponto: horas_parada é medida desde
+	// solicitacao_os.criado_em (vw_os_horas), uq_os_solicitacao exige uma
+	// solicitação por OS, e o card do Técnico busca a origem para mostrar o
+	// problema. A solicitação não é burocracia da aprovação, é o fato de origem.
 	//
 	// `setor_id` é NOT NULL e vem da máquina (a solicitação não guarda loja -- ela
 	// sai via setor). Quem lê é ListarPreventivasVencidas, que já projeta
@@ -297,13 +359,14 @@ type Querier interface {
 	// Sem foto e sem ON CONFLICT, os dois de propósito:
 	//   - trg_solicitacao_tem_foto exige anexo só para origem = 'solicitante'
 	//     desde a migration 000005 -- antes dela este INSERT falhava no COMMIT;
-	//   - uq_preventiva_pendente (índice único parcial em preventiva_id WHERE
-	//     status = 'Pendente') é a rede contra execução duplicada do cron, e é ele
-	//     -- não o NOT EXISTS da query que alimenta este INSERT -- quem garante a
-	//     regra quando duas réplicas rodam juntas. Deixar o 23505 subir e o service
-	//     tratar como benigno é mais simples que um ON CONFLICT com predicado
-	//     parcial, que devolveria zero linhas e faria o :one virar pgx.ErrNoRows --
-	//     um segundo caso de erro para o mesmo evento.
+	//   - a rede contra execução duplicada do cron deixou de ser um índice e
+	//     passou a ser o lock de ObterPreventivaVencidaParaAbertura (SELECT ...
+	//     FOR UPDATE, na mesma transação). uq_preventiva_pendente filtrava por
+	//     status = 'Pendente' e parou de casar quando a solicitação passou a
+	//     nascer 'Convertida'; ampliar o filtro não serviria, porque uma
+	//     preventiva PODE ter várias solicitações ao longo do tempo, uma por
+	//     ciclo. O lock é mais forte: cobre o INSERT e o AvancarProximaData
+	//     juntos, não só o INSERT (migration 000008).
 	// Os casts ::bigint em maquina_id e preventiva_id não são decoração: as duas
 	// colunas são nullable no schema (precisam ser, para 'reparo' e para a origem
 	// humana), e sem o cast o sqlc gera *int64 nos parâmetros. Aqui elas nunca são
@@ -527,11 +590,16 @@ type Querier interface {
 	// Ordena por proxima_data: o que interessa na fila é o que vence antes, não a
 	// ordem alfabética da máquina. Array simples, sem paginação -- o front pagina
 	// no cliente.
+	// LEFT e não INNER: tecnico_id é nullable (preventiva anterior à migration
+	// 000008 não tem técnico). Com INNER essas linhas sumiriam da listagem, que é
+	// exatamente onde o Administrador precisa vê-las para corrigir.
 	ListarPreventivas(ctx context.Context, arg ListarPreventivasParams) ([]ListarPreventivasRow, error)
 	// Alimenta o job de abertura automática de solicitação (subcomando de CLI
 	// `preventivas-vencidas`, chamado pelo Railway Cron -- ver "Abertura automática
 	// de solicitação por preventiva" no CLAUDE.md). Cada linha daqui vira uma
-	// solicitação com origem = 'preventiva' na fila do Gestor.
+	// solicitação com origem = 'preventiva' e a OS dela, já atribuída ao técnico
+	// da própria preventiva -- desde a migration 000008 isto não passa pela fila
+	// do Gestor.
 	//
 	// ⚠️ É a única query do projeto SEM tenant_id no WHERE, e isso é proposital:
 	// não há request, não há token, não há tenant. O job varre todos os tenants de
@@ -540,24 +608,18 @@ type Querier interface {
 	//
 	// Sem parâmetro nenhum, pelo mesmo motivo.
 	//
-	// Sobre o NOT EXISTS e uq_preventiva_pendente (índice único parcial em
-	// solicitacao_os (preventiva_id) WHERE status = 'Pendente'), que fazem coisas
-	// diferentes e é fácil confundir:
+	// ⚠️ O NOT EXISTS sobre solicitação 'Pendente' que morava aqui SAIU, junto com
+	// uq_preventiva_pendente (migration 000008), e os dois pelo mesmo motivo: a
+	// solicitação de preventiva não passa mais pela fila do Gestor, nasce
+	// 'Convertida' com a OS junto. O filtro existia para pular a preventiva que
+	// estava parada esperando aprovação -- estado que deixou de existir, porque
+	// AvancarProximaData roda na mesma transação e joga a data para o próximo
+	// ciclo. Não devolva o filtro: ele nunca casaria e esconderia essa mudança.
 	//
-	//   o índice é quem garante a regra -- uma preventiva não tem duas
-	//   solicitações pendentes ao mesmo tempo (pode ter várias ao longo do tempo,
-	//   uma por ciclo). Ele vale inclusive contra duas réplicas do cron rodando
-	//   juntas, que é justamente o que a query sozinha não pega;
-	//
-	//   o NOT EXISTS evita o trabalho condenado. Enquanto o Gestor não converte
-	//   nem rejeita, a preventiva continua com proxima_data no passado, então sem
-	//   este filtro ela voltaria em toda execução para tomar 23505 no INSERT --
-	//   uma transação inútil por preventiva parada na fila, todo dia.
-	//
-	// Ou seja: tirar o NOT EXISTS não corrompe nada (o service trata o 23505 como
-	// benigno e a transação inteira volta), só desperdiça. Tirar o índice é que
-	// quebra. É por isso que nenhum teste falha se este filtro sumir -- não tente
-	// escrever um sem antes tornar o desperdício observável.
+	// Quem protege contra duas réplicas do cron abrindo o mesmo ciclo duas vezes
+	// agora é ObterPreventivaVencidaParaAbertura (SELECT ... FOR UPDATE) na
+	// transação de cada preventiva -- esta query aqui é só a varredura, e ler uma
+	// linha que outra réplica já processou é esperado.
 	//
 	// m.ativa é igualmente obrigatório: DesativarMaquina NÃO desativa as
 	// preventivas da máquina (maquina.sql, e não há ON DELETE/trigger fazendo
@@ -569,9 +631,11 @@ type Querier interface {
 	// `vencida` nas outras duas queries: o container roda em UTC, e a preventiva
 	// apareceria vencida até 3h antes da virada do dia no Brasil.
 	//
-	// Projeta só o que o INSERT da solicitação precisa (o setor_id vem da máquina:
-	// solicitacao_os.setor_id é NOT NULL e a solicitação não guarda loja). Não usa
-	// p.* como as outras: aqui ninguém monta resposta de contrato.
+	// Projeta só id e tenant_id: o resto (descrição, máquina, setor, técnico) é
+	// relido sob lock por ObterPreventivaVencidaParaAbertura, dentro da transação
+	// de cada preventiva. Carregar os campos aqui seria carregar um retrato que
+	// pode estar velho quando o INSERT acontecer. Não usa p.* como as outras:
+	// aqui ninguém monta resposta de contrato.
 	ListarPreventivasVencidas(ctx context.Context) ([]ListarPreventivasVencidasRow, error)
 	// loja_id é opcional (NULL não filtra) porque o front usa os dois modos: o
 	// select em cascata pede os setores de uma loja (GET /setores?lojaId=) e
@@ -783,7 +847,38 @@ type Querier interface {
 	// por aqui dentro da mesma transação para responder na forma do contrato.
 	//
 	// Sem filtro de `ativa`: a tela de edição precisa carregar o registro.
+	// LEFT e não INNER: tecnico_id é nullable (preventiva anterior à migration
+	// 000008 não tem técnico). Com INNER essas linhas sumiriam da listagem, que é
+	// exatamente onde o Administrador precisa vê-las para corrigir.
 	ObterPreventivaPorID(ctx context.Context, arg ObterPreventivaPorIDParams) (ObterPreventivaPorIDRow, error)
+	// Relê uma preventiva vencida sob lock, dentro da transação que vai abrir a
+	// solicitação e a OS dela. É a segunda metade de ListarPreventivasVencidas: a
+	// primeira varre, esta confirma e trava.
+	//
+	// ⚠️ O FOR UPDATE é o que impede duas réplicas do cron de abrirem o mesmo
+	// ciclo duas vezes, e substitui uq_preventiva_pendente (migration 000008). A
+	// sequência é: a réplica A trava a linha, insere solicitação + OS e avança
+	// proxima_data no mesmo commit; a réplica B fica bloqueada no SELECT até esse
+	// commit, e quando enfim lê a linha a data já está no futuro -- o WHERE não
+	// casa, a query devolve pgx.ErrNoRows e o job trata como "outra execução já
+	// pegou", não como falha. Sem o lock as duas leriam a data antiga e as duas
+	// escreveriam.
+	//
+	// FOR UPDATE OF p, não FOR UPDATE puro: o lock é da preventiva, que é a linha
+	// que muda. Travar `maquina` junto seria bloquear a edição da máquina pelo
+	// Administrador durante o job, sem necessidade nenhuma.
+	//
+	// Repete os filtros de ListarPreventivasVencidas de propósito (p.ativa,
+	// m.ativa, a data com fuso explícito) em vez de confiar no que a varredura já
+	// filtrou: entre uma e outra o Administrador pode ter desativado a preventiva
+	// ou a máquina. É a mesma releitura sob lock que ObterLojaParaEscrita faz
+	// antes de criar setor, pelo mesmo motivo.
+	//
+	// tecnico_id sai como *int64 (a coluna é nullable -- ver migration 000008) e o
+	// service recusa a preventiva sem técnico com erro visível, em vez de pular
+	// calado. Não force ::bigint aqui: o NULL é um estado real desta coluna, não
+	// uma folga do sqlc.
+	ObterPreventivaVencidaParaAbertura(ctx context.Context, arg ObterPreventivaVencidaParaAberturaParams) (ObterPreventivaVencidaParaAberturaRow, error)
 	// GET /solicitacoes/resumo -- os três contadores da Home do Solicitante.
 	// `abertas`/`emAndamento`/`concluidas` não são estados de solicitacao_os
 	// (que só tem Pendente/Convertida/Rejeitada): são o status da OrdemServico

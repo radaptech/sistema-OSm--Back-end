@@ -22,7 +22,8 @@ O modelo de dados em si (o porquê de cada constraint) está em
   manualmente em dev, só em produção/CI antes do deploy do binário.
 - Aplicadas até aqui: `000001` schema inicial, `000002` horas parada desde a solicitação,
   `000003` chave do R2, `000004` criticidade vira ENUM, `000005` foto só na solicitação
-  humana, `000006` seed de `area_tecnico`, `000007` urgência vira ENUM.
+  humana, `000006` seed de `area_tecnico`, `000007` urgência vira ENUM, `000008`
+  preventiva vai direto para o técnico.
 - ⚠️ **Tabela e tipo dividem namespace no Postgres** — trocar uma tabela por um ENUM
   homônimo exige dropar a tabela **antes** de criar o tipo (foi o caso de `000004`).
 

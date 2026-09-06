@@ -27,6 +27,8 @@ func TestEscopoDasListagens(t *testing.T) {
 	if err := pool.QueryRow(ctx, `INSERT INTO empresa (subdominio, nome) VALUES ('escopo', 'Empresa Escopo') RETURNING id`).Scan(&tenantID); err != nil {
 		t.Fatalf("erro ao criar empresa: %v", err)
 	}
+
+	tecnicoPrev := tecnicoParaPreventiva(t, ctx, pool, tenantID)
 	for _, l := range []struct {
 		nome string
 		dest *int64
@@ -54,6 +56,7 @@ func TestEscopoDasListagens(t *testing.T) {
 		_, err := svcMaquina.CadastrarMaquina(ctx, tenantID, model.MaquinarioInsert{
 			SetorID: m.setor, Criticidade: "Alta", NumeroPatrimonio: "PAT-" + m.nome, Nome: m.nome,
 			Preventivas: []model.PreventivaPayload{{
+				TecnicoId: tecnicoPrev,
 				Descricao: "Revisão", IntervaloDias: 30,
 				ProximaData: config.NewDataBrPtr(time.Now().AddDate(0, 0, 7)), Ativa: true,
 			}},

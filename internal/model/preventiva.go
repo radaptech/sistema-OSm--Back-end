@@ -16,8 +16,17 @@ import (
 //
 // ProximaData é ponteiro porque config.DataBr só tem MarshalJSON com receiver
 // ponteiro -- como campo valor o encoding/json ignora o método e serializa {}.
+//
+// TecnicoId é quem vai receber a OS quando esta preventiva vencer: o job não
+// escolhe técnico, lê o que está gravado aqui (migration 000008). Obrigatório
+// -- preventiva sem técnico não tem para quem abrir OS --, mas validado no
+// service e não por tag `binding:"required"`: o zero de int64 é 0, e `required`
+// no go-playground rejeita o zero, o que daria a mensagem genérica do
+// validador em vez de "escolha o técnico responsável". Mesmo critério do
+// maquinaId no POST /preventivas, que também é cheque do controller.
 type PreventivaPayload struct {
 	MaquinaId     int64          `json:"maquinaId"`
+	TecnicoId     int64          `json:"tecnicoId"`
 	Descricao     string         `json:"descricao" binding:"required"`
 	IntervaloDias int32          `json:"intervaloDias" binding:"required,gt=0"`
 	ProximaData   *config.DataBr `json:"proximaData" binding:"required"`
@@ -38,11 +47,17 @@ type Preventiva struct {
 	IntervaloDias int32          `json:"intervaloDias"`
 	ProximaData   *config.DataBr `json:"proximaData"`
 	Ativa         bool           `json:"ativa"`
-	SetorId       int64          `json:"setorId"`
-	SetorNome     string         `json:"setorNome"`
-	LojaId        int64          `json:"lojaId"`
-	LojaNome      string         `json:"lojaNome"`
-	Vencida       bool           `json:"vencida"`
+	// TecnicoId/TecnicoNome são ponteiro porque a coluna é nullable: preventiva
+	// anterior à migration 000008 não tem técnico e precisa aparecer assim
+	// mesmo na listagem, que é onde o Administrador vai corrigi-la. Toda
+	// preventiva criada ou editada depois disso tem os dois preenchidos.
+	TecnicoId   *int64  `json:"tecnicoId,omitempty"`
+	TecnicoNome *string `json:"tecnicoNome,omitempty"`
+	SetorId     int64   `json:"setorId"`
+	SetorNome   string  `json:"setorNome"`
+	LojaId      int64   `json:"lojaId"`
+	LojaNome    string  `json:"lojaNome"`
+	Vencida     bool    `json:"vencida"`
 }
 
 // MontarPreventiva é a única tradução de linha de preventiva para resposta --
@@ -57,6 +72,8 @@ func MontarPreventiva(p repository.ListarPreventivasRow) Preventiva {
 		IntervaloDias: p.IntervaloDias,
 		ProximaData:   config.NewDataBrPtr(p.ProximaData.Time),
 		Ativa:         p.Ativa,
+		TecnicoId:     p.TecnicoID,
+		TecnicoNome:   p.TecnicoNome,
 		SetorId:       p.SetorID,
 		SetorNome:     p.SetorNome,
 		LojaId:        p.LojaID,

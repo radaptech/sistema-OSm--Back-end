@@ -25,6 +25,8 @@ func TestPreventivaCrud(t *testing.T) {
 		t.Fatalf("erro ao criar empresa: %v", err)
 	}
 
+	tecnicoPrev := tecnicoParaPreventiva(t, ctx, pool, tenantID)
+
 	loja, err := svcLoja.CadastrarLoja(ctx, tenantID, model.NovaLojaPayload{Nome: "Loja A"})
 	if err != nil {
 		t.Fatalf("erro ao criar loja: %v", err)
@@ -44,6 +46,7 @@ func TestPreventivaCrud(t *testing.T) {
 		NumeroPatrimonio: "P1",
 		Nome:             "Forno",
 		Preventivas: []model.PreventivaPayload{{
+			TecnicoId:     tecnicoPrev,
 			Descricao:     "Trocar filtro",
 			IntervaloDias: 30,
 			ProximaData:   emDias(10),
@@ -75,6 +78,7 @@ func TestPreventivaCrud(t *testing.T) {
 
 	t.Run("cadastra avulsa e devolve com os nomes resolvidos", func(t *testing.T) {
 		criada, err := svc.CadastrarPreventiva(ctx, tenantID, model.PreventivaPayload{
+			TecnicoId:     tecnicoPrev,
 			MaquinaId:     maquina.Id,
 			Descricao:     "  Lubrificar  ",
 			IntervaloDias: 15,
@@ -98,6 +102,7 @@ func TestPreventivaCrud(t *testing.T) {
 
 	t.Run("máquina inexistente é conflito, não 500", func(t *testing.T) {
 		_, err := svc.CadastrarPreventiva(ctx, tenantID, model.PreventivaPayload{
+			TecnicoId:     tecnicoPrev,
 			MaquinaId:     maquina.Id + 1000,
 			Descricao:     "Órfã",
 			IntervaloDias: 30,
@@ -111,6 +116,7 @@ func TestPreventivaCrud(t *testing.T) {
 
 	t.Run("intervalo e descrição inválidos são recusados antes do banco", func(t *testing.T) {
 		base := model.PreventivaPayload{
+			TecnicoId: tecnicoPrev,
 			MaquinaId: maquina.Id, Descricao: "Válida", IntervaloDias: 30,
 			ProximaData: emDias(5), Ativa: true,
 		}
@@ -142,6 +148,7 @@ func TestPreventivaCrud(t *testing.T) {
 		alvo := lidas[0]
 
 		atualizada, err := svc.AtualizarPreventiva(ctx, tenantID, alvo.Id, model.PreventivaPayload{
+			TecnicoId:     tecnicoPrev,
 			MaquinaId:     maquina.Id + 999, // ignorado de propósito
 			Descricao:     "Revisar motor",
 			IntervaloDias: 45,
@@ -195,6 +202,7 @@ func TestPreventivaCrud(t *testing.T) {
 			t.Errorf("obter inexistente: %v", err)
 		}
 		if _, err := svc.AtualizarPreventiva(ctx, tenantID, 9999, model.PreventivaPayload{
+			TecnicoId: tecnicoPrev,
 			MaquinaId: maquina.Id, Descricao: "X", IntervaloDias: 1,
 			ProximaData: emDias(1), Ativa: true,
 		}); !errors.Is(err, helper.ErrNaoEncontrado) {
@@ -214,8 +222,8 @@ func TestPreventivaCrud(t *testing.T) {
 			NumeroPatrimonio: "P1",
 			Nome:             "Forno",
 			Preventivas: []model.PreventivaPayload{
-				{Descricao: "Nova A", IntervaloDias: 10, ProximaData: emDias(4), Ativa: true},
-				{Descricao: "Nova B", IntervaloDias: 20, ProximaData: emDias(8), Ativa: true},
+				{TecnicoId: tecnicoPrev, Descricao: "Nova A", IntervaloDias: 10, ProximaData: emDias(4), Ativa: true},
+				{TecnicoId: tecnicoPrev, Descricao: "Nova B", IntervaloDias: 20, ProximaData: emDias(8), Ativa: true},
 			},
 		})
 		if err != nil {

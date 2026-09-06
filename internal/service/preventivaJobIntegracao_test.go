@@ -2,21 +2,26 @@ package service
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 )
 
-// TestAbrirSolicitacoesDePreventivasVencidas cobre o job que abre solicitação
-// automática a partir de preventiva vencida. Integração e não unitário porque
-// tudo que pode dar errado aqui é do banco: os CHECKs que definem a forma da
-// solicitação automática (ck_origem, ck_solicitacao_alvo), o trigger DEFERRABLE
-// que exigia foto até a migration 000005, e o índice parcial
-// uq_preventiva_pendente, que é quem garante "uma preventiva não tem duas
-// solicitações pendentes ao mesmo tempo".
+// TestAbrirSolicitacoesDePreventivasVencidas cobre o job que abre a Solicitação
+// e a Ordem de Serviço a partir de preventiva vencida. Integração e não
+// unitário porque tudo que pode dar errado aqui é do banco: os CHECKs que
+// definem a forma da solicitação automática (ck_origem, ck_solicitacao_alvo), o
+// trigger DEFERRABLE que exigia foto até a migration 000005, e o
+// aberta_por_id nullable da migration 000008.
+//
+// ⚠️ Desde a migration 000008 a preventiva NÃO passa mais pela fila do Gestor:
+// a solicitação nasce 'Convertida' com a OS junto, atribuída ao técnico que a
+// própria preventiva carrega. Os subtestes abaixo trancam as duas metades
+// disso -- a forma das linhas e as recusas quando o técnico não serve.
 //
 // Os subtestes compartilham estado de propósito e rodam em ordem: "não duplica"
-// só faz sentido depois de "abre", e "reabre no ciclo seguinte" só depois das
-// duas.
+// só faz sentido depois de "abre", e as recusas do fim mexem no técnico, o que
+// invalidaria os anteriores.
 func TestAbrirSolicitacoesDePreventivasVencidas(t *testing.T) {
 
 	ctx := context.Background()
@@ -31,6 +36,9 @@ func TestAbrirSolicitacoesDePreventivasVencidas(t *testing.T) {
 	if err := pool.QueryRow(ctx, `INSERT INTO empresa (subdominio, nome) VALUES ('teste', 'Empresa Teste') RETURNING id`).Scan(&tenantID); err != nil {
 		t.Fatalf("erro ao criar empresa: %v", err)
 	}
+
+	tecnicoPrev := tecnicoParaPreventiva(t, ctx, pool, tenantID)
+
 	if err := pool.QueryRow(ctx, `INSERT INTO loja (tenant_id, nome) VALUES ($1, 'Loja A') RETURNING id`, tenantID).Scan(&lojaID); err != nil {
 		t.Fatalf("erro ao criar loja: %v", err)
 	}
@@ -50,45 +58,37 @@ func TestAbrirSolicitacoesDePreventivasVencidas(t *testing.T) {
 		}
 	}
 
-	// Só a primeira deve gerar solicitação. As outras três são cada um dos
-	// filtros da query, uma por motivo.
-	const intervalo = 30
-	const diasAtraso = 5
-	var vencida int64
-	for _, p := range []struct {
-		descricao  string
-		maquina    int64
-		diasFrente int
-		ativa      bool
-		dest       *int64
-	}{
-		{"Troca de óleo", maquinaAtiva, -diasAtraso, true, &vencida},
-		{"Ainda não venceu", maquinaAtiva, +1, true, nil},
-		{"Vencida mas desabilitada", maquinaAtiva, -diasAtraso, false, nil},
-		{"Vencida em máquina desativada", maquinaInativa, -diasAtraso, true, nil},
-	} {
+	// criarPreventiva insere direto no banco -- o service exige técnico válido
+	// e é justamente isso que os dois últimos subtestes precisam furar.
+	criarPreventiva := func(descricao string, maquina int64, diasFrente int, ativa bool, tecnico *int64) int64 {
+		t.Helper()
 		var id int64
 		if err := pool.QueryRow(ctx,
-			`INSERT INTO preventiva (tenant_id, maquina_id, descricao, intervalo_dias, proxima_data, ativa)
-			 VALUES ($1, $2, $3, $4, CURRENT_DATE + $5::int, $6) RETURNING id`,
-			tenantID, p.maquina, p.descricao, intervalo, p.diasFrente, p.ativa).Scan(&id); err != nil {
-			t.Fatalf("erro ao criar preventiva %q: %v", p.descricao, err)
+			`INSERT INTO preventiva (tenant_id, maquina_id, descricao, intervalo_dias, proxima_data, ativa, tecnico_id)
+			 VALUES ($1, $2, $3, $4, CURRENT_DATE + $5::int, $6, $7) RETURNING id`,
+			tenantID, maquina, descricao, intervalo, diasFrente, ativa, tecnico).Scan(&id); err != nil {
+			t.Fatalf("erro ao criar preventiva %q: %v", descricao, err)
 		}
-		if p.dest != nil {
-			*p.dest = id
-		}
+		return id
 	}
 
-	contarSolicitacoes := func() int {
+	// Só a primeira deve gerar OS. As outras três são cada um dos filtros da
+	// query, uma por motivo.
+	vencida := criarPreventiva("Troca de óleo", maquinaAtiva, -diasAtraso, true, &tecnicoPrev)
+	criarPreventiva("Ainda não venceu", maquinaAtiva, +1, true, &tecnicoPrev)
+	criarPreventiva("Vencida mas desabilitada", maquinaAtiva, -diasAtraso, false, &tecnicoPrev)
+	criarPreventiva("Vencida em máquina desativada", maquinaInativa, -diasAtraso, true, &tecnicoPrev)
+
+	contar := func(tabela string) int {
 		t.Helper()
 		var n int
-		if err := pool.QueryRow(ctx, `SELECT count(*) FROM solicitacao_os`).Scan(&n); err != nil {
-			t.Fatalf("erro ao contar solicitações: %v", err)
+		if err := pool.QueryRow(ctx, `SELECT count(*) FROM `+tabela).Scan(&n); err != nil {
+			t.Fatalf("erro ao contar %s: %v", tabela, err)
 		}
 		return n
 	}
 
-	t.Run("abre solicitação só para a preventiva vencida de máquina ativa", func(t *testing.T) {
+	t.Run("abre solicitação e OS só para a preventiva vencida de máquina ativa", func(t *testing.T) {
 		criadas, err := svc.AbrirSolicitacoesDePreventivasVencidas(ctx)
 		if err != nil {
 			t.Fatalf("job devolveu erro: %v", err)
@@ -96,12 +96,17 @@ func TestAbrirSolicitacoesDePreventivasVencidas(t *testing.T) {
 		if criadas != 1 {
 			t.Fatalf("criadas = %d, esperado 1 (futura, desabilitada e de máquina inativa não podem gerar)", criadas)
 		}
-		if n := contarSolicitacoes(); n != 1 {
+		if n := contar("solicitacao_os"); n != 1 {
 			t.Fatalf("solicitações no banco = %d, esperado 1", n)
+		}
+		// A metade nova: antes da migration 000008 o job parava na solicitação
+		// e a OS só nascia quando o Gestor aprovava.
+		if n := contar("ordem_servico"); n != 1 {
+			t.Fatalf("ordens de serviço no banco = %d, esperado 1 -- a preventiva não passa mais pelo Gestor", n)
 		}
 	})
 
-	t.Run("a solicitação nasce na forma que o Gestor espera", func(t *testing.T) {
+	t.Run("a solicitação nasce Convertida, sem passar pela fila do Gestor", func(t *testing.T) {
 		var (
 			tipo, status, origem, descricao string
 			solicitanteID, itemDescricao    *string
@@ -129,8 +134,10 @@ func TestAbrirSolicitacoesDePreventivasVencidas(t *testing.T) {
 		if origem != "preventiva" || solicitanteID != nil {
 			t.Errorf("origem = %q, solicitante_id = %v; esperado preventiva sem solicitante", origem, solicitanteID)
 		}
-		if status != "Pendente" {
-			t.Errorf("status = %q, esperado Pendente -- a OS só nasce quando o Gestor aprova", status)
+		// O coração da mudança: 'Pendente' aqui significaria que a preventiva
+		// voltou a esperar aprovação do Gestor.
+		if status != "Convertida" {
+			t.Errorf("status = %q, esperado Convertida -- a OS nasce junto, sem aprovação", status)
 		}
 		if maquinaID != maquinaAtiva || preventivaID != vencida {
 			t.Errorf("apontou para máquina %d / preventiva %d, esperado %d / %d", maquinaID, preventivaID, maquinaAtiva, vencida)
@@ -145,6 +152,56 @@ func TestAbrirSolicitacoesDePreventivasVencidas(t *testing.T) {
 		// Migration 000005: sem ela o COMMIT falharia aqui, não o INSERT.
 		if anexos != 0 {
 			t.Errorf("anexos = %d, esperado 0 -- ninguém fotografou nada", anexos)
+		}
+	})
+
+	t.Run("a OS nasce no técnico da preventiva, urgência Baixa e sem autor", func(t *testing.T) {
+		var (
+			tipo, urgencia, status string
+			tecnicoID              int64
+			abertaPor              *int64
+			afetaProducao          bool
+			solicitacaoID          int64
+		)
+		if err := pool.QueryRow(ctx, `
+			SELECT tipo, urgencia, status, tecnico_id, aberta_por_id, afeta_producao, solicitacao_id
+			  FROM ordem_servico`).
+			Scan(&tipo, &urgencia, &status, &tecnicoID, &abertaPor, &afetaProducao, &solicitacaoID); err != nil {
+			t.Fatalf("erro ao ler ordem de serviço: %v", err)
+		}
+
+		if tecnicoID != tecnicoPrev {
+			t.Errorf("tecnico_id = %d, esperado %d -- o técnico vem da preventiva, o job não escolhe", tecnicoID, tecnicoPrev)
+		}
+		// aberta_por_id NULL é o motivo de a coluna ter perdido o NOT NULL na
+		// migration 000008: não houve ator, foi a data.
+		if abertaPor != nil {
+			t.Errorf("aberta_por_id = %v, esperado NULL -- ninguém abriu esta OS", *abertaPor)
+		}
+		// Preventiva é trabalho planejado com data marcada: se fosse urgente
+		// não teria esperado o calendário.
+		if urgencia != "Baixa" {
+			t.Errorf("urgencia = %q, esperado Baixa", urgencia)
+		}
+		if tipo != "maquinario" {
+			t.Errorf("tipo = %q, esperado maquinario", tipo)
+		}
+		if status != "Aberta" {
+			t.Errorf("status = %q, esperado Aberta -- o Técnico ainda não iniciou", status)
+		}
+		// Sem Solicitante não há quem marque impacto, então o relógio de
+		// máquina parada não roda (a tela escreve "Não se aplica").
+		if afetaProducao {
+			t.Error("afeta_producao = true, esperado false -- preventiva não tem marcador de impacto")
+		}
+		// A solicitação continua existindo e sendo a origem: é dela que
+		// vw_os_horas tira o início do relógio de parada.
+		var origem string
+		if err := pool.QueryRow(ctx, `SELECT origem FROM solicitacao_os WHERE id = $1`, solicitacaoID).Scan(&origem); err != nil {
+			t.Fatalf("erro ao ler solicitação de origem: %v", err)
+		}
+		if origem != "preventiva" {
+			t.Errorf("a OS aponta para uma solicitação de origem %q", origem)
 		}
 	})
 
@@ -169,9 +226,8 @@ func TestAbrirSolicitacoesDePreventivasVencidas(t *testing.T) {
 
 	t.Run("segunda execução não duplica", func(t *testing.T) {
 		// Rodar o cron duas vezes (duas réplicas, dois disparos colados) não
-		// pode render duas solicitações. Aqui quem segura ainda é só a data já
-		// avançada pela execução anterior -- o subteste seguinte tira essa
-		// muleta.
+		// pode render duas OS. Quem segura é a data já avançada pela execução
+		// anterior, relida sob lock em ObterPreventivaVencidaParaAbertura.
 		criadas, err := svc.AbrirSolicitacoesDePreventivasVencidas(ctx)
 		if err != nil {
 			t.Fatalf("job devolveu erro na segunda execução: %v", err)
@@ -179,19 +235,16 @@ func TestAbrirSolicitacoesDePreventivasVencidas(t *testing.T) {
 		if criadas != 0 {
 			t.Errorf("criadas = %d, esperado 0", criadas)
 		}
-		if n := contarSolicitacoes(); n != 1 {
-			t.Errorf("solicitações no banco = %d, esperado continuar 1", n)
+		if n := contar("ordem_servico"); n != 1 {
+			t.Errorf("ordens de serviço = %d, esperado continuar 1", n)
 		}
 	})
 
-	t.Run("mesma preventiva vencida de novo, com a anterior pendente, é barrada", func(t *testing.T) {
-		// Sem a muleta da data: a preventiva volta a vencer com a solicitação
-		// anterior ainda Pendente. Duas defesas cobrem este caso e o teste passa
-		// com qualquer uma das duas -- o NOT EXISTS da query a exclui, e se ele
-		// não existisse o índice recusaria o INSERT com 23505, que o service
-		// trata como benigno. Não é um trap de mutação para o NOT EXISTS
-		// (ver o comentário dele em preventiva.sql); é a garantia de que a
-		// combinação das duas nunca gera a segunda pendente.
+	t.Run("ciclo seguinte abre outra OS", func(t *testing.T) {
+		// A preventiva gera uma OS POR CICLO -- e agora sem depender de o
+		// Gestor ter resolvido a anterior, que era a trava do modelo antigo.
+		// Duas OS abertas da mesma preventiva ao mesmo tempo passaram a ser
+		// possíveis: é a consequência assumida de tirar o freio humano.
 		if _, err := pool.Exec(ctx, `UPDATE preventiva SET proxima_data = CURRENT_DATE - 1 WHERE id = $1`, vencida); err != nil {
 			t.Fatalf("erro ao regredir proxima_data: %v", err)
 		}
@@ -199,26 +252,65 @@ func TestAbrirSolicitacoesDePreventivasVencidas(t *testing.T) {
 		if err != nil {
 			t.Fatalf("job devolveu erro: %v", err)
 		}
-		if criadas != 0 || contarSolicitacoes() != 1 {
-			t.Errorf("criadas = %d, solicitações = %d; esperado 0 e 1 -- uma preventiva não tem duas pendentes", criadas, contarSolicitacoes())
+		if criadas != 1 {
+			t.Errorf("criadas = %d, esperado 1 -- a preventiva gera uma OS por ciclo", criadas)
+		}
+		if n := contar("ordem_servico"); n != 2 {
+			t.Errorf("ordens de serviço = %d, esperado 2", n)
 		}
 	})
 
-	t.Run("ciclo seguinte reabre depois que o Gestor resolve a pendente", func(t *testing.T) {
-		// A trava é "duas Pendentes ao mesmo tempo", não "uma por preventiva
-		// para sempre": resolvida a primeira, o próximo vencimento gera outra.
-		if _, err := pool.Exec(ctx, `UPDATE solicitacao_os SET status = 'Convertida' WHERE preventiva_id = $1`, vencida); err != nil {
-			t.Fatalf("erro ao converter solicitação: %v", err)
-		}
+	t.Run("preventiva sem técnico falha alto, não some do laço", func(t *testing.T) {
+		// A coluna é nullable só para a migration 000008 não quebrar com dado
+		// dentro. Pular a linha em silêncio faria a máquina parar de ser
+		// mantida sem ninguém notar; o erro sobe no errors.Join e o cron sai
+		// com código != 0.
+		orfa := criarPreventiva("Sem técnico", maquinaAtiva, -1, true, nil)
+
 		criadas, err := svc.AbrirSolicitacoesDePreventivasVencidas(ctx)
-		if err != nil {
-			t.Fatalf("job devolveu erro: %v", err)
+		if err == nil {
+			t.Fatal("job não devolveu erro para preventiva sem técnico")
 		}
-		if criadas != 1 {
-			t.Errorf("criadas = %d, esperado 1 -- a preventiva gera uma solicitação por ciclo", criadas)
+		if !strings.Contains(err.Error(), "não tem técnico responsável") {
+			t.Errorf("erro = %v; esperado dizer que falta o técnico", err)
 		}
-		if n := contarSolicitacoes(); n != 2 {
-			t.Errorf("solicitações no banco = %d, esperado 2", n)
+		if criadas != 0 || contar("ordem_servico") != 2 {
+			t.Errorf("criadas = %d, OS = %d; esperado 0 e 2 -- nada pode ter sido escrito", criadas, contar("ordem_servico"))
+		}
+
+		// Sai do caminho dos próximos subtestes.
+		if _, err := pool.Exec(ctx, `UPDATE preventiva SET ativa = false WHERE id = $1`, orfa); err != nil {
+			t.Fatalf("erro ao desativar a preventiva órfã: %v", err)
+		}
+	})
+
+	t.Run("técnico que deixou de ser técnico é recusado", func(t *testing.T) {
+		// A FK garante que é usuário do tenant, não que ainda é técnico:
+		// AtualizarUsuario promove um técnico a gestor sem tocar nas
+		// preventivas dele (e zera area_tecnico_id, por ck_usuario_area_tecnico).
+		if _, err := pool.Exec(ctx, `UPDATE usuario SET perfil = 'gestor', area_tecnico_id = NULL WHERE id = $1`, tecnicoPrev); err != nil {
+			t.Fatalf("erro ao promover o técnico: %v", err)
+		}
+		if _, err := pool.Exec(ctx, `UPDATE preventiva SET proxima_data = CURRENT_DATE - 1 WHERE id = $1`, vencida); err != nil {
+			t.Fatalf("erro ao regredir proxima_data: %v", err)
+		}
+
+		criadas, err := svc.AbrirSolicitacoesDePreventivasVencidas(ctx)
+		if err == nil {
+			t.Fatal("job não devolveu erro para técnico que virou gestor")
+		}
+		if !strings.Contains(err.Error(), "não é mais um técnico ativo") {
+			t.Errorf("erro = %v; esperado dizer que o técnico não serve mais", err)
+		}
+		if criadas != 0 || contar("ordem_servico") != 2 {
+			t.Errorf("criadas = %d, OS = %d; esperado 0 e 2", criadas, contar("ordem_servico"))
 		}
 	})
 }
+
+// intervalo e diasAtraso ficam fora da função porque criarPreventiva (closure)
+// e os asserts de proxima_data usam os dois.
+const (
+	intervalo  = 30
+	diasAtraso = 5
+)
