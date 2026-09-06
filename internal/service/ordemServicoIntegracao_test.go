@@ -36,6 +36,8 @@ func TestListarOrdensServico(t *testing.T) {
 	if err := pool.QueryRow(ctx, `INSERT INTO empresa (subdominio, nome) VALUES ('os', 'Empresa OS') RETURNING id`).Scan(&tenantID); err != nil {
 		t.Fatalf("erro ao criar empresa: %v", err)
 	}
+
+	tecnicoPrev := tecnicoParaPreventiva(t, ctx, pool, tenantID)
 	for _, l := range []struct {
 		nome string
 		dest *int64
@@ -59,6 +61,7 @@ func TestListarOrdensServico(t *testing.T) {
 		m, err := svcMaquina.CadastrarMaquina(ctx, tenantID, model.MaquinarioInsert{
 			SetorID: setor, Criticidade: "Alta", NumeroPatrimonio: "PAT-" + nome, Nome: nome,
 			Preventivas: []model.PreventivaPayload{{
+				TecnicoId: tecnicoPrev,
 				Descricao: "Revisão", IntervaloDias: 30,
 				ProximaData: config.NewDataBrPtr(time.Now().AddDate(0, 0, 7)), Ativa: true,
 			}},
@@ -754,6 +757,8 @@ func TestIniciar(t *testing.T) {
 	if err := pool.QueryRow(ctx, `INSERT INTO empresa (subdominio, nome) VALUES ('os-iniciar', 'Empresa OS Iniciar') RETURNING id`).Scan(&tenantID); err != nil {
 		t.Fatalf("erro ao criar empresa: %v", err)
 	}
+
+	tecnicoPrev := tecnicoParaPreventiva(t, ctx, pool, tenantID)
 	if err := pool.QueryRow(ctx, `INSERT INTO loja (tenant_id, nome) VALUES ($1, 'Loja') RETURNING id`, tenantID).Scan(&lojaID); err != nil {
 		t.Fatalf("erro ao criar loja: %v", err)
 	}
@@ -764,6 +769,7 @@ func TestIniciar(t *testing.T) {
 	maquina, err := svcMaquina.CadastrarMaquina(ctx, tenantID, model.MaquinarioInsert{
 		SetorID: setorID, Criticidade: "Alta", NumeroPatrimonio: "PAT-INI", Nome: "Forno",
 		Preventivas: []model.PreventivaPayload{{
+			TecnicoId: tecnicoPrev,
 			Descricao: "Revisão", IntervaloDias: 30,
 			ProximaData: config.NewDataBrPtr(time.Now().AddDate(0, 0, 7)), Ativa: true,
 		}},
@@ -865,6 +871,8 @@ func TestPausar(t *testing.T) {
 	if err := pool.QueryRow(ctx, `INSERT INTO empresa (subdominio, nome) VALUES ('os-pausar', 'Empresa OS Pausar') RETURNING id`).Scan(&tenantID); err != nil {
 		t.Fatalf("erro ao criar empresa: %v", err)
 	}
+
+	tecnicoPrev := tecnicoParaPreventiva(t, ctx, pool, tenantID)
 	if err := pool.QueryRow(ctx, `INSERT INTO loja (tenant_id, nome) VALUES ($1, 'Loja') RETURNING id`, tenantID).Scan(&lojaID); err != nil {
 		t.Fatalf("erro ao criar loja: %v", err)
 	}
@@ -901,6 +909,7 @@ func TestPausar(t *testing.T) {
 		m, err := svcMaquina.CadastrarMaquina(ctx, tenantID, model.MaquinarioInsert{
 			SetorID: setorID, Criticidade: "Alta", NumeroPatrimonio: patrimonio, Nome: patrimonio,
 			Preventivas: []model.PreventivaPayload{{
+				TecnicoId: tecnicoPrev,
 				Descricao: "Revisão", IntervaloDias: 30,
 				ProximaData: config.NewDataBrPtr(time.Now().AddDate(0, 0, 7)), Ativa: true,
 			}},
@@ -1005,6 +1014,8 @@ func TestRetomar(t *testing.T) {
 	if err := pool.QueryRow(ctx, `INSERT INTO empresa (subdominio, nome) VALUES ('os-retomar', 'Empresa OS Retomar') RETURNING id`).Scan(&tenantID); err != nil {
 		t.Fatalf("erro ao criar empresa: %v", err)
 	}
+
+	tecnicoPrev := tecnicoParaPreventiva(t, ctx, pool, tenantID)
 	if err := pool.QueryRow(ctx, `INSERT INTO loja (tenant_id, nome) VALUES ($1, 'Loja') RETURNING id`, tenantID).Scan(&lojaID); err != nil {
 		t.Fatalf("erro ao criar loja: %v", err)
 	}
@@ -1038,6 +1049,7 @@ func TestRetomar(t *testing.T) {
 		m, err := svcMaquina.CadastrarMaquina(ctx, tenantID, model.MaquinarioInsert{
 			SetorID: setorID, Criticidade: "Alta", NumeroPatrimonio: patrimonio, Nome: patrimonio,
 			Preventivas: []model.PreventivaPayload{{
+				TecnicoId: tecnicoPrev,
 				Descricao: "Revisão", IntervaloDias: 30,
 				ProximaData: config.NewDataBrPtr(time.Now().AddDate(0, 0, 7)), Ativa: true,
 			}},
@@ -1150,6 +1162,8 @@ func TestAcionarTerceiro(t *testing.T) {
 	if err := pool.QueryRow(ctx, `INSERT INTO empresa (subdominio, nome) VALUES ('os-terceiro', 'Empresa OS Terceiro') RETURNING id`).Scan(&tenantID); err != nil {
 		t.Fatalf("erro ao criar empresa: %v", err)
 	}
+
+	tecnicoPrev := tecnicoParaPreventiva(t, ctx, pool, tenantID)
 	if err := pool.QueryRow(ctx, `INSERT INTO empresa (subdominio, nome) VALUES ('os-terceiro-b', 'Empresa OS Terceiro B') RETURNING id`).Scan(&outroTenantID); err != nil {
 		t.Fatalf("erro ao criar empresa (outro tenant): %v", err)
 	}
@@ -1192,6 +1206,7 @@ func TestAcionarTerceiro(t *testing.T) {
 		m, err := svcMaquina.CadastrarMaquina(ctx, tenantID, model.MaquinarioInsert{
 			SetorID: setorID, Criticidade: "Alta", NumeroPatrimonio: patrimonio, Nome: patrimonio,
 			Preventivas: []model.PreventivaPayload{{
+				TecnicoId: tecnicoPrev,
 				Descricao: "Revisão", IntervaloDias: 30,
 				ProximaData: config.NewDataBrPtr(time.Now().AddDate(0, 0, 7)), Ativa: true,
 			}},
@@ -1294,6 +1309,8 @@ func TestEncerrar(t *testing.T) {
 	if err := pool.QueryRow(ctx, `INSERT INTO empresa (subdominio, nome) VALUES ('os-encerrar', 'Empresa OS Encerrar') RETURNING id`).Scan(&tenantID); err != nil {
 		t.Fatalf("erro ao criar empresa: %v", err)
 	}
+
+	tecnicoPrev := tecnicoParaPreventiva(t, ctx, pool, tenantID)
 	if err := pool.QueryRow(ctx, `INSERT INTO loja (tenant_id, nome) VALUES ($1, 'Loja') RETURNING id`, tenantID).Scan(&lojaID); err != nil {
 		t.Fatalf("erro ao criar loja: %v", err)
 	}
@@ -1329,6 +1346,7 @@ func TestEncerrar(t *testing.T) {
 		m, err := svcMaquina.CadastrarMaquina(ctx, tenantID, model.MaquinarioInsert{
 			SetorID: setorID, Criticidade: "Alta", NumeroPatrimonio: patrimonio, Nome: patrimonio,
 			Preventivas: []model.PreventivaPayload{{
+				TecnicoId: tecnicoPrev,
 				Descricao: "Revisão", IntervaloDias: 30,
 				ProximaData: config.NewDataBrPtr(time.Now().AddDate(0, 0, 7)), Ativa: true,
 			}},
@@ -1379,6 +1397,7 @@ func TestEncerrar(t *testing.T) {
 		m, err := svcMaquina.CadastrarMaquina(ctx, tenantID, model.MaquinarioInsert{
 			SetorID: setorID, Criticidade: "Alta", NumeroPatrimonio: "PAT-ENC-2", Nome: "PAT-ENC-2",
 			Preventivas: []model.PreventivaPayload{{
+				TecnicoId: tecnicoPrev,
 				Descricao: "Revisão", IntervaloDias: 30,
 				ProximaData: config.NewDataBrPtr(time.Now().AddDate(0, 0, 7)), Ativa: true,
 			}},

@@ -22,6 +22,11 @@ import (
 // service).
 type NotificadorInterface interface {
 	NotificarNovaSolicitacao(ctx context.Context, tenantId, setorId int64, dados DadosNotificacao) error
+	// NotificarOSPreventiva avisa UM técnico, por id, e não um setor inteiro:
+	// a OS de preventiva já nasce atribuída a ele (migration 000008), então
+	// não há destinatário a descobrir. É o que separa os dois métodos -- não
+	// o texto da mensagem, que poderia ser um campo em DadosNotificacao.
+	NotificarOSPreventiva(ctx context.Context, tenantId, tecnicoId int64, dados DadosNotificacao) error
 }
 
 // DadosNotificacao é o que os dois templates (solicitação aberta pelo
@@ -110,6 +115,48 @@ func (n *NotificacaoService) NotificarNovaSolicitacao(ctx context.Context, tenan
 	}
 
 	return falhas
+}
+
+// NotificarOSPreventiva manda a mensagem para o técnico designado na
+// preventiva, depois que o job já abriu a OS dele.
+//
+// Lê o usuário por id com ObterUsuarioPorID em vez de uma query própria: o
+// destinatário aqui é um só e já é conhecido pelo chamador, então não há
+// escopo a resolver -- é o oposto de ObterGestoresDoSetor, que existe
+// justamente porque "os gestores daquele setor" é uma pergunta com EXISTS
+// dentro.
+//
+// Técnico sem telefone não é erro, é o mesmo degrade silencioso de
+// ObterGestoresDoSetor: não há para onde mandar, e a OS foi criada do mesmo
+// jeito -- ele a encontra no painel. Falhar aqui faria o cron reportar
+// fracasso por uma mensagem que nunca teve destinatário.
+func (n *NotificacaoService) NotificarOSPreventiva(ctx context.Context, tenantId, tecnicoId int64, dados DadosNotificacao) error {
+
+	tecnico, err := repository.New(n.Pool).ObterUsuarioPorID(ctx, repository.ObterUsuarioPorIDParams{
+		ID:       tecnicoId,
+		TenantID: tenantId,
+	})
+	if err != nil {
+		return fmt.Errorf("buscar técnico %d: %w", tecnicoId, err)
+	}
+
+	if tecnico.Telefone == nil || strings.TrimSpace(*tecnico.Telefone) == "" {
+		return nil
+	}
+
+	return n.enviarTexto(ctx, *tecnico.Telefone, montarTextoOsPreventiva(dados))
+}
+
+// montarTextoOsPreventiva é o terceiro template, e o único que fala com quem
+// vai executar em vez de com quem decide -- por isso não termina em "acesse o
+// painel para avaliar": não há o que avaliar, a OS já está aberta no nome
+// dele.
+func montarTextoOsPreventiva(d DadosNotificacao) string {
+
+	return fmt.Sprintf(
+		"🛠️ Preventiva agendada — %s / %s\n%s\n\"%s\"\n\nA OS já está aberta no seu painel.",
+		d.LojaNome, d.SetorNome, d.Alvo, d.Descricao,
+	)
 }
 
 // montarTexto escolhe o template pelos dados que têm: com solicitante, é a

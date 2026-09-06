@@ -29,6 +29,8 @@ func TestSolicitacaoCrud(t *testing.T) {
 	if err := pool.QueryRow(ctx, `INSERT INTO empresa (subdominio, nome) VALUES ('solicitacoes', 'Empresa Solicitacoes') RETURNING id`).Scan(&tenantID); err != nil {
 		t.Fatalf("erro ao criar empresa: %v", err)
 	}
+
+	tecnicoPrev := tecnicoParaPreventiva(t, ctx, pool, tenantID)
 	if err := pool.QueryRow(ctx, `INSERT INTO loja (tenant_id, nome) VALUES ($1, 'Loja A') RETURNING id`, tenantID).Scan(&lojaID); err != nil {
 		t.Fatalf("erro ao criar loja: %v", err)
 	}
@@ -44,6 +46,7 @@ func TestSolicitacaoCrud(t *testing.T) {
 	maquinaAtiva, err := svcMaquina.CadastrarMaquina(ctx, tenantID, model.MaquinarioInsert{
 		SetorID: setorA, Criticidade: "Alta", NumeroPatrimonio: "PAT-1", Nome: "Forno",
 		Preventivas: []model.PreventivaPayload{{
+			TecnicoId: tecnicoPrev,
 			Descricao: "Revisão", IntervaloDias: 30,
 			ProximaData: config.NewDataBrPtr(time.Now().AddDate(0, 0, 7)), Ativa: true,
 		}},
@@ -55,6 +58,7 @@ func TestSolicitacaoCrud(t *testing.T) {
 	maquinaDesativada, err := svcMaquina.CadastrarMaquina(ctx, tenantID, model.MaquinarioInsert{
 		SetorID: setorA, Criticidade: "Baixa", NumeroPatrimonio: "PAT-2", Nome: "Câmara fria",
 		Preventivas: []model.PreventivaPayload{{
+			TecnicoId: tecnicoPrev,
 			Descricao: "Revisão", IntervaloDias: 30,
 			ProximaData: config.NewDataBrPtr(time.Now().AddDate(0, 0, 7)), Ativa: true,
 		}},
@@ -71,6 +75,7 @@ func TestSolicitacaoCrud(t *testing.T) {
 	maquinaOutroSetor, err := svcMaquina.CadastrarMaquina(ctx, tenantID, model.MaquinarioInsert{
 		SetorID: setorB, Criticidade: "Alta", NumeroPatrimonio: "PAT-3", Nome: "Serra",
 		Preventivas: []model.PreventivaPayload{{
+			TecnicoId: tecnicoPrev,
 			Descricao: "Revisão", IntervaloDias: 30,
 			ProximaData: config.NewDataBrPtr(time.Now().AddDate(0, 0, 7)), Ativa: true,
 		}},

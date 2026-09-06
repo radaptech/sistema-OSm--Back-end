@@ -23,6 +23,11 @@ Documento gerado a partir da revisão do código do front-end (`/src/tipos`, `/s
   máquina parada passa a começar em `solicitacao_os.criado_em`, e não em `ordem_servico.aberta_em`
   (seção 4). Continuam **19 tabelas + 9 tipos ENUM**: nenhuma coluna nasce ou muda, só a view
   `vw_os_horas` ganha um join e o contrato passa a devolver `dataSolicitacao` na OS.
+- **Revisão 4.2** (04/09/2026, migration `000008`): **preventiva vencida deixa de passar pela
+  fila do Gestor** e abre Solicitação + OS na mesma transação. Continuam **19 tabelas + 9 tipos
+  ENUM**; muda o preenchimento de três colunas e some um índice — `preventiva.tecnico_id`
+  (nova, nullable), `ordem_servico.aberta_por_id` perde o `NOT NULL`, e `uq_preventiva_pendente`
+  é substituído por um lock de linha no job. Ver 1.5.
 
 O diagrama em si está em [`der-banco-dados.mmd`](./der-banco-dados.mmd) (Mermaid, pronto para colar
 em <https://mermaid.live>), com [`.svg`](./der-banco-dados.svg) e [`.png`](./der-banco-dados.png)
@@ -163,6 +168,65 @@ Toda listagem do Gestor agrupa por Loja e Setor, mas o Pequeno Reparo não tem m
 da máquina que o setor vinha. A solicitação passa a carregar `setor_id` próprio: copiado do
 setor da máquina no Maquinário, e do escopo do Solicitante no Reparo. Além de fechar o buraco,
 o snapshot preserva o histórico se o Solicitante for movido de setor depois.
+
+### 1.5 Mudanças da revisão 4.2
+
+A decisão de negócio: **preventiva é trabalho já aprovado.** Quando o Administrador cadastra a
+máquina, ele define o procedimento, o intervalo e a data — aprovar de novo a cada vencimento não
+decide nada, só põe uma pessoa entre a data e o técnico. A OS agora nasce junto com a solicitação,
+no próprio job.
+
+#### 1.5.1 `preventiva.tecnico_id`: quem o Gestor escolhia a cada ciclo, escolhido uma vez
+
+`ordem_servico.tecnico_id` é `NOT NULL` e sem o Gestor ninguém o preenchia. A coluna nova guarda a
+escolha no cadastro, onde ela é feita uma vez e vale para todos os ciclos — preventiva é trabalho
+recorrente e previsível, o mesmo compressor volta para o mesmo técnico de refrigeração todo mês.
+Sortear no job por área e loja foi descartado: exigiria uma regra de desempate que nada no produto
+pede e escolheria em silêncio um técnico afastado.
+
+**Nullable de propósito**, apesar de o service exigir o campo em toda escrita. `NOT NULL` sem
+default falha em tabela com linha, e a migration roda no boot da API (`main.go` faz `log.Fatal`) —
+uma migration que falha aqui é crash loop, não feature quebrada. Linha antiga fica sem técnico até
+alguém editar a máquina, e o job a reporta como falha visível em vez de pulá-la.
+
+#### 1.5.2 `ordem_servico.aberta_por_id` deixa de ser `NOT NULL`
+
+Não houve ator: foi a data. Eleger um (o Administrador que cadastrou, o técnico que vai executar)
+gravaria autoria falsa exatamente na coluna que existe para responder "quem abriu". `NULL` aqui
+significa "o sistema", o mesmo que `solicitante_id` `NULL` já significa em `solicitacao_os` de
+origem `preventiva` — e quem lê distingue os dois casos pelo `origem` da solicitação de origem.
+
+#### 1.5.3 `uq_preventiva_pendente` sai; a trava vira lock de linha
+
+O índice era único parcial em `solicitacao_os (preventiva_id) WHERE status = 'Pendente'` e
+protegia contra duas réplicas do cron abrindo o mesmo ciclo. Com a solicitação nascendo
+`Convertida` o filtro nunca mais casa. Ampliar o filtro não resolve: uma preventiva **pode** ter
+várias solicitações ao longo do tempo, uma por ciclo, então nenhum `UNIQUE` sobre `preventiva_id`
+sozinho serve.
+
+A proteção passou para o job: ele relê a preventiva com `SELECT ... FOR UPDATE` dentro da própria
+transação e reconfere a `proxima_data` antes de escrever. Quem chega depois fica bloqueado até o
+commit do primeiro, lê a data já avançada e desiste. É mais forte que o índice, porque cobre o
+`INSERT` **e** o avanço do ciclo, não só o `INSERT`.
+
+#### 1.5.4 O que NÃO mudou, e é o que segura o resto
+
+A `solicitacao_os` continua existindo para toda preventiva. Ela não era burocracia da aprovação, é
+o **fato de origem**: `vw_os_horas` mede `horas_parada` desde `solicitacao_os.criado_em`,
+`uq_os_solicitacao` exige uma solicitação por OS, e a tela do Técnico busca por ela para mostrar o
+problema. Uma OS sem solicitação quebraria as três coisas.
+
+`afeta_producao` continua `false` na OS de preventiva, porque a solicitação automática nunca teve
+linha em `solicitacao_impacto` — não há Solicitante para marcar nada. O efeito é que o relógio de
+máquina parada não roda e a tela escreve "Não se aplica" (1.4.5). Se a preventiva precisar parar a
+máquina de propósito, isso vira um campo do cadastro da preventiva, não uma leitura de impacto.
+
+> **Ponto em aberto que a mudança criou:** sumiu o freio humano. Antes, preventiva vencida ficava
+> parada na fila e não disparava de novo; agora o ciclo avança sempre, então intervalo curto com
+> técnico lento acumula OS abertas da mesma preventiva. Nada no modelo impede isso hoje, e é
+> deliberado — o remédio natural é o intervalo do cadastro. Se virar problema de verdade, a regra
+> seria "não abre com a anterior ainda não concluída", e aí ela é um `NOT EXISTS` sobre
+> `ordem_servico`, não um índice.
 
 ---
 
@@ -564,10 +628,12 @@ ALTER TABLE os_custo        ADD CONSTRAINT uq_custo_os        UNIQUE (ordem_serv
 CREATE UNIQUE INDEX uq_pausa_aberta ON os_pausa (ordem_servico_id)
   WHERE retomada_em IS NULL;
 
--- Uma preventiva não gera duas solicitações pendentes ao mesmo tempo
--- (mas PODE gerar várias ao longo do tempo, a cada ciclo de intervalo_dias).
-CREATE UNIQUE INDEX uq_preventiva_pendente ON solicitacao_os (preventiva_id)
-  WHERE preventiva_id IS NOT NULL AND status = 'Pendente';
+-- REMOVIDO na revisão 4.2 (migration 000008): a solicitação de preventiva passou a
+-- nascer 'Convertida', então este filtro nunca mais casa. A proteção contra duas
+-- réplicas do cron virou um SELECT ... FOR UPDATE sobre a própria preventiva,
+-- dentro da transação do job -- ver 1.5.3.
+-- CREATE UNIQUE INDEX uq_preventiva_pendente ON solicitacao_os (preventiva_id)
+--   WHERE preventiva_id IS NOT NULL AND status = 'Pendente';
 
 -- Origem da solicitação: humana ou automática, nunca as duas.
 ALTER TABLE solicitacao_os ADD CONSTRAINT ck_origem CHECK (

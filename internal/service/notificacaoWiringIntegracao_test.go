@@ -17,7 +17,11 @@ import (
 type notificadorFake struct {
 	chamado           chan struct{}
 	tenantId, setorId int64
-	dados             DadosNotificacao
+	// tecnicoId é preenchido só por NotificarOSPreventiva, que avisa um
+	// técnico por id em vez do setor inteiro -- é o que distingue as duas
+	// chamadas quando o teste confere qual delas o service escolheu.
+	tecnicoId int64
+	dados     DadosNotificacao
 }
 
 func novoNotificadorFake() *notificadorFake {
@@ -26,6 +30,12 @@ func novoNotificadorFake() *notificadorFake {
 
 func (n *notificadorFake) NotificarNovaSolicitacao(_ context.Context, tenantId, setorId int64, dados DadosNotificacao) error {
 	n.tenantId, n.setorId, n.dados = tenantId, setorId, dados
+	close(n.chamado)
+	return nil
+}
+
+func (n *notificadorFake) NotificarOSPreventiva(_ context.Context, tenantId, tecnicoId int64, dados DadosNotificacao) error {
+	n.tenantId, n.tecnicoId, n.dados = tenantId, tecnicoId, dados
 	close(n.chamado)
 	return nil
 }
@@ -56,6 +66,8 @@ func TestSolicitacaoNotificaAoCriar(t *testing.T) {
 	if err := pool.QueryRow(ctx, `INSERT INTO empresa (subdominio, nome) VALUES ('notif-wiring', 'Empresa Notif Wiring') RETURNING id`).Scan(&tenantID); err != nil {
 		t.Fatalf("erro ao criar empresa: %v", err)
 	}
+
+	tecnicoPrev := tecnicoParaPreventiva(t, ctx, pool, tenantID)
 	if err := pool.QueryRow(ctx, `INSERT INTO loja (tenant_id, nome) VALUES ($1, 'Loja A') RETURNING id`, tenantID).Scan(&lojaID); err != nil {
 		t.Fatalf("erro ao criar loja: %v", err)
 	}
@@ -66,6 +78,7 @@ func TestSolicitacaoNotificaAoCriar(t *testing.T) {
 	maquina, err := svcMaquina.CadastrarMaquina(ctx, tenantID, model.MaquinarioInsert{
 		SetorID: setorID, Criticidade: "Alta", NumeroPatrimonio: "PAT-77", Nome: "Forno",
 		Preventivas: []model.PreventivaPayload{{
+			TecnicoId: tecnicoPrev,
 			Descricao: "Revisão", IntervaloDias: 30,
 			ProximaData: config.NewDataBrPtr(time.Now().AddDate(0, 0, 7)), Ativa: true,
 		}},
@@ -146,9 +159,15 @@ func TestSolicitacaoNotificaAoCriar(t *testing.T) {
 }
 
 // TestPreventivaNotificaAoAbrirSolicitacao é o mesmo critério, do lado do job:
-// abrirSolicitacaoDaPreventiva relê a máquina (ListarPreventivasVencidasRow
-// não carrega os nomes) e notifica sem SolicitanteNome -- é o que faz o
-// texto sair como "preventiva vencida", não "nova solicitação".
+// abrirSolicitacaoDaPreventiva relê a máquina (a linha da preventiva não
+// carrega os nomes) e notifica sem SolicitanteNome -- é o que faz o texto sair
+// como preventiva, não como "nova solicitação".
+//
+// ⚠️ Desde a migration 000008 quem recebe é o TÉCNICO da preventiva, por id, e
+// não os gestores do setor: a OS já nasce atribuída a ele, então o Gestor não
+// tem ação nenhuma pendente e a mensagem seria ruído diário. É por isso que o
+// assert olha tecnicoId e não setorId -- é o que distingue as duas chamadas do
+// notificador.
 func TestPreventivaNotificaAoAbrirSolicitacao(t *testing.T) {
 
 	ctx := context.Background()
@@ -160,6 +179,8 @@ func TestPreventivaNotificaAoAbrirSolicitacao(t *testing.T) {
 	if err := pool.QueryRow(ctx, `INSERT INTO empresa (subdominio, nome) VALUES ('notif-job', 'Empresa Notif Job') RETURNING id`).Scan(&tenantID); err != nil {
 		t.Fatalf("erro ao criar empresa: %v", err)
 	}
+
+	tecnicoPrev := tecnicoParaPreventiva(t, ctx, pool, tenantID)
 	if err := pool.QueryRow(ctx, `INSERT INTO loja (tenant_id, nome) VALUES ($1, 'Loja B') RETURNING id`, tenantID).Scan(&lojaID); err != nil {
 		t.Fatalf("erro ao criar loja: %v", err)
 	}
@@ -170,6 +191,7 @@ func TestPreventivaNotificaAoAbrirSolicitacao(t *testing.T) {
 	maquina, err := svcMaquina.CadastrarMaquina(ctx, tenantID, model.MaquinarioInsert{
 		SetorID: setorID, Criticidade: "Alta", NumeroPatrimonio: "PAT-88", Nome: "Câmara Fria",
 		Preventivas: []model.PreventivaPayload{{
+			TecnicoId: tecnicoPrev,
 			// Vencida: ontem.
 			Descricao: "Revisão trimestral", IntervaloDias: 30,
 			ProximaData: config.NewDataBrPtr(time.Now().AddDate(0, 0, -1)), Ativa: true,
@@ -192,8 +214,13 @@ func TestPreventivaNotificaAoAbrirSolicitacao(t *testing.T) {
 
 	fake.espera(t)
 
-	if fake.tenantId != tenantID || fake.setorId != setorID {
-		t.Errorf("tenantId/setorId = %d/%d, esperado %d/%d", fake.tenantId, fake.setorId, tenantID, setorID)
+	if fake.tenantId != tenantID || fake.tecnicoId != tecnicoPrev {
+		t.Errorf("tenantId/tecnicoId = %d/%d, esperado %d/%d", fake.tenantId, fake.tecnicoId, tenantID, tecnicoPrev)
+	}
+	// setorId zerado prova que o caminho foi NotificarOSPreventiva e não
+	// NotificarNovaSolicitacao -- as duas escrevem campos diferentes no fake.
+	if fake.setorId != 0 {
+		t.Errorf("setorId = %d, esperado 0 -- a preventiva não avisa mais o setor inteiro", fake.setorId)
 	}
 	if fake.dados.Alvo != "Câmara Fria · PAT-88" {
 		t.Errorf("Alvo = %q, esperado %q", fake.dados.Alvo, "Câmara Fria · PAT-88")

@@ -38,6 +38,8 @@ func TestObterIndicadoresDaMaquina(t *testing.T) {
 	if err := pool.QueryRow(ctx, `INSERT INTO empresa (subdominio, nome) VALUES ('ind', 'Empresa Ind') RETURNING id`).Scan(&tenantID); err != nil {
 		t.Fatalf("erro ao criar empresa: %v", err)
 	}
+
+	tecnicoPrev := tecnicoParaPreventiva(t, ctx, pool, tenantID)
 	for _, l := range []struct {
 		nome string
 		dest *int64
@@ -61,6 +63,7 @@ func TestObterIndicadoresDaMaquina(t *testing.T) {
 		m, err := svcMaquina.CadastrarMaquina(ctx, tenantID, model.MaquinarioInsert{
 			SetorID: setor, Criticidade: "Alta", NumeroPatrimonio: "PAT-" + nome, Nome: nome,
 			Preventivas: []model.PreventivaPayload{{
+				TecnicoId: tecnicoPrev,
 				Descricao: "Revisão", IntervaloDias: 30,
 				ProximaData: config.NewDataBrPtr(time.Now().AddDate(0, 0, 7)), Ativa: true,
 			}},

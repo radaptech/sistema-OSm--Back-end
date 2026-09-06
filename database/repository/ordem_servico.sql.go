@@ -528,7 +528,7 @@ type ListarOrdensServicoRow struct {
 	TecnicoID                int64
 	EmpresaTerceirizadaID    *int64
 	TerceiroAcionadoEm       pgtype.Timestamptz
-	AbertaPorID              int64
+	AbertaPorID              *int64
 	AfetaProducao            bool
 	Status                   StatusOs
 	AbertaEm                 pgtype.Timestamptz
