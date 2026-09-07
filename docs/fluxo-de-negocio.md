@@ -33,6 +33,21 @@ estourando, genérico, em vez de dizer qual campo está errado. **`numeroNotaFis
 qualquer tipo (maquinário troca peça comprada com nota, reparo consome material com
 nota), e o Administrador precisa registrar o documento que embasa o custo em todas.
 
+**Quem decide se há nota é o Técnico, no encerramento** (`temNotaFiscal` no
+`EncerramentoOrdemServicoPayload`, migration `000011`): foi ele que executou e sabe se
+houve compra ou se foi só mão de obra. É essa declaração — e não o tipo da OS — que faz
+a tela do Administrador pedir número e série. `CorrigirCusto` aceita o mesmo campo, de
+propósito: se o Técnico esquecer de marcar, o Administrador corrige na hora de lançar,
+senão a nota que ele tem na mão não teria onde entrar. Desmarcar limpa número e série na
+mesma escrita — o service manda `nil` nos dois, senão `ck_custo_nota_fiscal` barraria.
+
+⚠️ **Custo `0` é valor legítimo em todo o fluxo** (serviço sem peça, conserto em
+garantia): os bindings são `gte=0`, nunca `required` — que rejeitaria zero em campo
+numérico — e `ck_custo_nao_negativo` permite. Uma OS de custo zero conta como
+`finalizada` normalmente: o que importa é a linha de `os_custo` existir, não o valor ser
+positivo. `TestEncerrar/encerra com custo zero` e `TestCorrigirCusto/custo zero é aceito
+e volta como zero` existem para travar isso.
+
 `AtualizarCusto` grava `os_custo.custo_revisado_em = now()` de quebra: toda passagem do
 Administrador por aqui É a conferência. `GET /ordens-servico` projeta a coluna como
 `custo.revisadoEm`, e é ela que separa as pílulas **"Pendentes"** (ninguém conferiu) e

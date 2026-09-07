@@ -504,6 +504,9 @@ func (s *OrdemServicoService) Encerrar(ctx context.Context, tenantId, atorId, or
 		CustoHoraTecnico: custoHoraTecnico,
 		CustoManutencao:  pgtype.Float8{Float64: payload.CustoManutencao, Valid: true},
 		LancadoPorID:     atorId,
+		// Número e série ficam pro Administrador; aqui o Técnico só declara SE
+		// houve nota. Ver ck_custo_nota_fiscal e a nota em CriarCusto.
+		TemNotaFiscal: payload.TemNotaFiscal,
 	}); err != nil {
 		return model.OrdemServico{}, helper.TraduzErroPostgres(err)
 	}
@@ -584,6 +587,14 @@ func (s *OrdemServicoService) CorrigirCusto(ctx context.Context, tenantId, atorI
 		return model.OrdemServico{}, fmt.Errorf("%w: descrição do serviço só existe em OS executada por terceiro", helper.ErrValidacao)
 	}
 
+	// ck_custo_nota_fiscal espelhado aqui, mesma razão do bloco acima. Note que
+	// a checagem é contra o payload, não contra o que está gravado: o
+	// Administrador pode estar justamente DESMARCANDO a declaração do Técnico
+	// nesta chamada.
+	if !payload.TemNotaFiscal && (numeroNotaFiscal != nil || serieNotaFiscal != nil) {
+		return model.OrdemServico{}, fmt.Errorf("%w: número e série da nota exigem que a OS esteja marcada como tendo nota fiscal", helper.ErrValidacao)
+	}
+
 	var custoHoraTecnico pgtype.Float8
 	if payload.CustoHoraTecnico != nil {
 		custoHoraTecnico = pgtype.Float8{Float64: *payload.CustoHoraTecnico, Valid: true}
@@ -594,6 +605,7 @@ func (s *OrdemServicoService) CorrigirCusto(ctx context.Context, tenantId, atorI
 		OrdemServicoID:           ordemServicoId,
 		CustoHoraTecnico:         custoHoraTecnico,
 		CustoManutencao:          pgtype.Float8{Float64: payload.CustoManutencao, Valid: true},
+		TemNotaFiscal:            payload.TemNotaFiscal,
 		NumeroNotaFiscal:         numeroNotaFiscal,
 		SerieNotaFiscal:          serieNotaFiscal,
 		DescricaoServicoTerceiro: descricaoServicoTerceiro,
