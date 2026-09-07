@@ -150,6 +150,11 @@ func (o *OrdemServicoController) Listar() gin.HandlerFunc {
 			return
 		}
 
+		setorId, ok := idDeQuery(ctx, "setorId")
+		if !ok {
+			return
+		}
+
 		tecnicoId, ok := idDeQuery(ctx, "tecnicoId")
 		if !ok {
 			return
@@ -165,6 +170,7 @@ func (o *OrdemServicoController) Listar() gin.HandlerFunc {
 			Tipo:       tipo,
 			Finalizada: finalizada,
 			LojaId:     lojaId,
+			SetorId:    setorId,
 			TecnicoId:  tecnicoId,
 			Busca:      busca,
 		})

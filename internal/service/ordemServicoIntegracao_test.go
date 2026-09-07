@@ -679,6 +679,32 @@ func TestListarOrdensServico(t *testing.T) {
 		}
 	})
 
+	// ?setorId= é filtro do CLIENTE (OS Finalizadas / Custos Pendentes), então
+	// só estreita: nunca devolve OS de setor que o escopo de quem chama não
+	// alcança. O setor sai da solicitação de origem, não da OS.
+	t.Run("filtro por setor estreita, nunca amplia", func(t *testing.T) {
+		ordens := listarPeloService(t, admin, "administrador", FiltrosOrdemServico{SetorId: &setorB})
+		if len(ordens) != 1 || ordens[0].Id != osSerra.Id {
+			t.Errorf("?setorId=B devia trazer só a Serra, veio %d OS", len(ordens))
+		}
+
+		// Combinado com a loja: setorC é de lojaB, então cruzar com lojaA não
+		// pode "puxar" a OS da outra loja de volta.
+		vazio := listarPeloService(t, admin, "administrador", FiltrosOrdemServico{
+			LojaId: &lojaA, SetorId: &setorC,
+		})
+		if len(vazio) != 0 {
+			t.Errorf("setor de outra loja devia dar vazio, veio %d OS", len(vazio))
+		}
+
+		// O gestor parcial só enxerga setorB. Pedir setorA não amplia o escopo
+		// dele -- é o ponto do "filtro estreita, nunca amplia".
+		fora := listarPeloService(t, gestorParcial, "gestor", FiltrosOrdemServico{SetorId: &setorA})
+		if len(fora) != 0 {
+			t.Errorf("gestor pedindo setor fora do escopo devia dar vazio, veio %d OS", len(fora))
+		}
+	})
+
 	// Spot check de ponta a ponta: query -> model -> resposta, com os blocos
 	// opcionais nascendo só onde a linha existe.
 	t.Run("service monta a OS inteira", func(t *testing.T) {

@@ -45,8 +45,12 @@ type FiltrosOrdemServico struct {
 	Tipo       *string
 	Finalizada *bool
 	LojaId     *int64
-	TecnicoId  *int64
-	Busca      *string
+	// SetorId recorta pelo setor da SOLICITAÇÃO de origem -- a OS não tem setor
+	// próprio (ver a nota da query). Continua sendo filtro do cliente, então
+	// só estreita: setor fora do escopo de quem chama devolve vazio.
+	SetorId   *int64
+	TecnicoId *int64
+	Busca     *string
 }
 
 // ListarOrdensServico é GET /ordens-servico -- um endpoint para os três
@@ -68,6 +72,7 @@ func (s *OrdemServicoService) ListarOrdensServico(ctx context.Context, tenantId,
 		Tipo:            (*repository.TipoOs)(filtros.Tipo),
 		Finalizada:      filtros.Finalizada,
 		LojaID:          filtros.LojaId,
+		SetorID:         filtros.SetorId,
 		TecnicoID:       filtros.TecnicoId,
 		Busca:           filtros.Busca,
 		EscopoUsuarioID: escopoDe(usuarioId, perfil),
