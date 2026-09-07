@@ -1719,11 +1719,34 @@ func TestCorrigirCusto(t *testing.T) {
 		}
 	})
 
-	t.Run("nota fiscal fora de terceiros é erro de validação", func(t *testing.T) {
+	// Migration 000010: nota fiscal deixou de ser exclusividade de 'terceiros'
+	// -- reparo consome material comprado com nota, e o Administrador precisa
+	// registrar o documento que embasa o custo.
+	t.Run("nota fiscal fora de terceiros é aceita e persiste", func(t *testing.T) {
 		os := osConcluidaReparo("PAT-CUSTO-5")
-		numero := "NF-001"
+		numero, serie := "NF-001", "3"
+		corrigida, err := svcOS.CorrigirCusto(ctx, tenantID, adminCorretor.Id, os.Id, model.LancamentoCustoManutencaoPayload{
+			CustoManutencao: 50, NumeroNotaFiscal: &numero, SerieNotaFiscal: &serie,
+		})
+		if err != nil {
+			t.Fatalf("nota fiscal em OS de reparo devia ser aceita: %v", err)
+		}
+		if corrigida.Custo.NumeroNotaFiscal == nil || *corrigida.Custo.NumeroNotaFiscal != "NF-001" {
+			t.Errorf("numeroNotaFiscal = %v, esperado NF-001", corrigida.Custo.NumeroNotaFiscal)
+		}
+		if corrigida.Custo.SerieNotaFiscal == nil || *corrigida.Custo.SerieNotaFiscal != "3" {
+			t.Errorf("serieNotaFiscal = %v, esperado 3", corrigida.Custo.SerieNotaFiscal)
+		}
+	})
+
+	// A descrição, essa sim, continua presa a 'terceiros': ela conta o que a
+	// empresa externa fez -- ver o CHECK que sobrou em ck_custo_por_tipo.
+	t.Run("descrição de serviço de terceiro fora de terceiros é erro de validação", func(t *testing.T) {
+		os := osConcluidaMaquinario("PAT-CUSTO-5C", "Descrição indevida")
+		descricao := "Serviço executado pela empresa"
 		_, err := svcOS.CorrigirCusto(ctx, tenantID, adminCorretor.Id, os.Id, model.LancamentoCustoManutencaoPayload{
-			CustoManutencao: 50, NumeroNotaFiscal: &numero,
+			CustoHoraTecnico: &custoHoraOriginal, CustoManutencao: 100,
+			DescricaoServicoTerceiro: &descricao,
 		})
 		if !errors.Is(err, helper.ErrValidacao) {
 			t.Fatalf("erro = %v, esperado ErrValidacao", err)

@@ -557,12 +557,10 @@ func (s *OrdemServicoService) CorrigirCusto(ctx context.Context, tenantId, atorI
 		return model.OrdemServico{}, fmt.Errorf("%w: ordem de serviço ainda não foi encerrada", helper.ErrConflitoIntegridade)
 	}
 
-	// O modal do front nasce com defaultValues "" nos três campos de nota e o
-	// React Hook Form manda a string vazia mesmo quando eles nem são
-	// renderizados (OS que não é de terceiros) -- ver textoOuNil. Sem aparar
-	// aqui, "" conta como "veio dado de nota fiscal" e a checagem de tipo
-	// abaixo barra uma OS de maquinário/reparo legítima; na de terceiros, o ""
-	// ainda iria pro banco no lugar de NULL.
+	// O modal do front nasce com defaultValues "" nestes campos e o React Hook
+	// Form manda a string vazia mesmo quando eles nem são renderizados -- ver
+	// textoOuNil. Sem aparar aqui, "" conta como "veio dado" na checagem de
+	// tipo abaixo e ainda iria pro banco no lugar de NULL.
 	numeroNotaFiscal := textoOuNil(payload.NumeroNotaFiscal)
 	serieNotaFiscal := textoOuNil(payload.SerieNotaFiscal)
 	descricaoServicoTerceiro := textoOuNil(payload.DescricaoServicoTerceiro)
@@ -577,9 +575,13 @@ func (s *OrdemServicoService) CorrigirCusto(ctx context.Context, tenantId, atorI
 	if atual.Tipo != repository.TipoOsMaquinario && payload.CustoHoraTecnico != nil {
 		return model.OrdemServico{}, fmt.Errorf("%w: custoHoraTecnico só existe em OS de maquinário", helper.ErrValidacao)
 	}
-	if atual.Tipo != repository.TipoOsTerceiros &&
-		(numeroNotaFiscal != nil || serieNotaFiscal != nil || descricaoServicoTerceiro != nil) {
-		return model.OrdemServico{}, fmt.Errorf("%w: dados de nota fiscal só existem em OS executada por terceiro", helper.ErrValidacao)
+	// numeroNotaFiscal/serieNotaFiscal NÃO entram aqui, e não é esquecimento:
+	// desde a migration 000010 nota fiscal vale em qualquer tipo (maquinário
+	// troca peça comprada com nota, reparo consome material com nota). Só a
+	// descrição continua presa a 'terceiros' -- ela conta o que a EMPRESA
+	// EXTERNA fez, e o que o Técnico fez já mora em os_encerramento.solucao.
+	if atual.Tipo != repository.TipoOsTerceiros && descricaoServicoTerceiro != nil {
+		return model.OrdemServico{}, fmt.Errorf("%w: descrição do serviço só existe em OS executada por terceiro", helper.ErrValidacao)
 	}
 
 	var custoHoraTecnico pgtype.Float8

@@ -41,8 +41,12 @@ type EncerramentoOrdemServico struct {
 // 'terceiros' quem trabalhou foi a empresa e em 'reparo' o serviço não cobra
 // hora. `null` ali é a regra de negócio aparecendo, não dado faltando.
 //
-// Os três campos de nota fiscal são o espelho disso: só existem em
-// 'terceiros', e por isso levam `omitempty`.
+// NumeroNotaFiscal/SerieNotaFiscal valem em QUALQUER tipo desde a migration
+// 000010 (maquinário troca peça comprada com nota, reparo consome material
+// com nota) -- `omitempty` aqui é "esta OS não teve nota", não "este tipo não
+// pode ter". DescricaoServicoTerceiro é a que continua presa a 'terceiros':
+// ela conta o que a empresa externa fez, e o que o Técnico fez já mora em
+// EncerramentoOrdemServico.Solucao, que existe para todo tipo.
 //
 // CustoTotal é derivado, somado em MontarOrdemServico -- ver a nota lá.
 //
@@ -118,9 +122,10 @@ type AcionamentoTerceiroPayload struct {
 // CustoHoraTecnico bater com o tipo da OS ('maquinario' ou não) é checada no
 // service, que já leu o tipo -- não dá pra validar isso só olhando o corpo.
 //
-// Os três campos de nota fiscal só fazem sentido em 'terceiros'
-// (ck_custo_por_tipo) e por isso são opcionais aqui, sem binding: o service
-// decide se o que veio bate com o tipo, mesmo raciocínio de CustoHoraTecnico.
+// Os três campos são opcionais aqui, sem binding, mesmo raciocínio de
+// CustoHoraTecnico: quem decide se o que veio bate com o tipo é o service.
+// Desde a migration 000010 os dois de nota fiscal valem em qualquer tipo; só
+// DescricaoServicoTerceiro segue restrita a 'terceiros' (ck_custo_por_tipo).
 type LancamentoCustoManutencaoPayload struct {
 	CustoHoraTecnico         *float64 `json:"custoHoraTecnico" binding:"omitempty,gte=0"`
 	CustoManutencao          float64  `json:"custoManutencao" binding:"gte=0"`
