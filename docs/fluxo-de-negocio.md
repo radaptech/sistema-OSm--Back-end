@@ -26,9 +26,12 @@ nasce em `Encerrar`, junto do `os_encerramento` (o Técnico já lança os dois c
 fechar a OS). O Administrador só ajusta depois, tipicamente conferindo o Custo de
 Manutenção contra a nota fiscal de uma OS terceirizada. Por isso o service exige a OS já
 `Concluída` (senão não existe `os_custo` pra atualizar) e repete `ck_custo_por_tipo` em
-Go — `custoHoraTecnico` só em `maquinario`, os três campos de nota fiscal só em
-`terceiros` — pelo mesmo motivo de `Encerrar`: sem isso, o erro que sobe é o `CHECK` do
-banco estourando, genérico, em vez de dizer qual campo está errado.
+Go — `custoHoraTecnico` só em `maquinario`, `descricaoServicoTerceiro` só em `terceiros` —
+pelo mesmo motivo de `Encerrar`: sem isso, o erro que sobe é o `CHECK` do banco
+estourando, genérico, em vez de dizer qual campo está errado. **`numeroNotaFiscal` e
+`serieNotaFiscal` ficaram de fora dessa restrição na migration `000010`**: valem em
+qualquer tipo (maquinário troca peça comprada com nota, reparo consome material com
+nota), e o Administrador precisa registrar o documento que embasa o custo em todas.
 
 `AtualizarCusto` grava `os_custo.custo_revisado_em = now()` de quebra: toda passagem do
 Administrador por aqui É a conferência. `GET /ordens-servico` projeta a coluna como

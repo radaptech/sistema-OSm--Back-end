@@ -269,7 +269,8 @@ número vai para um relatório.
 > `lancado_por_id` = técnico. O Administrador entra depois só para **corrigir** — tipicamente
 > conferindo o valor contra a nota fiscal da empresa terceirizada, e por isso `os_custo` ganhou
 > `numero_nota_fiscal`, `serie_nota_fiscal` e `descricao_servico_terceiro` (os três só válidos
-> em `tipo = 'terceiros'`, e todos opcionais). O antigo `descricao_servico` **obrigatório** em
+> em `tipo = 'terceiros'`, e todos opcionais — **os dois primeiros deixaram de ser exclusivos
+> de terceiros na migration `000010`, ver abaixo**). O antigo `descricao_servico` **obrigatório** em
 > terceiros morreu com a gambiarra que ele resolvia: agora existe `os_encerramento.solucao`
 > para todo tipo, escrito pelo Técnico (1.4.3).
 >
@@ -283,6 +284,15 @@ número vai para um relatório.
 > dentro de "Custos Pendentes" — antes essa marca vivia no `localStorage` do front e valia
 > só num navegador. `CriarCusto` (encerramento) não toca a coluna: quem lança é o Técnico,
 > conferir é do Administrador.
+>
+> **Migration `000010`: nota fiscal em qualquer tipo.** `ck_custo_por_tipo` espelhava a premissa
+> de que a única nota em jogo era a fatura da empresa externa. Não é: maquinário troca peça
+> comprada com nota, reparo consome material comprado com nota — o Administrador precisa
+> registrar o documento que embasa o custo em **qualquer** tipo de OS. `numero_nota_fiscal` e
+> `serie_nota_fiscal` saíram do `CHECK`; `descricao_servico_terceiro` **continua** restrita a
+> `terceiros`, porque ela conta o que a *empresa externa* fez, e o que o Técnico fez já mora em
+> `os_encerramento.solucao` (1.4.3). `custo_hora_tecnico` também segue só em `maquinario`. A
+> migration só amplia o aceito, então não há backfill: toda linha gravada continua válida.
 
 ### 2.4 `ENUM` no que é regra de código, tabela no que o cliente cadastra
 
@@ -376,9 +386,10 @@ deles criaria uma OS finalizada sem custo.
 ### 3.5 `tipo` repetido é denormalização deliberada
 
 O tipo desce da OS para `os_custo` e `os_encerramento`, e cada salto é travado por FK composta
-(seção 5.2). Sem ela, "custo hora técnico só existe em maquinário" e "nota fiscal só existe em
-terceiros" virariam trigger — um `CHECK` não enxerga a tabela pai. A FK composta faz o próprio
-PostgreSQL garantir que a cópia nunca diverge.
+(seção 5.2). Sem ela, "custo hora técnico só existe em maquinário" e "descrição do serviço de
+terceiro só existe em terceiros" virariam trigger — um `CHECK` não enxerga a tabela pai. A FK
+composta faz o próprio PostgreSQL garantir que a cópia nunca diverge. (A regra "nota fiscal só
+existe em terceiros" também morava aqui até a migration `000010` — ver 2.3.)
 
 > **Revisão 4:** o salto **de fora para dentro** (solicitação → OS) foi cortado. Os dois lados
 > deixaram de compartilhar domínio (`tipo_solicitacao` × `tipo_os`) e o valor da OS deixou de ser
@@ -611,12 +622,12 @@ BEGIN
 END $$ LANGUAGE plpgsql;
 
 -- Custo hora do técnico só existe no Maquinário: em 'terceiros' quem trabalhou foi a
--- empresa, e em 'reparo' o serviço não cobra hora técnica. Dados da nota fiscal, o
--- espelho disso: só em 'terceiros'.
+-- empresa, e em 'reparo' o serviço não cobra hora técnica. A descrição do serviço, o
+-- espelho disso: só em 'terceiros', porque conta o que a EMPRESA EXTERNA fez.
+-- (Nota fiscal estava nesta segunda cláusula até a migration 000010 — ver 2.3.)
 ALTER TABLE os_custo ADD CONSTRAINT ck_custo_por_tipo CHECK (
   (tipo = 'maquinario' OR custo_hora_tecnico IS NULL) AND
-  (tipo = 'terceiros'  OR (numero_nota_fiscal IS NULL AND serie_nota_fiscal IS NULL
-                           AND descricao_servico_terceiro IS NULL)));
+  (tipo = 'terceiros'  OR descricao_servico_terceiro IS NULL));
 ```
 
 > **O que saiu daqui na revisão 4:** a FK composta `(solicitacao_id, tipo)` entre OS e
