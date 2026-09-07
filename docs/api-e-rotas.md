@@ -92,6 +92,8 @@ Leia antes de registrar rota nova, mexer em middleware ou montar corpo de respos
   | `GET /solicitacoes/:id` | **qualquer perfil autenticado** (escopo no `WHERE`) |
   | `POST /solicitacoes/:id/abrir-os`, `/:id/rejeitar` | gestor, administrador |
   | `GET /ordens-servico` | gestor, administrador, **técnico** (escopo no `WHERE`) |
+  | `POST /ordens-servico/:id/{iniciar,pausar,retomar,acionar-terceiro,encerrar}` | **técnico** (dono da OS — checado no service, não aqui: de outro técnico é 404, não 403) |
+  | `POST /ordens-servico/:id/custo` | **administrador** (correção pós-encerramento, sem dono pra checar) |
   | `GET /indicadores/maquinas/:id` | gestor, administrador (escopo no `WHERE`, 404 fora dele) |
 
 - **`GET /maquinas` e `GET /preventivas` são abertas mas não são amplas**: o RBAC libera

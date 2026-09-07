@@ -520,6 +520,96 @@ func (s *OrdemServicoService) Encerrar(ctx context.Context, tenantId, atorId, or
 	return ordem, nil
 }
 
+// CorrigirCusto é POST /ordens-servico/:id/custo -- a correção prometida no
+// comentário de Encerrar/CriarCusto acima. Não é o Técnico gravando pela
+// primeira vez, é o Administrador ajustando depois, tipicamente conferindo
+// contra a nota fiscal (docs/fluxo-de-negocio.md). Por isso lancado_por_id
+// muda de dono aqui: AtualizarCusto grava o próprio atorId, não o
+// encerrado_por_id de os_encerramento, que não muda.
+//
+// Sem cheque de dono (diferente de Iniciar/Pausar/Encerrar): quem chama é
+// Administrador, sem tecnico_id na OS pra comparar -- o RBAC da rota já
+// restringe o perfil.
+func (s *OrdemServicoService) CorrigirCusto(ctx context.Context, tenantId, atorId, ordemServicoId int64, payload model.LancamentoCustoManutencaoPayload) (model.OrdemServico, error) {
+
+	tx, err := s.Pool.Begin(ctx)
+	if err != nil {
+		return model.OrdemServico{}, fmt.Errorf("erro ao abrir transação: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	repo := repository.New(tx)
+
+	atual, err := repo.ObterOrdemServicoPorID(ctx, repository.ObterOrdemServicoPorIDParams{
+		ID:       ordemServicoId,
+		TenantID: tenantId,
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return model.OrdemServico{}, helper.ErrNaoEncontrado
+		}
+		return model.OrdemServico{}, helper.TraduzErroPostgres(err)
+	}
+
+	// Só existe custo pra corrigir depois do encerramento -- CriarCusto nasce
+	// na mesma transação de EncerrarOrdemServico, nunca antes.
+	if atual.Status != repository.StatusOsConcluda {
+		return model.OrdemServico{}, fmt.Errorf("%w: ordem de serviço ainda não foi encerrada", helper.ErrConflitoIntegridade)
+	}
+
+	// ck_custo_por_tipo espelhado aqui, mesmo raciocínio de Encerrar: sem
+	// isto o CHECK do banco ainda barra, mas com "regra de validação do
+	// banco violada" genérica em vez de dizer qual campo está errado. Usa
+	// atual.Tipo (não muda depois de Concluída -- ver a nota da query).
+	if atual.Tipo == repository.TipoOsMaquinario && payload.CustoHoraTecnico == nil {
+		return model.OrdemServico{}, fmt.Errorf("%w: custoHoraTecnico é obrigatório em OS de maquinário", helper.ErrValidacao)
+	}
+	if atual.Tipo != repository.TipoOsMaquinario && payload.CustoHoraTecnico != nil {
+		return model.OrdemServico{}, fmt.Errorf("%w: custoHoraTecnico só existe em OS de maquinário", helper.ErrValidacao)
+	}
+	if atual.Tipo != repository.TipoOsTerceiros &&
+		(payload.NumeroNotaFiscal != nil || payload.SerieNotaFiscal != nil || payload.DescricaoServicoTerceiro != nil) {
+		return model.OrdemServico{}, fmt.Errorf("%w: dados de nota fiscal só existem em OS executada por terceiro", helper.ErrValidacao)
+	}
+
+	var custoHoraTecnico pgtype.Float8
+	if payload.CustoHoraTecnico != nil {
+		custoHoraTecnico = pgtype.Float8{Float64: *payload.CustoHoraTecnico, Valid: true}
+	}
+
+	if _, err := repo.AtualizarCusto(ctx, repository.AtualizarCustoParams{
+		TenantID:                 tenantId,
+		OrdemServicoID:           ordemServicoId,
+		CustoHoraTecnico:         custoHoraTecnico,
+		CustoManutencao:          pgtype.Float8{Float64: payload.CustoManutencao, Valid: true},
+		NumeroNotaFiscal:         payload.NumeroNotaFiscal,
+		SerieNotaFiscal:          payload.SerieNotaFiscal,
+		DescricaoServicoTerceiro: payload.DescricaoServicoTerceiro,
+		LancadoPorID:             atorId,
+	}); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			// atual.Status já garantiu Concluída acima; chegar aqui sem
+			// linha é o custo do encerramento nunca tendo sido gravado --
+			// não deveria existir OS Concluída sem os_custo (CriarCusto
+			// roda na mesma tx de Encerrar), mas a mensagem não mente se
+			// acontecer.
+			return model.OrdemServico{}, fmt.Errorf("%w: custo desta ordem de serviço ainda não foi lançado", helper.ErrConflitoIntegridade)
+		}
+		return model.OrdemServico{}, helper.TraduzErroPostgres(err)
+	}
+
+	ordem, err := montarOrdemServicoUnica(ctx, repo, tenantId, ordemServicoId)
+	if err != nil {
+		return model.OrdemServico{}, err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return model.OrdemServico{}, fmt.Errorf("erro ao commitar transação: %w", err)
+	}
+
+	return ordem, nil
+}
+
 // ObterIndicadoresDaMaquina é GET /indicadores/maquinas/:id -- o Painel de
 // Indicadores do Gestor. Mora aqui, e não num IndicadorService próprio, porque
 // tudo que ele lê é histórico de OS: o pacote já teria que expor a mesma query

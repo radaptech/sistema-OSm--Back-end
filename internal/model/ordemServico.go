@@ -98,6 +98,30 @@ type AcionamentoTerceiroPayload struct {
 	EmpresaTerceirizadaId int64 `json:"empresaTerceirizadaId" binding:"required,gt=0"`
 }
 
+// LancamentoCustoManutencaoPayload é o corpo de POST /ordens-servico/:id/custo
+// -- espelha LancamentoCustoManutencaoPayload do front, menos OrdemServicoId
+// (vem do `:id`, mesmo padrão dos outros payloads de transição). É o
+// Administrador CORRIGINDO o que o Técnico já lançou no encerramento
+// (CriarCusto), não uma criação -- por isso o service exige a OS `Concluída`
+// antes de aceitar isto.
+//
+// CustoHoraTecnico e os dois custos seguem o mesmo padrão de
+// EncerramentoOrdemServicoPayload: `gte=0` em vez de `required`, porque 0 é
+// valor de negócio legítimo (ck_custo_nao_negativo permite). A presença de
+// CustoHoraTecnico bater com o tipo da OS ('maquinario' ou não) é checada no
+// service, que já leu o tipo -- não dá pra validar isso só olhando o corpo.
+//
+// Os três campos de nota fiscal só fazem sentido em 'terceiros'
+// (ck_custo_por_tipo) e por isso são opcionais aqui, sem binding: o service
+// decide se o que veio bate com o tipo, mesmo raciocínio de CustoHoraTecnico.
+type LancamentoCustoManutencaoPayload struct {
+	CustoHoraTecnico         *float64 `json:"custoHoraTecnico" binding:"omitempty,gte=0"`
+	CustoManutencao          float64  `json:"custoManutencao" binding:"gte=0"`
+	NumeroNotaFiscal         *string  `json:"numeroNotaFiscal,omitempty"`
+	SerieNotaFiscal          *string  `json:"serieNotaFiscal,omitempty"`
+	DescricaoServicoTerceiro *string  `json:"descricaoServicoTerceiro,omitempty"`
+}
+
 // OrdemServico espelha OrdemServico do front (ordemServico.ts) e serve os DOIS
 // caminhos que devolvem uma OS: GET /ordens-servico (completa) e
 // POST /solicitacoes/:id/abrir-os (recém-criada). Uma struct só, e não duas,

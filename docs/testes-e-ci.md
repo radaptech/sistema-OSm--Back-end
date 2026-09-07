@@ -91,14 +91,21 @@ suspeitosamente rápido (provavelmente é `t.Skip` por falta de Postgres).
     ciclo reabrindo depois que o Gestor converte a pendente.
     **Mutação conferida**: tirar `m.ativa` da query quebra 4 subtestes; tirar o
     `NOT EXISTS` **não quebra nenhum**, e isso é esperado — ver a seção do job.
-  - `ordemServicoIntegracao_test.go` — `GET /ordens-servico`, query e service no mesmo
-    teste (o setup de tenant/lojas/OS é caro pra repetir). Os subtestes rodam **em ordem**
-    e compartilham estado: os de filtro contam com todas as OS `Aberta`, e só depois o
-    "prepara o ciclo de vida" as encerra/pausa/lança custo. Esses INSERTs são na mão,
-    diferente das OS (que vão por `AbrirOS`), porque não existe caminho de escrita para
-    `os_encerramento`/`os_custo`/`os_pausa` ainda — quando existir, viram chamada de
-    service. O último subteste promove um técnico a gestor, então fica por último de
-    propósito.
+  - `ordemServicoIntegracao_test.go` — sete funções de teste, uma por endpoint do ciclo
+    de vida da OS: `TestListarOrdensServico` (`GET /ordens-servico`), `TestIniciar`,
+    `TestPausar`, `TestRetomar`, `TestAcionarTerceiro`, `TestEncerrar` e
+    `TestCorrigirCusto` (`POST /custo`, a correção do Administrador). As seis últimas
+    cada uma monta o próprio tenant e passa pelo service de verdade
+    (`AbrirOS`/`Iniciar`/.../`Encerrar`), sem SQL cru.
+    - `TestListarOrdensServico` é a exceção: query e service no mesmo teste (o setup de
+      tenant/lojas/OS é caro pra repetir). Os subtestes rodam **em ordem** e compartilham
+      estado: os de filtro contam com todas as OS `Aberta`, e só depois o "prepara o
+      ciclo de vida" as encerra/pausa/lança custo. Esses INSERTs são na mão, diferente
+      das OS (que vão por `AbrirOS`) — não porque falte caminho de escrita (existe, é o
+      resto desta lista), mas porque uma chamada de service grava os timestamps com
+      `now()` na hora, e os dois relógios (Horas Trabalhadas/Parada) só ficam testáveis
+      com um passado exato e controlável. O último subteste promove um técnico a gestor,
+      então fica por último de propósito.
   - `solicitacaoOsIntegracao_test.go` — as duas criações persistindo de verdade (não só
     o retorno, mesmo critério do próximo bullet), as 4 recusas (setor errado, máquina
     desativada/inexistente, marcador de impacto desconhecido), escopo nas duas

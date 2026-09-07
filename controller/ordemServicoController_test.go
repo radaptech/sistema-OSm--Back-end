@@ -40,6 +40,8 @@ type ordemServicoFake struct {
 	empresaTerceirizadaId *int64
 	// payload recebido por Encerrar.
 	encerramento *model.EncerramentoOrdemServicoPayload
+	// payload recebido por CorrigirCusto.
+	custo *model.LancamentoCustoManutencaoPayload
 }
 
 func (o ordemServicoFake) ListarOrdensServico(_ context.Context, _, usuarioId int64, perfil string, f service.FiltrosOrdemServico) ([]model.OrdemServico, error) {
@@ -155,6 +157,28 @@ func (o ordemServicoFake) Encerrar(_ context.Context, _, atorId, ordemServicoId 
 	}
 	if o.ator != nil {
 		*o.ator = "tecnico/" + strconv.FormatInt(atorId, 10)
+	}
+	if o.err != nil {
+		return model.OrdemServico{}, o.err
+	}
+	return model.OrdemServico{
+		Id: ordemServicoId, SolicitacaoId: 3, Tipo: "maquinario", StatusExecucao: "Concluída",
+		Descricao: "Forno não aquece", SetorId: 4, SetorNome: "Padaria",
+		LojaId: 1, LojaNome: "Loja A", Finalizada: true,
+	}, nil
+}
+
+// atorId aqui é o Administrador, não o técnico -- prefixo "administrador/",
+// diferente de todo o resto do ciclo de vida acima.
+func (o ordemServicoFake) CorrigirCusto(_ context.Context, _, atorId, ordemServicoId int64, payload model.LancamentoCustoManutencaoPayload) (model.OrdemServico, error) {
+	if o.ordemServicoId != nil {
+		*o.ordemServicoId = ordemServicoId
+	}
+	if o.custo != nil {
+		*o.custo = payload
+	}
+	if o.ator != nil {
+		*o.ator = "administrador/" + strconv.FormatInt(atorId, 10)
 	}
 	if o.err != nil {
 		return model.OrdemServico{}, o.err
@@ -787,6 +811,70 @@ func TestOrdemServicoEncerrarAtorIdEPayload(t *testing.T) {
 	}
 	if recebido.TipoDefeito != "Corretiva" || recebido.Solucao != "Troca da resistência" {
 		t.Errorf("payload = %+v, não bateu com o corpo enviado", recebido)
+	}
+	if recebido.CustoHoraTecnico == nil || *recebido.CustoHoraTecnico != 45 {
+		t.Errorf("custoHoraTecnico = %v, esperado 45", recebido.CustoHoraTecnico)
+	}
+}
+
+const dadosCustoValidos = `{"custoHoraTecnico":45,"custoManutencao":120.5}`
+
+func TestOrdemServicoCustoStatus(t *testing.T) {
+
+	casos := []struct {
+		nome    string
+		corpo   string
+		err     error
+		esperar int
+	}{
+		{"sucesso", dadosCustoValidos, nil, http.StatusOK},
+		{"corpo malformado", `{`, nil, http.StatusBadRequest},
+		{"custoManutencao negativo", `{"custoHoraTecnico":45,"custoManutencao":-10}`, nil, http.StatusBadRequest},
+		{"regra de tipo violada (validação do service)", dadosCustoValidos, helper.ErrValidacao, http.StatusBadRequest},
+		{"não encontrada", dadosCustoValidos, helper.ErrNaoEncontrado, http.StatusNotFound},
+		{"conflito de estado (OS ainda não encerrada)", dadosCustoValidos, helper.ErrConflitoIntegridade, http.StatusUnprocessableEntity},
+		{"erro genérico", dadosCustoValidos, errors.New("erro de banco"), http.StatusInternalServerError},
+	}
+
+	for _, c := range casos {
+		t.Run(c.nome, func(t *testing.T) {
+			ctx, rec := contextoOSAcao("42", c.corpo)
+			ctrl := NewOrdemServicoController(ordemServicoFake{err: c.err})
+
+			ctrl.Custo()(ctx)
+
+			if rec.Code != c.esperar {
+				t.Errorf("status = %d, esperado %d (corpo: %s)", rec.Code, c.esperar, rec.Body.String())
+			}
+		})
+	}
+}
+
+// atorId aqui vem do mesmo claim que os outros (UserId do token, ver
+// contextoOSAcao) -- quem garante que só Administrador chega até aqui é o
+// RBAC da rota (Permitir("administrador")), não o controller.
+func TestOrdemServicoCustoAtorIdEPayload(t *testing.T) {
+
+	var ator string
+	var ordemServicoId int64
+	var recebido model.LancamentoCustoManutencaoPayload
+	ctx, rec := contextoOSAcao("42", dadosCustoValidos)
+
+	NewOrdemServicoController(ordemServicoFake{
+		ator: &ator, ordemServicoId: &ordemServicoId, custo: &recebido,
+	}).Custo()(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, corpo: %s", rec.Code, rec.Body.String())
+	}
+	if ator != "administrador/5" {
+		t.Errorf("ator = %q, esperado administrador/5 (do token, não do corpo)", ator)
+	}
+	if ordemServicoId != 42 {
+		t.Errorf("ordemServicoId = %d, esperado 42 (do :id da rota)", ordemServicoId)
+	}
+	if recebido.CustoManutencao != 120.5 {
+		t.Errorf("custoManutencao = %v, esperado 120.5", recebido.CustoManutencao)
 	}
 	if recebido.CustoHoraTecnico == nil || *recebido.CustoHoraTecnico != 45 {
 		t.Errorf("custoHoraTecnico = %v, esperado 45", recebido.CustoHoraTecnico)

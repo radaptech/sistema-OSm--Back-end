@@ -12,19 +12,28 @@ Leia antes de implementar endpoint do miolo do fluxo (solicitação, OS, indicad
 Cadastros: **completos**. Solicitações (fase 1): **completo** — ver seção própria
 "Solicitações" abaixo. `GET /ordens-servico`: **completo** — com ele o Painel do Gestor
 fica inteiro (ver "Ordem de serviço — listagem" abaixo). `GET /indicadores/maquinas/:id`:
-**completo** — ver "Indicadores de máquina" abaixo.
+**completo** — ver "Indicadores de máquina" abaixo. **Ciclo de vida da Ordem de
+serviço**: **completo** — `iniciar`/`pausar`/`retomar`/`acionar-terceiro`/`encerrar`
+(Técnico, `PainelTecnico`) e `custo` (Administrador, correção pós-encerramento em
+`AdministradorCustosPendentes`), todos ESCRITA, nenhum do Gestor. Destravou os dois
+cards mortos do painel do Administrador e, de quebra, tira os indicadores do zero (que
+liam um histórico de encerramentos que ninguém escrevia ainda — o aviso de "painel
+responde só zeros" em "Indicadores de máquina" abaixo deixou de valer).
 
-Falta **uma coisa só**: o **ciclo de vida da Ordem de serviço** — `iniciar`/`pausar`/
-`retomar`/`acionar-terceiro`/`encerrar`/`custo`. É tudo ESCRITA, e nenhuma delas é do
-Gestor: as cinco primeiras são do **Técnico** (`PainelTecnico`) e o `custo` é do
-**Administrador** (`AdministradorCustosPendentes`). Destrava os dois cards mortos do
-painel do Administrador e, de quebra, tira do zero os indicadores (que hoje leem um
-histórico de encerramentos que ninguém escreve ainda).
+`custo` (`POST /ordens-servico/:id/custo`, `CorrigirCusto` em
+`internal/service/ordemServico.go`) não é uma criação, é uma correção: `os_custo` já
+nasce em `Encerrar`, junto do `os_encerramento` (o Técnico já lança os dois custos ao
+fechar a OS). O Administrador só ajusta depois, tipicamente conferindo o Custo de
+Manutenção contra a nota fiscal de uma OS terceirizada. Por isso o service exige a OS já
+`Concluída` (senão não existe `os_custo` pra atualizar) e repete `ck_custo_por_tipo` em
+Go — `custoHoraTecnico` só em `maquinario`, os três campos de nota fiscal só em
+`terceiros` — pelo mesmo motivo de `Encerrar`: sem isso, o erro que sobe é o `CHECK` do
+banco estourando, genérico, em vez de dizer qual campo está errado.
 
 O que já existe e NÃO precisa ser refeito: a criação da OS (`AbrirOS`, fase 1 — a OS
 nasce da aprovação do Gestor, nunca de um `POST /ordens-servico`) e a **leitura**
-(`GET /ordens-servico`), que já projeta encerramento, custo, horas e pausas para quando
-essas linhas existirem.
+(`GET /ordens-servico`), que já projetava encerramento, custo, horas e pausas antes
+mesmo de essas linhas existirem.
 
 Prontos e testados, fora da lista: os **indicadores de máquina**, o **job de preventiva
 vencida** (falta só o Cron Job no Railway) e a **notificação por WhatsApp** (falta só o
@@ -118,8 +127,11 @@ OS é da solicitação, não de um lugar.
   `go.mod` e `models.go` seguia com `pgtype.Numeric`. Nunca doeu porque nenhuma query
   tocava coluna `numeric` antes desta. Deixado como está de propósito: consertá-lo traria
   `decimal.Decimal`, que serializa como **string** em JSON contra um front que tipa
-  `number`. Quem vai precisar dele direito é a **escrita** do custo (fase 2) — e aí são
-  DUAS entradas, uma com `nullable: true`, senão só a coluna NOT NULL vira decimal.
+  `number`. A **escrita** do custo (`CriarCusto`/`AtualizarCusto`) não precisou dele:
+  as duas colunas já tinham override próprio por NOME (`*.custo_hora_tecnico`/
+  `*.custo_manutencao`, ambos `pgtype.Float8`, casando em qualquer tabela/query), então
+  esse override de `numeric` genérico segue morto do mesmo jeito — nenhuma query nova
+  precisou dele.
 - ⚠️ **`vw_os_horas` devolve `numeric`** mesmo sem coluna numeric envolvida:
   `EXTRACT(EPOCH ...)` retorna numeric desde o Postgres 14.
 - **`area_tecnico` é LEFT JOIN aqui, INNER em `ListarTecnicos`.** Lá o `WHERE` já garante
@@ -165,10 +177,12 @@ Horas Parada, MTTR, MTBF e Custo Total da máquina, mais a rosca de paradas por 
 defeito e as barras de custo mensal dos últimos 6 meses. Tudo sai do histórico de OS
 **encerradas** daquela máquina — `ListarHistoricoOsDaMaquina`, uma linha por OS.
 
-⚠️ **Hoje o painel responde só zeros, e isso está certo.** Nada preenche
-`os_encerramento`/`os_custo` ainda: quem vai fazer isso é o ciclo de vida da OS (fase 2,
-`/encerrar` e `/custo`). O endpoint está pronto e testado contra linhas inseridas na mão
-— quando a fase 2 existir, os números aparecem sozinhos, sem tocar aqui.
+**Não responde mais só zeros** desde que o ciclo de vida da OS ficou completo
+(`/encerrar` grava `os_encerramento`/`os_custo`, `/custo` corrige o segundo depois) — os
+números aparecem sozinhos a partir da primeira OS encerrada de cada máquina, sem tocar
+aqui. Ficou pronto e testado contra linhas inseridas na mão ANTES disso existir, e
+continua valendo: nada nesta seção mudou com o ciclo de vida, só passou a ter dado de
+verdade por trás.
 
 - **A agregação é em Go, não no `SELECT`** (`MontarIndicadoresMaquina`, em
   `internal/model/indicadorMaquina.go`). Seis grandezas seriam três `GROUP BY` numa
