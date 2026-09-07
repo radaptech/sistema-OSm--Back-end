@@ -1659,6 +1659,9 @@ func TestCorrigirCusto(t *testing.T) {
 
 	t.Run("corrige com sucesso e o lançamento passa a ser do Administrador", func(t *testing.T) {
 		os := osConcluidaMaquinario("PAT-CUSTO-1", "Corrige com sucesso")
+		if os.Custo == nil || os.Custo.RevisadoEm != nil {
+			t.Fatalf("custo recém-lançado pelo Técnico devia ter revisadoEm nil, veio %+v", os.Custo)
+		}
 		novoCustoHora := 60.0
 		corrigida, err := svcOS.CorrigirCusto(ctx, tenantID, adminCorretor.Id, os.Id, model.LancamentoCustoManutencaoPayload{
 			CustoHoraTecnico: &novoCustoHora, CustoManutencao: 200,
@@ -1668,6 +1671,9 @@ func TestCorrigirCusto(t *testing.T) {
 		}
 		if corrigida.Custo == nil {
 			t.Fatal("custo veio nulo")
+		}
+		if corrigida.Custo.RevisadoEm == nil {
+			t.Error("revisadoEm devia estar preenchida após a conferência do Administrador")
 		}
 		if corrigida.Custo.CustoHoraTecnico == nil || *corrigida.Custo.CustoHoraTecnico != 60 {
 			t.Errorf("custoHoraTecnico = %v, esperado 60", corrigida.Custo.CustoHoraTecnico)

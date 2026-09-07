@@ -45,6 +45,12 @@ type EncerramentoOrdemServico struct {
 // 'terceiros', e por isso levam `omitempty`.
 //
 // CustoTotal é derivado, somado em MontarOrdemServico -- ver a nota lá.
+//
+// RevisadoEm é nil enquanto nenhum Administrador conferiu o custo (o Técnico
+// lançou no encerramento e ninguém mais mexeu); vira data no primeiro
+// POST /ordens-servico/:id/custo. É o que separa a pílula "Pendentes" da
+// "Revisadas" em Custos Pendentes -- sem `omitempty` porque o front tipa
+// `string | null` e lê o nil.
 type CustoOrdemServico struct {
 	CustoHoraTecnico         *float64       `json:"custoHoraTecnico"`
 	CustoManutencao          float64        `json:"custoManutencao"`
@@ -54,6 +60,7 @@ type CustoOrdemServico struct {
 	DescricaoServicoTerceiro *string        `json:"descricaoServicoTerceiro,omitempty"`
 	LancadoPorNome           string         `json:"lancadoPorNome"`
 	LancadoEm                *config.DataBr `json:"lancadoEm"`
+	RevisadoEm               *config.DataBr `json:"revisadoEm"`
 }
 
 // EncerramentoOrdemServicoPayload é o corpo de POST /ordens-servico/:id/encerrar
@@ -280,6 +287,7 @@ func MontarOrdemServico(os repository.ListarOrdensServicoRow, pausas []repositor
 			DescricaoServicoTerceiro: os.DescricaoServicoTerceiro,
 			LancadoPorNome:           textoOuVazio(os.LancadoPorNome),
 			LancadoEm:                dataBrOuNil(os.LancadoEm),
+			RevisadoEm:               dataBrOuNil(os.CustoRevisadoEm),
 		}
 	}
 

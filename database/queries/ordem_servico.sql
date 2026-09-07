@@ -207,6 +207,12 @@ RETURNING *;
 --
 -- Sem WHERE por tipo: os_custo.tipo é fixo desde o INSERT (CriarCusto) e não
 -- muda depois de Concluída, então não há o que recomparar contra a OS.
+--
+-- custo_revisado_em = now() na mesma tacada: toda passagem do Administrador
+-- por esta query É a conferência contra a nota, então é aqui que a marca
+-- nasce. É o que move a OS de "Pendentes" para "Revisadas" em Custos
+-- Pendentes -- agora para todos os Administradores, não só no navegador de
+-- quem salvou (era localStorage). Re-salvar só reafirma a data, não desfaz.
 UPDATE os_custo
 SET custo_hora_tecnico = sqlc.narg(custo_hora_tecnico),
     custo_manutencao = sqlc.arg(custo_manutencao),
@@ -214,7 +220,8 @@ SET custo_hora_tecnico = sqlc.narg(custo_hora_tecnico),
     serie_nota_fiscal = sqlc.narg(serie_nota_fiscal),
     descricao_servico_terceiro = sqlc.narg(descricao_servico_terceiro),
     lancado_por_id = sqlc.arg(lancado_por_id),
-    lancado_em = now()
+    lancado_em = now(),
+    custo_revisado_em = now()
 WHERE tenant_id = sqlc.arg(tenant_id) AND ordem_servico_id = sqlc.arg(ordem_servico_id)
 RETURNING *;
 
@@ -313,6 +320,7 @@ SELECT
     c.serie_nota_fiscal,
     c.descricao_servico_terceiro,
     c.lancado_em,
+    c.custo_revisado_em,
     lanc.nome AS lancado_por_nome
 FROM ordem_servico os
 JOIN solicitacao_os s  ON s.tenant_id = os.tenant_id AND s.id = os.solicitacao_id

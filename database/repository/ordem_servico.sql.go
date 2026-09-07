@@ -76,9 +76,10 @@ SET custo_hora_tecnico = $1,
     serie_nota_fiscal = $4,
     descricao_servico_terceiro = $5,
     lancado_por_id = $6,
-    lancado_em = now()
+    lancado_em = now(),
+    custo_revisado_em = now()
 WHERE tenant_id = $7 AND ordem_servico_id = $8
-RETURNING id, tenant_id, ordem_servico_id, tipo, custo_hora_tecnico, custo_manutencao, numero_nota_fiscal, serie_nota_fiscal, descricao_servico_terceiro, lancado_por_id, lancado_em
+RETURNING id, tenant_id, ordem_servico_id, tipo, custo_hora_tecnico, custo_manutencao, numero_nota_fiscal, serie_nota_fiscal, descricao_servico_terceiro, lancado_por_id, lancado_em, custo_revisado_em
 `
 
 type AtualizarCustoParams struct {
@@ -108,6 +109,12 @@ type AtualizarCustoParams struct {
 //
 // Sem WHERE por tipo: os_custo.tipo é fixo desde o INSERT (CriarCusto) e não
 // muda depois de Concluída, então não há o que recomparar contra a OS.
+//
+// custo_revisado_em = now() na mesma tacada: toda passagem do Administrador
+// por esta query É a conferência contra a nota, então é aqui que a marca
+// nasce. É o que move a OS de "Pendentes" para "Revisadas" em Custos
+// Pendentes -- agora para todos os Administradores, não só no navegador de
+// quem salvou (era localStorage). Re-salvar só reafirma a data, não desfaz.
 func (q *Queries) AtualizarCusto(ctx context.Context, arg AtualizarCustoParams) (OsCusto, error) {
 	row := q.db.QueryRow(ctx, atualizarCusto,
 		arg.CustoHoraTecnico,
@@ -132,6 +139,7 @@ func (q *Queries) AtualizarCusto(ctx context.Context, arg AtualizarCustoParams) 
 		&i.DescricaoServicoTerceiro,
 		&i.LancadoPorID,
 		&i.LancadoEm,
+		&i.CustoRevisadoEm,
 	)
 	return i, err
 }
@@ -144,7 +152,7 @@ INSERT INTO os_custo (
     $1, $2, $3,
     $4, $5, $6
 )
-RETURNING id, tenant_id, ordem_servico_id, tipo, custo_hora_tecnico, custo_manutencao, numero_nota_fiscal, serie_nota_fiscal, descricao_servico_terceiro, lancado_por_id, lancado_em
+RETURNING id, tenant_id, ordem_servico_id, tipo, custo_hora_tecnico, custo_manutencao, numero_nota_fiscal, serie_nota_fiscal, descricao_servico_terceiro, lancado_por_id, lancado_em, custo_revisado_em
 `
 
 type CriarCustoParams struct {
@@ -195,6 +203,7 @@ func (q *Queries) CriarCusto(ctx context.Context, arg CriarCustoParams) (OsCusto
 		&i.DescricaoServicoTerceiro,
 		&i.LancadoPorID,
 		&i.LancadoEm,
+		&i.CustoRevisadoEm,
 	)
 	return i, err
 }
@@ -524,6 +533,7 @@ SELECT
     c.serie_nota_fiscal,
     c.descricao_servico_terceiro,
     c.lancado_em,
+    c.custo_revisado_em,
     lanc.nome AS lancado_por_nome
 FROM ordem_servico os
 JOIN solicitacao_os s  ON s.tenant_id = os.tenant_id AND s.id = os.solicitacao_id
@@ -632,6 +642,7 @@ type ListarOrdensServicoRow struct {
 	SerieNotaFiscal          *string
 	DescricaoServicoTerceiro *string
 	LancadoEm                pgtype.Timestamptz
+	CustoRevisadoEm          pgtype.Timestamptz
 	LancadoPorNome           *string
 }
 
@@ -763,6 +774,7 @@ func (q *Queries) ListarOrdensServico(ctx context.Context, arg ListarOrdensServi
 			&i.SerieNotaFiscal,
 			&i.DescricaoServicoTerceiro,
 			&i.LancadoEm,
+			&i.CustoRevisadoEm,
 			&i.LancadoPorNome,
 		); err != nil {
 			return nil, err

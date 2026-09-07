@@ -557,6 +557,7 @@ type OsCusto struct {
 	DescricaoServicoTerceiro *string
 	LancadoPorID             int64
 	LancadoEm                pgtype.Timestamptz
+	CustoRevisadoEm          pgtype.Timestamptz
 }
 
 type OsEncerramento struct {

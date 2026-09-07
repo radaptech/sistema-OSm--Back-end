@@ -30,6 +30,12 @@ Go — `custoHoraTecnico` só em `maquinario`, os três campos de nota fiscal s�
 `terceiros` — pelo mesmo motivo de `Encerrar`: sem isso, o erro que sobe é o `CHECK` do
 banco estourando, genérico, em vez de dizer qual campo está errado.
 
+`AtualizarCusto` grava `os_custo.custo_revisado_em = now()` de quebra: toda passagem do
+Administrador por aqui É a conferência. `GET /ordens-servico` projeta a coluna como
+`custo.revisadoEm`, e é ela que separa as pílulas **"Pendentes"** (ninguém conferiu) e
+**"Revisadas"** em `AdministradorCustosPendentes` — antes era `localStorage`, a OS
+trocava de aba só no navegador de quem salvou; agora vale para todos os Administradores.
+
 O que já existe e NÃO precisa ser refeito: a criação da OS (`AbrirOS`, fase 1 — a OS
 nasce da aprovação do Gestor, nunca de um `POST /ordens-servico`) e a **leitura**
 (`GET /ordens-servico`), que já projetava encerramento, custo, horas e pausas antes

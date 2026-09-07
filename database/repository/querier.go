@@ -45,6 +45,12 @@ type Querier interface {
 	//
 	// Sem WHERE por tipo: os_custo.tipo é fixo desde o INSERT (CriarCusto) e não
 	// muda depois de Concluída, então não há o que recomparar contra a OS.
+	//
+	// custo_revisado_em = now() na mesma tacada: toda passagem do Administrador
+	// por esta query É a conferência contra a nota, então é aqui que a marca
+	// nasce. É o que move a OS de "Pendentes" para "Revisadas" em Custos
+	// Pendentes -- agora para todos os Administradores, não só no navegador de
+	// quem salvou (era localStorage). Re-salvar só reafirma a data, não desfaz.
 	AtualizarCusto(ctx context.Context, arg AtualizarCustoParams) (OsCusto, error)
 	// Todos os campos editáveis de uma vez (o front manda o objeto inteiro no PUT).
 	// `ativa` fica de fora: reativar não existe pela API, e desativar tem rota
