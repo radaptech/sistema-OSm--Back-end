@@ -45,6 +45,12 @@ type EncerramentoOrdemServico struct {
 // 'terceiros', e por isso levam `omitempty`.
 //
 // CustoTotal é derivado, somado em MontarOrdemServico -- ver a nota lá.
+//
+// RevisadoEm é nil enquanto nenhum Administrador conferiu o custo (o Técnico
+// lançou no encerramento e ninguém mais mexeu); vira data no primeiro
+// POST /ordens-servico/:id/custo. É o que separa a pílula "Pendentes" da
+// "Revisadas" em Custos Pendentes -- sem `omitempty` porque o front tipa
+// `string | null` e lê o nil.
 type CustoOrdemServico struct {
 	CustoHoraTecnico         *float64       `json:"custoHoraTecnico"`
 	CustoManutencao          float64        `json:"custoManutencao"`
@@ -54,6 +60,7 @@ type CustoOrdemServico struct {
 	DescricaoServicoTerceiro *string        `json:"descricaoServicoTerceiro,omitempty"`
 	LancadoPorNome           string         `json:"lancadoPorNome"`
 	LancadoEm                *config.DataBr `json:"lancadoEm"`
+	RevisadoEm               *config.DataBr `json:"revisadoEm"`
 }
 
 // EncerramentoOrdemServicoPayload é o corpo de POST /ordens-servico/:id/encerrar
@@ -96,6 +103,30 @@ type PausaOrdemServicoPayload struct {
 // composta) só pra descobrir isso.
 type AcionamentoTerceiroPayload struct {
 	EmpresaTerceirizadaId int64 `json:"empresaTerceirizadaId" binding:"required,gt=0"`
+}
+
+// LancamentoCustoManutencaoPayload é o corpo de POST /ordens-servico/:id/custo
+// -- espelha LancamentoCustoManutencaoPayload do front, menos OrdemServicoId
+// (vem do `:id`, mesmo padrão dos outros payloads de transição). É o
+// Administrador CORRIGINDO o que o Técnico já lançou no encerramento
+// (CriarCusto), não uma criação -- por isso o service exige a OS `Concluída`
+// antes de aceitar isto.
+//
+// CustoHoraTecnico e os dois custos seguem o mesmo padrão de
+// EncerramentoOrdemServicoPayload: `gte=0` em vez de `required`, porque 0 é
+// valor de negócio legítimo (ck_custo_nao_negativo permite). A presença de
+// CustoHoraTecnico bater com o tipo da OS ('maquinario' ou não) é checada no
+// service, que já leu o tipo -- não dá pra validar isso só olhando o corpo.
+//
+// Os três campos de nota fiscal só fazem sentido em 'terceiros'
+// (ck_custo_por_tipo) e por isso são opcionais aqui, sem binding: o service
+// decide se o que veio bate com o tipo, mesmo raciocínio de CustoHoraTecnico.
+type LancamentoCustoManutencaoPayload struct {
+	CustoHoraTecnico         *float64 `json:"custoHoraTecnico" binding:"omitempty,gte=0"`
+	CustoManutencao          float64  `json:"custoManutencao" binding:"gte=0"`
+	NumeroNotaFiscal         *string  `json:"numeroNotaFiscal,omitempty"`
+	SerieNotaFiscal          *string  `json:"serieNotaFiscal,omitempty"`
+	DescricaoServicoTerceiro *string  `json:"descricaoServicoTerceiro,omitempty"`
 }
 
 // OrdemServico espelha OrdemServico do front (ordemServico.ts) e serve os DOIS
@@ -256,6 +287,7 @@ func MontarOrdemServico(os repository.ListarOrdensServicoRow, pausas []repositor
 			DescricaoServicoTerceiro: os.DescricaoServicoTerceiro,
 			LancadoPorNome:           textoOuVazio(os.LancadoPorNome),
 			LancadoEm:                dataBrOuNil(os.LancadoEm),
+			RevisadoEm:               dataBrOuNil(os.CustoRevisadoEm),
 		}
 	}
 
