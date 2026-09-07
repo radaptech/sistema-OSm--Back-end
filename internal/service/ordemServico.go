@@ -557,6 +557,16 @@ func (s *OrdemServicoService) CorrigirCusto(ctx context.Context, tenantId, atorI
 		return model.OrdemServico{}, fmt.Errorf("%w: ordem de serviço ainda não foi encerrada", helper.ErrConflitoIntegridade)
 	}
 
+	// O modal do front nasce com defaultValues "" nos três campos de nota e o
+	// React Hook Form manda a string vazia mesmo quando eles nem são
+	// renderizados (OS que não é de terceiros) -- ver textoOuNil. Sem aparar
+	// aqui, "" conta como "veio dado de nota fiscal" e a checagem de tipo
+	// abaixo barra uma OS de maquinário/reparo legítima; na de terceiros, o ""
+	// ainda iria pro banco no lugar de NULL.
+	numeroNotaFiscal := textoOuNil(payload.NumeroNotaFiscal)
+	serieNotaFiscal := textoOuNil(payload.SerieNotaFiscal)
+	descricaoServicoTerceiro := textoOuNil(payload.DescricaoServicoTerceiro)
+
 	// ck_custo_por_tipo espelhado aqui, mesmo raciocínio de Encerrar: sem
 	// isto o CHECK do banco ainda barra, mas com "regra de validação do
 	// banco violada" genérica em vez de dizer qual campo está errado. Usa
@@ -568,7 +578,7 @@ func (s *OrdemServicoService) CorrigirCusto(ctx context.Context, tenantId, atorI
 		return model.OrdemServico{}, fmt.Errorf("%w: custoHoraTecnico só existe em OS de maquinário", helper.ErrValidacao)
 	}
 	if atual.Tipo != repository.TipoOsTerceiros &&
-		(payload.NumeroNotaFiscal != nil || payload.SerieNotaFiscal != nil || payload.DescricaoServicoTerceiro != nil) {
+		(numeroNotaFiscal != nil || serieNotaFiscal != nil || descricaoServicoTerceiro != nil) {
 		return model.OrdemServico{}, fmt.Errorf("%w: dados de nota fiscal só existem em OS executada por terceiro", helper.ErrValidacao)
 	}
 
@@ -582,9 +592,9 @@ func (s *OrdemServicoService) CorrigirCusto(ctx context.Context, tenantId, atorI
 		OrdemServicoID:           ordemServicoId,
 		CustoHoraTecnico:         custoHoraTecnico,
 		CustoManutencao:          pgtype.Float8{Float64: payload.CustoManutencao, Valid: true},
-		NumeroNotaFiscal:         payload.NumeroNotaFiscal,
-		SerieNotaFiscal:          payload.SerieNotaFiscal,
-		DescricaoServicoTerceiro: payload.DescricaoServicoTerceiro,
+		NumeroNotaFiscal:         numeroNotaFiscal,
+		SerieNotaFiscal:          serieNotaFiscal,
+		DescricaoServicoTerceiro: descricaoServicoTerceiro,
 		LancadoPorID:             atorId,
 	}); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
