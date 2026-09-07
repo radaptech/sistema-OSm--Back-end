@@ -1730,6 +1730,20 @@ func TestCorrigirCusto(t *testing.T) {
 		}
 	})
 
+	t.Run("nota fiscal em branco fora de terceiros passa (defaultValues do front)", func(t *testing.T) {
+		os := osConcluidaReparo("PAT-CUSTO-5B")
+		vazio := "   "
+		_, err := svcOS.CorrigirCusto(ctx, tenantID, adminCorretor.Id, os.Id, model.LancamentoCustoManutencaoPayload{
+			CustoManutencao:          50,
+			NumeroNotaFiscal:         &vazio,
+			SerieNotaFiscal:          &vazio,
+			DescricaoServicoTerceiro: &vazio,
+		})
+		if err != nil {
+			t.Fatalf("string vazia nos campos de nota não devia barrar OS de reparo: %v", err)
+		}
+	})
+
 	t.Run("corrige nota fiscal com sucesso numa OS de terceiros", func(t *testing.T) {
 		os := osConcluidaTerceiros("PAT-CUSTO-6", "Serviço de terceiro")
 		numero, serie, descricao := "NF-42", "1", "Troca do compressor"
