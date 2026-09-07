@@ -29,6 +29,29 @@ type Querier interface {
 	// ErrConflitoIntegridade via TraduzErroPostgres, mesmo caminho de
 	// CriarOrdemServicoDeSolicitacao com tecnico_id inexistente.
 	AcionarTerceiro(ctx context.Context, arg AcionarTerceiroParams) (OrdemServico, error)
+	// POST /ordens-servico/:id/custo -- a correção prometida no comentário de
+	// CriarCusto acima. lancado_por_id passa a ser o Administrador que corrige,
+	// não mais o Técnico do encerramento; lancado_em anda junto (é "a última vez
+	// que este custo foi mexido", não "quando nasceu").
+	//
+	// SET direto, sem COALESCE (diferente de AtualizarMaquina/foto_chave): o
+	// modal do Administrador chega pré-preenchido com o valor atual (é edição,
+	// não patch parcial), então campo omitido é o Administrador apagando de
+	// propósito -- ex: nota fiscal que ele decidiu não registrar. sqlc.narg vira
+	// NULL nesse caso, que é exatamente o que ck_custo_por_tipo exige fora de
+	// 'maquinario'/'terceiros'. O service confere o tipo ANTES de chamar esta
+	// query (mesma checagem de Encerrar), pra um erro de tipo virar mensagem
+	// clara em vez de estourar a constraint aqui.
+	//
+	// Sem WHERE por tipo: os_custo.tipo é fixo desde o INSERT (CriarCusto) e não
+	// muda depois de Concluída, então não há o que recomparar contra a OS.
+	//
+	// custo_revisado_em = now() na mesma tacada: toda passagem do Administrador
+	// por esta query É a conferência contra a nota, então é aqui que a marca
+	// nasce. É o que move a OS de "Pendentes" para "Revisadas" em Custos
+	// Pendentes -- agora para todos os Administradores, não só no navegador de
+	// quem salvou (era localStorage). Re-salvar só reafirma a data, não desfaz.
+	AtualizarCusto(ctx context.Context, arg AtualizarCustoParams) (OsCusto, error)
 	// Todos os campos editáveis de uma vez (o front manda o objeto inteiro no PUT).
 	// `ativa` fica de fora: reativar não existe pela API, e desativar tem rota
 	// própria -- ver DesativarEmpresaTerceirizada.

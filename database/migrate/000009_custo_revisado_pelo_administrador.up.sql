@@ -1,0 +1,19 @@
+-- ==========================================================================
+-- "Revisadas" em Custos Pendentes deixa de ser estado so do navegador.
+--
+-- A tela do Administrador separa a fila de conferencia em duas pilulas:
+-- "Pendentes" (ainda nao olhei) e "Revisadas" (ja conferi contra a nota).
+-- Ate aqui essa marca vivia no localStorage do front -- a OS trocava de aba
+-- so naquele navegador, e outro Administrador (ou o mesmo em outro aparelho)
+-- via tudo em Pendentes.
+--
+-- custo_revisado_em carrega a marca no servidor: NULL = ninguem conferiu
+-- ainda, timestamp = quando o Administrador salvou a conferencia
+-- (POST /ordens-servico/:id/custo grava now() aqui, ver AtualizarCusto).
+--
+-- Nullable e sem default de proposito: toda linha de os_custo que ja existe
+-- nasceu no encerramento do Tecnico (CriarCusto) e ainda nao passou pelo
+-- Administrador -- comecar como NULL e a resposta certa, nao um buraco a
+-- preencher.
+-- ==========================================================================
+ALTER TABLE os_custo ADD COLUMN custo_revisado_em timestamptz;

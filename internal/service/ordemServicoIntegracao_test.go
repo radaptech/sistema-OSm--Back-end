@@ -342,10 +342,14 @@ func TestListarOrdensServico(t *testing.T) {
 	// Daqui pra baixo o estado das OS muda -- os subtestes acima contam com
 	// todas 'Aberta', que é como AbrirOS as deixa.
 	//
-	// Os INSERTs são na mão, diferente das OS (que vão por AbrirOS): não
-	// existe caminho de escrita para os_encerramento/os_custo/os_pausa
-	// ainda -- iniciar/pausar/encerrar/custo são a fase 2. Quando existirem,
-	// esta montagem vira chamada de service, como já é a de cima.
+	// Os INSERTs são na mão, diferente das OS (que vão por AbrirOS) -- não
+	// porque falte caminho de escrita (o ciclo de vida inteiro existe, ver
+	// TestIniciar/TestPausar/TestRetomar/TestAcionarTerceiro/TestEncerrar/
+	// TestCorrigirCusto mais abaixo neste arquivo), mas porque uma chamada de
+	// service grava os timestamps com `now()` na hora, e os dois relógios
+	// (Horas Trabalhadas/Parada) só ficam testáveis com um passado EXATO e
+	// controlável -- `criado_em`/`iniciada_em`/pausas deslocados por
+	// `interval` fixo (ver o comentário do Forno logo abaixo).
 	// ------------------------------------------------------------------
 	t.Run("prepara o ciclo de vida das OS", func(t *testing.T) {
 		exec := func(sql string, args ...any) {
@@ -1507,6 +1511,250 @@ func TestEncerrar(t *testing.T) {
 
 	t.Run("id inexistente é não encontrado", func(t *testing.T) {
 		_, err := svcOS.Encerrar(ctx, tenantID, tecnicoDono.Id, 999999999, payloadPadrao())
+		if !errors.Is(err, helper.ErrNaoEncontrado) {
+			t.Fatalf("erro = %v, esperado ErrNaoEncontrado", err)
+		}
+	})
+}
+
+// TestCorrigirCusto cobre POST /ordens-servico/:id/custo: o Administrador
+// corrigindo o que o Técnico já lançou em Encerrar -- sem dono pra checar
+// (RBAC da rota é quem restringe o perfil), exigindo a OS já Concluída, e
+// repetindo ck_custo_por_tipo (custoHoraTecnico só em maquinário, nota fiscal
+// só em terceiros) pelo mesmo motivo de TestEncerrar: a mensagem tem que
+// dizer qual campo está errado, não estourar o CHECK do banco calado.
+func TestCorrigirCusto(t *testing.T) {
+
+	ctx := context.Background()
+	pool := bancoDeTeste(t)
+	svcUsuario := NewRepoUsuario(pool)
+	svcMaquina := NewRepoMaquinario(pool)
+	svcSolicitacao := NewRepoSolicitacao(pool)
+	svcOS := NewRepoOrdemServico(pool)
+
+	var tenantID, lojaID, setorID, empresaTercID int64
+	if err := pool.QueryRow(ctx, `INSERT INTO empresa (subdominio, nome) VALUES ('os-custo', 'Empresa OS Custo') RETURNING id`).Scan(&tenantID); err != nil {
+		t.Fatalf("erro ao criar empresa: %v", err)
+	}
+
+	tecnicoPrev := tecnicoParaPreventiva(t, ctx, pool, tenantID)
+	if err := pool.QueryRow(ctx, `INSERT INTO loja (tenant_id, nome) VALUES ($1, 'Loja') RETURNING id`, tenantID).Scan(&lojaID); err != nil {
+		t.Fatalf("erro ao criar loja: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `INSERT INTO setor (tenant_id, loja_id, nome) VALUES ($1, $2, 'Setor') RETURNING id`, tenantID, lojaID).Scan(&setorID); err != nil {
+		t.Fatalf("erro ao criar setor: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `INSERT INTO empresa_terceirizada (tenant_id, nome) VALUES ($1, 'Refrigeração ABC') RETURNING id`, tenantID).Scan(&empresaTercID); err != nil {
+		t.Fatalf("erro ao criar empresa terceirizada: %v", err)
+	}
+
+	area, senha := "Elétrica", "senha-forte-123"
+	cadastrar := func(nome, email, perfil string, p model.NovoUsuarioPayload) model.Usuario {
+		t.Helper()
+		p.Nome, p.Email, p.Perfil, p.Senha = nome, email, perfil, senha
+		u, err := svcUsuario.CadastrarUsuario(ctx, p, tenantID)
+		if err != nil {
+			t.Fatalf("erro ao cadastrar %s: %v", perfil, err)
+		}
+		return u
+	}
+	admin := cadastrar("Ana", "ana@os-custo.com", "administrador", model.NovoUsuarioPayload{})
+	adminCorretor := cadastrar("Carla", "carla@os-custo.com", "administrador", model.NovoUsuarioPayload{})
+	tecnicoDono := cadastrar("Eder", "eder@os-custo.com", "tecnico", model.NovoUsuarioPayload{
+		LojasIds: []int64{lojaID}, Area: &area,
+	})
+	solicitante := cadastrar("Bruno", "bruno@os-custo.com", "solicitante", model.NovoUsuarioPayload{
+		LojasIds: []int64{lojaID}, SetoresIds: []int64{setorID},
+	})
+
+	abrirOSMaquinario := func(patrimonio, descricao string) model.OrdemServico {
+		t.Helper()
+		m, err := svcMaquina.CadastrarMaquina(ctx, tenantID, model.MaquinarioInsert{
+			SetorID: setorID, Criticidade: "Alta", NumeroPatrimonio: patrimonio, Nome: patrimonio,
+			Preventivas: []model.PreventivaPayload{{
+				TecnicoId: tecnicoPrev,
+				Descricao: "Revisão", IntervaloDias: 30,
+				ProximaData: config.NewDataBrPtr(time.Now().AddDate(0, 0, 7)), Ativa: true,
+			}},
+		})
+		if err != nil {
+			t.Fatalf("erro ao criar máquina: %v", err)
+		}
+		sol, err := svcSolicitacao.CadastrarSolicitacaoMaquinario(ctx, tenantID, solicitante.Id, model.NovaSolicitacaoMaquinarioPayload{
+			MaquinaId: m.Id, Descricao: descricao, Impactos: []string{"Afeta Produção"},
+			FotoChave: "tenant/1/foto.jpg", FotoMime: "image/jpeg", FotoTamanho: 1,
+		})
+		if err != nil {
+			t.Fatalf("erro ao criar solicitação: %v", err)
+		}
+		os, err := svcSolicitacao.AbrirOS(ctx, tenantID, admin.Id, "administrador", sol.Id, model.AberturaOrdemServicoPayload{
+			Urgencia: "Alta", TecnicoId: tecnicoDono.Id,
+		})
+		if err != nil {
+			t.Fatalf("erro ao abrir OS: %v", err)
+		}
+		return os
+	}
+
+	// Encerra a OS aberta por abrirOSMaquinario com o payload que o próprio
+	// Técnico mandaria -- CorrigirCusto só existe depois disso, ver a nota em
+	// service.CorrigirCusto.
+	encerrar := func(os model.OrdemServico, payload model.EncerramentoOrdemServicoPayload) model.OrdemServico {
+		t.Helper()
+		if _, err := svcOS.Iniciar(ctx, tenantID, tecnicoDono.Id, os.Id); err != nil {
+			t.Fatalf("erro ao iniciar: %v", err)
+		}
+		encerrada, err := svcOS.Encerrar(ctx, tenantID, tecnicoDono.Id, os.Id, payload)
+		if err != nil {
+			t.Fatalf("erro ao encerrar: %v", err)
+		}
+		return encerrada
+	}
+
+	custoHoraOriginal := 45.0
+	osConcluidaMaquinario := func(patrimonio, descricao string) model.OrdemServico {
+		t.Helper()
+		return encerrar(abrirOSMaquinario(patrimonio, descricao), model.EncerramentoOrdemServicoPayload{
+			TipoDefeito: "Corretiva", DefeitoConstatado: "Resistência queimada",
+			CausaRaiz: "Desgaste natural", Solucao: "Troca da resistência",
+			CustoHoraTecnico: &custoHoraOriginal, CustoManutencao: 120.5,
+		})
+	}
+
+	osConcluidaReparo := func(patrimonio string) model.OrdemServico {
+		t.Helper()
+		sol, err := svcSolicitacao.CadastrarSolicitacaoReparo(ctx, tenantID, solicitante.Id, model.NovaSolicitacaoReparoPayload{
+			Item: "Lâmpada queimada", Descricao: patrimonio,
+			FotoChave: "tenant/1/reparo.jpg", FotoMime: "image/jpeg", FotoTamanho: 1,
+		})
+		if err != nil {
+			t.Fatalf("erro ao criar reparo: %v", err)
+		}
+		os, err := svcSolicitacao.AbrirOS(ctx, tenantID, admin.Id, "administrador", sol.Id, model.AberturaOrdemServicoPayload{
+			Urgencia: "Baixa", TecnicoId: tecnicoDono.Id,
+		})
+		if err != nil {
+			t.Fatalf("erro ao abrir OS do reparo: %v", err)
+		}
+		return encerrar(os, model.EncerramentoOrdemServicoPayload{
+			TipoDefeito: "Corretiva", DefeitoConstatado: "Lâmpada queimada",
+			CausaRaiz: "Fim de vida útil", Solucao: "Substituição",
+			CustoManutencao: 30,
+		})
+	}
+
+	osConcluidaTerceiros := func(patrimonio, descricao string) model.OrdemServico {
+		t.Helper()
+		os := abrirOSMaquinario(patrimonio, descricao)
+		acionada, err := svcOS.AcionarTerceiro(ctx, tenantID, tecnicoDono.Id, os.Id, empresaTercID)
+		if err != nil {
+			t.Fatalf("erro ao acionar terceiro: %v", err)
+		}
+		return encerrar(acionada, model.EncerramentoOrdemServicoPayload{
+			TipoDefeito: "Corretiva", DefeitoConstatado: "Compressor travado",
+			CausaRaiz: "Falta de manutenção", Solucao: "Serviço da empresa externa",
+			CustoManutencao: 800,
+		})
+	}
+
+	t.Run("corrige com sucesso e o lançamento passa a ser do Administrador", func(t *testing.T) {
+		os := osConcluidaMaquinario("PAT-CUSTO-1", "Corrige com sucesso")
+		if os.Custo == nil || os.Custo.RevisadoEm != nil {
+			t.Fatalf("custo recém-lançado pelo Técnico devia ter revisadoEm nil, veio %+v", os.Custo)
+		}
+		novoCustoHora := 60.0
+		corrigida, err := svcOS.CorrigirCusto(ctx, tenantID, adminCorretor.Id, os.Id, model.LancamentoCustoManutencaoPayload{
+			CustoHoraTecnico: &novoCustoHora, CustoManutencao: 200,
+		})
+		if err != nil {
+			t.Fatalf("erro ao corrigir custo: %v", err)
+		}
+		if corrigida.Custo == nil {
+			t.Fatal("custo veio nulo")
+		}
+		if corrigida.Custo.RevisadoEm == nil {
+			t.Error("revisadoEm devia estar preenchida após a conferência do Administrador")
+		}
+		if corrigida.Custo.CustoHoraTecnico == nil || *corrigida.Custo.CustoHoraTecnico != 60 {
+			t.Errorf("custoHoraTecnico = %v, esperado 60", corrigida.Custo.CustoHoraTecnico)
+		}
+		if corrigida.Custo.CustoManutencao != 200 {
+			t.Errorf("custoManutencao = %v, esperado 200", corrigida.Custo.CustoManutencao)
+		}
+		if corrigida.Custo.CustoTotal != 260 {
+			t.Errorf("custoTotal = %v, esperado 260", corrigida.Custo.CustoTotal)
+		}
+		if corrigida.Custo.LancadoPorNome != "Carla" {
+			t.Errorf("lancadoPorNome = %q, esperado Carla (quem corrigiu, não Eder que encerrou)", corrigida.Custo.LancadoPorNome)
+		}
+	})
+
+	t.Run("OS ainda não encerrada não pode ter custo corrigido", func(t *testing.T) {
+		os := abrirOSMaquinario("PAT-CUSTO-2", "Ainda aberta")
+		_, err := svcOS.CorrigirCusto(ctx, tenantID, adminCorretor.Id, os.Id, model.LancamentoCustoManutencaoPayload{
+			CustoHoraTecnico: &custoHoraOriginal, CustoManutencao: 100,
+		})
+		if !errors.Is(err, helper.ErrConflitoIntegridade) {
+			t.Fatalf("erro = %v, esperado ErrConflitoIntegridade", err)
+		}
+	})
+
+	t.Run("maquinário sem custoHoraTecnico é erro de validação", func(t *testing.T) {
+		os := osConcluidaMaquinario("PAT-CUSTO-3", "Sem custo hora")
+		_, err := svcOS.CorrigirCusto(ctx, tenantID, adminCorretor.Id, os.Id, model.LancamentoCustoManutencaoPayload{
+			CustoManutencao: 100,
+		})
+		if !errors.Is(err, helper.ErrValidacao) {
+			t.Fatalf("erro = %v, esperado ErrValidacao", err)
+		}
+	})
+
+	t.Run("reparo com custoHoraTecnico é erro de validação", func(t *testing.T) {
+		os := osConcluidaReparo("PAT-CUSTO-4")
+		_, err := svcOS.CorrigirCusto(ctx, tenantID, adminCorretor.Id, os.Id, model.LancamentoCustoManutencaoPayload{
+			CustoHoraTecnico: &custoHoraOriginal, CustoManutencao: 50,
+		})
+		if !errors.Is(err, helper.ErrValidacao) {
+			t.Fatalf("erro = %v, esperado ErrValidacao", err)
+		}
+	})
+
+	t.Run("nota fiscal fora de terceiros é erro de validação", func(t *testing.T) {
+		os := osConcluidaReparo("PAT-CUSTO-5")
+		numero := "NF-001"
+		_, err := svcOS.CorrigirCusto(ctx, tenantID, adminCorretor.Id, os.Id, model.LancamentoCustoManutencaoPayload{
+			CustoManutencao: 50, NumeroNotaFiscal: &numero,
+		})
+		if !errors.Is(err, helper.ErrValidacao) {
+			t.Fatalf("erro = %v, esperado ErrValidacao", err)
+		}
+	})
+
+	t.Run("corrige nota fiscal com sucesso numa OS de terceiros", func(t *testing.T) {
+		os := osConcluidaTerceiros("PAT-CUSTO-6", "Serviço de terceiro")
+		numero, serie, descricao := "NF-42", "1", "Troca do compressor"
+		corrigida, err := svcOS.CorrigirCusto(ctx, tenantID, adminCorretor.Id, os.Id, model.LancamentoCustoManutencaoPayload{
+			CustoManutencao: 950, NumeroNotaFiscal: &numero, SerieNotaFiscal: &serie,
+			DescricaoServicoTerceiro: &descricao,
+		})
+		if err != nil {
+			t.Fatalf("erro ao corrigir custo: %v", err)
+		}
+		if corrigida.Custo.CustoManutencao != 950 {
+			t.Errorf("custoManutencao = %v, esperado 950", corrigida.Custo.CustoManutencao)
+		}
+		if corrigida.Custo.NumeroNotaFiscal == nil || *corrigida.Custo.NumeroNotaFiscal != "NF-42" {
+			t.Errorf("numeroNotaFiscal = %v, esperado NF-42", corrigida.Custo.NumeroNotaFiscal)
+		}
+		if corrigida.Custo.DescricaoServicoTerceiro == nil || *corrigida.Custo.DescricaoServicoTerceiro != "Troca do compressor" {
+			t.Errorf("descricaoServicoTerceiro = %v, esperado %q", corrigida.Custo.DescricaoServicoTerceiro, "Troca do compressor")
+		}
+	})
+
+	t.Run("id inexistente é não encontrado", func(t *testing.T) {
+		_, err := svcOS.CorrigirCusto(ctx, tenantID, adminCorretor.Id, 999999999, model.LancamentoCustoManutencaoPayload{
+			CustoHoraTecnico: &custoHoraOriginal, CustoManutencao: 100,
+		})
 		if !errors.Is(err, helper.ErrNaoEncontrado) {
 			t.Fatalf("erro = %v, esperado ErrNaoEncontrado", err)
 		}

@@ -190,6 +190,41 @@ INSERT INTO os_custo (
 )
 RETURNING *;
 
+-- name: AtualizarCusto :one
+-- POST /ordens-servico/:id/custo -- a correção prometida no comentário de
+-- CriarCusto acima. lancado_por_id passa a ser o Administrador que corrige,
+-- não mais o Técnico do encerramento; lancado_em anda junto (é "a última vez
+-- que este custo foi mexido", não "quando nasceu").
+--
+-- SET direto, sem COALESCE (diferente de AtualizarMaquina/foto_chave): o
+-- modal do Administrador chega pré-preenchido com o valor atual (é edição,
+-- não patch parcial), então campo omitido é o Administrador apagando de
+-- propósito -- ex: nota fiscal que ele decidiu não registrar. sqlc.narg vira
+-- NULL nesse caso, que é exatamente o que ck_custo_por_tipo exige fora de
+-- 'maquinario'/'terceiros'. O service confere o tipo ANTES de chamar esta
+-- query (mesma checagem de Encerrar), pra um erro de tipo virar mensagem
+-- clara em vez de estourar a constraint aqui.
+--
+-- Sem WHERE por tipo: os_custo.tipo é fixo desde o INSERT (CriarCusto) e não
+-- muda depois de Concluída, então não há o que recomparar contra a OS.
+--
+-- custo_revisado_em = now() na mesma tacada: toda passagem do Administrador
+-- por esta query É a conferência contra a nota, então é aqui que a marca
+-- nasce. É o que move a OS de "Pendentes" para "Revisadas" em Custos
+-- Pendentes -- agora para todos os Administradores, não só no navegador de
+-- quem salvou (era localStorage). Re-salvar só reafirma a data, não desfaz.
+UPDATE os_custo
+SET custo_hora_tecnico = sqlc.narg(custo_hora_tecnico),
+    custo_manutencao = sqlc.arg(custo_manutencao),
+    numero_nota_fiscal = sqlc.narg(numero_nota_fiscal),
+    serie_nota_fiscal = sqlc.narg(serie_nota_fiscal),
+    descricao_servico_terceiro = sqlc.narg(descricao_servico_terceiro),
+    lancado_por_id = sqlc.arg(lancado_por_id),
+    lancado_em = now(),
+    custo_revisado_em = now()
+WHERE tenant_id = sqlc.arg(tenant_id) AND ordem_servico_id = sqlc.arg(ordem_servico_id)
+RETURNING *;
+
 -- name: ListarOrdensServico :many
 -- GET /ordens-servico -- um endpoint para os três painéis, o que muda é o
 -- filtro (front-end/src/servicos/servicoOrdensServico.ts):
@@ -285,6 +320,7 @@ SELECT
     c.serie_nota_fiscal,
     c.descricao_servico_terceiro,
     c.lancado_em,
+    c.custo_revisado_em,
     lanc.nome AS lancado_por_nome
 FROM ordem_servico os
 JOIN solicitacao_os s  ON s.tenant_id = os.tenant_id AND s.id = os.solicitacao_id

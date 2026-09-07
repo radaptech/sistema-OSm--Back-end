@@ -212,14 +212,19 @@ func ConfigurarRotas(r *gin.Engine, c *Container) {
 
 	// Ciclo de vida da OS -- só o Técnico DONO (checagem no service, não
 	// aqui: OS de outro técnico é 404, não 403 -- ver a nota em
-	// ObterOrdemServicoPorID). custo (Administrador, correção pós-encerramento)
-	// fica de fora por enquanto -- ainda não existe.
+	// ObterOrdemServicoPorID).
 	acoesOS := api.Group("/ordens-servico/:id", middleware.AutenticacaoJwt(), middleware.Permitir("tecnico"))
 	acoesOS.POST("/iniciar", c.OrdemOS.Iniciar())
 	acoesOS.POST("/pausar", c.OrdemOS.Pausar())
 	acoesOS.POST("/retomar", c.OrdemOS.Retomar())
 	acoesOS.POST("/acionar-terceiro", c.OrdemOS.AcionarTerceiro())
 	acoesOS.POST("/encerrar", c.OrdemOS.Encerrar())
+
+	// custo é do Administrador, não do Técnico -- correção pós-encerramento
+	// (AdministradorCustosPendentes), por isso fora do grupo acoesOS acima,
+	// que é Permitir("tecnico"). Sem dono pra checar (diferente do resto do
+	// ciclo de vida): o RBAC da rota já é toda a restrição.
+	api.POST("/ordens-servico/:id/custo", middleware.AutenticacaoJwt(), middleware.Permitir("administrador"), c.OrdemOS.Custo())
 
 	// GET /indicadores/maquinas/:id -- o Painel de Indicadores (DashboardGestor,
 	// a ação rápida "Indicadores" do Painel do Gestor). O `:id` é de MÁQUINA;

@@ -27,6 +27,9 @@ type OrdemServicoServiceInterface interface {
 	Retomar(ctx context.Context, tenantId, atorId, ordemServicoId int64) (model.OrdemServico, error)
 	AcionarTerceiro(ctx context.Context, tenantId, atorId, ordemServicoId, empresaTerceirizadaId int64) (model.OrdemServico, error)
 	Encerrar(ctx context.Context, tenantId, atorId, ordemServicoId int64, payload model.EncerramentoOrdemServicoPayload) (model.OrdemServico, error)
+	// atorId aqui é o ADMINISTRADOR do token, não o técnico -- é ele quem
+	// corrige, não quem executou. Ver a nota em service.CorrigirCusto.
+	CorrigirCusto(ctx context.Context, tenantId, atorId, ordemServicoId int64, payload model.LancamentoCustoManutencaoPayload) (model.OrdemServico, error)
 }
 
 // OrdemServicoController não guarda bucket nenhum, diferente de
@@ -434,6 +437,54 @@ func (o *OrdemServicoController) Encerrar() gin.HandlerFunc {
 			default:
 				log.Printf("encerrar ordem de serviço=%d tenant=%d: %v", id, tenantId, err)
 				ctx.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao encerrar ordem de serviço"})
+			}
+			return
+		}
+
+		ctx.JSON(http.StatusOK, os)
+	}
+}
+
+// Custo é POST /ordens-servico/:id/custo -- o Administrador corrigindo o
+// custo que o Técnico já lançou no encerramento (ver a nota em
+// service.CorrigirCusto), tipicamente conferindo contra a nota fiscal.
+func (o *OrdemServicoController) Custo() gin.HandlerFunc {
+
+	return func(ctx *gin.Context) {
+
+		id, ok := idDaRota(ctx)
+		if !ok {
+			return
+		}
+
+		tenantId, ok := tenantDaRota(ctx)
+		if !ok {
+			return
+		}
+
+		atorId, _, ok := atorDaRota(ctx)
+		if !ok {
+			return
+		}
+
+		input, ok := corpoJSON[model.LancamentoCustoManutencaoPayload](ctx)
+		if !ok {
+			return
+		}
+
+		os, err := o.service.CorrigirCusto(ctx.Request.Context(), tenantId, atorId, id, input)
+		if err != nil {
+
+			switch {
+			case errors.Is(err, helper.ErrValidacao):
+				ctx.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			case errors.Is(err, helper.ErrNaoEncontrado):
+				ctx.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+			case errors.Is(err, helper.ErrConflitoIntegridade):
+				ctx.JSON(http.StatusUnprocessableEntity, gin.H{"error": err.Error()})
+			default:
+				log.Printf("corrigir custo ordem de serviço=%d tenant=%d: %v", id, tenantId, err)
+				ctx.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao corrigir custo da ordem de serviço"})
 			}
 			return
 		}

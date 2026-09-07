@@ -276,6 +276,13 @@ número vai para um relatório.
 > Efeito colateral a assumir: como o custo nasce junto do encerramento, `vw_os_custo_pendente`
 > quase sempre vem vazia. A tela "Custos Pendentes" do Administrador por isso lista **toda OS
 > `Concluída`**, com ou sem custo — ela é a fila de conferência, não a de digitação (seção 4).
+>
+> **Migration `000009`.** `os_custo` ganhou `custo_revisado_em timestamptz` (nullable, sem
+> default): `NULL` até o Administrador conferir, `now()` gravado por `AtualizarCusto`
+> (`POST /ordens-servico/:id/custo`). É o que separa as pílulas "Pendentes" e "Revisadas"
+> dentro de "Custos Pendentes" — antes essa marca vivia no `localStorage` do front e valia
+> só num navegador. `CriarCusto` (encerramento) não toca a coluna: quem lança é o Técnico,
+> conferir é do Administrador.
 
 ### 2.4 `ENUM` no que é regra de código, tabela no que o cliente cadastra
 
