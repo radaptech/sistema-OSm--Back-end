@@ -584,20 +584,26 @@ WHERE os.tenant_id = $1
   AND ($4::text[] IS NULL OR os.status = ANY($4::text[]::status_os[]))
   AND ($5::tipo_os IS NULL OR os.tipo = $5)
   AND ($6::bigint IS NULL OR sc.loja_id = $6)
-  AND ($7::bigint IS NULL OR os.tecnico_id = $7)
+  -- setor_id sai da SOLICITAÇÃO (s.setor_id), não de ordem_servico -- a OS não
+  -- tem setor próprio, e nem deveria (ver a nota do escopo lá embaixo). Mesma
+  -- coluna que o EXISTS de escopo compara, então filtro e escopo falam da
+  -- mesma coisa: o cliente estreita dentro do que o escopo já permitiu, nunca
+  -- amplia -- mandar o setor de outra loja devolve vazio, não a lista dela.
+  AND ($7::bigint IS NULL OR s.setor_id = $7)
+  AND ($8::bigint IS NULL OR os.tecnico_id = $8)
   AND (
-    $8::text IS NULL
-    OR s.descricao ILIKE '%' || $8 || '%'
-    OR m.nome ILIKE '%' || $8 || '%'
-    OR s.item_descricao ILIKE '%' || $8 || '%'
+    $9::text IS NULL
+    OR s.descricao ILIKE '%' || $9 || '%'
+    OR m.nome ILIKE '%' || $9 || '%'
+    OR s.item_descricao ILIKE '%' || $9 || '%'
   )
   AND (
-    $9::bigint IS NULL
+    $10::bigint IS NULL
     OR EXISTS (
       SELECT 1
       FROM usuario_escopo ue
       LEFT JOIN usuario_escopo_setor ues ON ues.escopo_id = ue.id
-      WHERE ue.usuario_id = $9
+      WHERE ue.usuario_id = $10
         AND ue.loja_id = sc.loja_id
         AND (ue.acesso_total_setores OR ues.setor_id = s.setor_id)
     )
@@ -612,6 +618,7 @@ type ListarOrdensServicoParams struct {
 	Status          []string
 	Tipo            *TipoOs
 	LojaID          *int64
+	SetorID         *int64
 	TecnicoID       *int64
 	Busca           *string
 	EscopoUsuarioID *int64
@@ -673,6 +680,8 @@ type ListarOrdensServicoRow struct {
 //	Técnico (PainelTecnico)                -> ?tecnicoId=
 //	Admin   (CustosPendentes/OSFinalizadas)-> ?status=Concluída / ?finalizada=true
 //
+// Por cima disso as três telas estreitam com ?busca=, ?tipo=, ?lojaId= e
+// ?setorId= -- filtros do cliente, sempre opcionais e sempre cumulativos.
 // Array simples, sem paginação: o front tipa `OrdemServico[]` e pagina no
 // cliente, mesmo padrão de ListarSolicitacoes/ListarMaquinas. `pagina` existe
 // em ParametrosListagemOrdensServico mas nunca chega a uma query -- ignorar é
@@ -739,6 +748,7 @@ func (q *Queries) ListarOrdensServico(ctx context.Context, arg ListarOrdensServi
 		arg.Status,
 		arg.Tipo,
 		arg.LojaID,
+		arg.SetorID,
 		arg.TecnicoID,
 		arg.Busca,
 		arg.EscopoUsuarioID,

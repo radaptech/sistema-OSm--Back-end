@@ -243,6 +243,8 @@ RETURNING *;
 --   Gestor  (PainelGestor)                 -> sem filtro, recorta pelo escopo
 --   Técnico (PainelTecnico)                -> ?tecnicoId=
 --   Admin   (CustosPendentes/OSFinalizadas)-> ?status=Concluída / ?finalizada=true
+-- Por cima disso as três telas estreitam com ?busca=, ?tipo=, ?lojaId= e
+-- ?setorId= -- filtros do cliente, sempre opcionais e sempre cumulativos.
 -- Array simples, sem paginação: o front tipa `OrdemServico[]` e pagina no
 -- cliente, mesmo padrão de ListarSolicitacoes/ListarMaquinas. `pagina` existe
 -- em ParametrosListagemOrdensServico mas nunca chega a uma query -- ignorar é
@@ -365,6 +367,12 @@ WHERE os.tenant_id = sqlc.arg(tenant_id)
   AND (sqlc.narg(status)::text[] IS NULL OR os.status = ANY(sqlc.narg(status)::text[]::status_os[]))
   AND (sqlc.narg(tipo)::tipo_os IS NULL OR os.tipo = sqlc.narg(tipo))
   AND (sqlc.narg(loja_id)::bigint IS NULL OR sc.loja_id = sqlc.narg(loja_id))
+  -- setor_id sai da SOLICITAÇÃO (s.setor_id), não de ordem_servico -- a OS não
+  -- tem setor próprio, e nem deveria (ver a nota do escopo lá embaixo). Mesma
+  -- coluna que o EXISTS de escopo compara, então filtro e escopo falam da
+  -- mesma coisa: o cliente estreita dentro do que o escopo já permitiu, nunca
+  -- amplia -- mandar o setor de outra loja devolve vazio, não a lista dela.
+  AND (sqlc.narg(setor_id)::bigint IS NULL OR s.setor_id = sqlc.narg(setor_id))
   AND (sqlc.narg(tecnico_id)::bigint IS NULL OR os.tecnico_id = sqlc.narg(tecnico_id))
   AND (
     sqlc.narg(busca)::text IS NULL

@@ -551,6 +551,8 @@ type Querier interface {
 	//   Gestor  (PainelGestor)                 -> sem filtro, recorta pelo escopo
 	//   Técnico (PainelTecnico)                -> ?tecnicoId=
 	//   Admin   (CustosPendentes/OSFinalizadas)-> ?status=Concluída / ?finalizada=true
+	// Por cima disso as três telas estreitam com ?busca=, ?tipo=, ?lojaId= e
+	// ?setorId= -- filtros do cliente, sempre opcionais e sempre cumulativos.
 	// Array simples, sem paginação: o front tipa `OrdemServico[]` e pagina no
 	// cliente, mesmo padrão de ListarSolicitacoes/ListarMaquinas. `pagina` existe
 	// em ParametrosListagemOrdensServico mas nunca chega a uma query -- ignorar é

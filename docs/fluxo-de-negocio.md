@@ -116,6 +116,12 @@ Administrador `?status=Concluída` (Custos Pendentes) e `?finalizada=true` (OS
 Finalizadas). Array simples, sem paginação — `?pagina=` é aceito e **ignorado**, o front
 pagina no cliente (mesmo padrão de `/solicitacoes`, `/maquinas`, `/preventivas`).
 
+Por cima disso as telas estreitam com `?busca=`, `?tipo=`, `?lojaId=` e `?setorId=`,
+todos opcionais e cumulativos. **`?setorId=` recorta pelo setor da SOLICITAÇÃO de
+origem** (`s.setor_id`) — `ordem_servico` não tem setor próprio. É a mesma coluna que o
+`EXISTS` de escopo compara, então filtro e escopo falam da mesma coisa e o cliente nunca
+amplia: gestor pedindo setor fora do escopo dele recebe lista vazia, não a do vizinho.
+
 **Não existe `POST /ordens-servico`, e não é esquecimento**: a OS nasce de
 `POST /solicitacoes/:id/abrir-os` (a aprovação do Gestor). `uq_os_solicitacao` garante
 que toda OS vem de uma solicitação, e criar direto pularia a aprovação — que é o ponto do
