@@ -1515,6 +1515,64 @@ func TestEncerrar(t *testing.T) {
 			t.Fatalf("erro = %v, esperado ErrNaoEncontrado", err)
 		}
 	})
+
+	// A declaração de nota fiscal é do Técnico, no encerramento (migration
+	// 000011): é ela que decide se a tela do Administrador vai pedir número e
+	// série depois. O padrão é "não teve" -- serviço só de mão de obra.
+	t.Run("declaração de nota fiscal viaja do encerramento", func(t *testing.T) {
+		semNota := osEmAndamento("PAT-ENC-NF1", "Só mão de obra")
+		encerrada, err := svcOS.Encerrar(ctx, tenantID, tecnicoDono.Id, semNota.Id, payloadPadrao())
+		if err != nil {
+			t.Fatalf("erro ao encerrar: %v", err)
+		}
+		if encerrada.Custo == nil || encerrada.Custo.TemNotaFiscal {
+			t.Errorf("payload sem declaração devia gravar temNotaFiscal false, veio %+v", encerrada.Custo)
+		}
+
+		comNota := osEmAndamento("PAT-ENC-NF2", "Trocou peça comprada")
+		payloadComNota := payloadPadrao()
+		payloadComNota.TemNotaFiscal = true
+		encerradaComNota, err := svcOS.Encerrar(ctx, tenantID, tecnicoDono.Id, comNota.Id, payloadComNota)
+		if err != nil {
+			t.Fatalf("erro ao encerrar: %v", err)
+		}
+		if encerradaComNota.Custo == nil || !encerradaComNota.Custo.TemNotaFiscal {
+			t.Errorf("temNotaFiscal devia ser true, veio %+v", encerradaComNota.Custo)
+		}
+		// O Técnico declara, mas quem preenche é o Administrador depois.
+		if encerradaComNota.Custo.NumeroNotaFiscal != nil {
+			t.Errorf("número da nota não é do encerramento, veio %v", encerradaComNota.Custo.NumeroNotaFiscal)
+		}
+	})
+
+	// 0 é valor de negócio legítimo já no encerramento: serviço sem peça,
+	// conserto em garantia. `gte=0`, nunca `required` -- ver o payload.
+	t.Run("encerra com custo zero", func(t *testing.T) {
+		os := osEmAndamento("PAT-ENC-ZERO", "Sem custo nenhum")
+		zero := 0.0
+		payload := payloadPadrao()
+		payload.CustoHoraTecnico = &zero
+		payload.CustoManutencao = 0
+		encerrada, err := svcOS.Encerrar(ctx, tenantID, tecnicoDono.Id, os.Id, payload)
+		if err != nil {
+			t.Fatalf("custo zero devia ser aceito no encerramento: %v", err)
+		}
+		if encerrada.Custo == nil {
+			t.Fatal("custo veio nulo")
+		}
+		if encerrada.Custo.CustoHoraTecnico == nil || *encerrada.Custo.CustoHoraTecnico != 0 {
+			t.Errorf("custoHoraTecnico = %v, esperado 0", encerrada.Custo.CustoHoraTecnico)
+		}
+		if encerrada.Custo.CustoManutencao != 0 || encerrada.Custo.CustoTotal != 0 {
+			t.Errorf("custoManutencao/custoTotal = %v/%v, esperado 0/0",
+				encerrada.Custo.CustoManutencao, encerrada.Custo.CustoTotal)
+		}
+		// A OS com custo zero continua finalizada: o custo FOI lançado, só vale
+		// zero -- é `os_custo` existir que conta, não o valor ser positivo.
+		if !encerrada.Finalizada {
+			t.Error("finalizada = false; custo zero é custo lançado")
+		}
+	})
 }
 
 // TestCorrigirCusto cobre POST /ordens-servico/:id/custo: o Administrador
@@ -1726,7 +1784,8 @@ func TestCorrigirCusto(t *testing.T) {
 		os := osConcluidaReparo("PAT-CUSTO-5")
 		numero, serie := "NF-001", "3"
 		corrigida, err := svcOS.CorrigirCusto(ctx, tenantID, adminCorretor.Id, os.Id, model.LancamentoCustoManutencaoPayload{
-			CustoManutencao: 50, NumeroNotaFiscal: &numero, SerieNotaFiscal: &serie,
+			CustoManutencao: 50, TemNotaFiscal: true,
+			NumeroNotaFiscal: &numero, SerieNotaFiscal: &serie,
 		})
 		if err != nil {
 			t.Fatalf("nota fiscal em OS de reparo devia ser aceita: %v", err)
@@ -1771,7 +1830,8 @@ func TestCorrigirCusto(t *testing.T) {
 		os := osConcluidaTerceiros("PAT-CUSTO-6", "Serviço de terceiro")
 		numero, serie, descricao := "NF-42", "1", "Troca do compressor"
 		corrigida, err := svcOS.CorrigirCusto(ctx, tenantID, adminCorretor.Id, os.Id, model.LancamentoCustoManutencaoPayload{
-			CustoManutencao: 950, NumeroNotaFiscal: &numero, SerieNotaFiscal: &serie,
+			CustoManutencao: 950, TemNotaFiscal: true,
+			NumeroNotaFiscal: &numero, SerieNotaFiscal: &serie,
 			DescricaoServicoTerceiro: &descricao,
 		})
 		if err != nil {
@@ -1794,6 +1854,87 @@ func TestCorrigirCusto(t *testing.T) {
 		})
 		if !errors.Is(err, helper.ErrNaoEncontrado) {
 			t.Fatalf("erro = %v, esperado ErrNaoEncontrado", err)
+		}
+	})
+
+	// A declaração do Técnico é o que decide se a tela do Administrador pede
+	// número e série -- ck_custo_nota_fiscal, migration 000011.
+	t.Run("número de nota sem declarar a nota é erro de validação", func(t *testing.T) {
+		os := osConcluidaReparo("PAT-CUSTO-7")
+		numero := "NF-999"
+		_, err := svcOS.CorrigirCusto(ctx, tenantID, adminCorretor.Id, os.Id, model.LancamentoCustoManutencaoPayload{
+			CustoManutencao: 50, TemNotaFiscal: false, NumeroNotaFiscal: &numero,
+		})
+		if !errors.Is(err, helper.ErrValidacao) {
+			t.Fatalf("erro = %v, esperado ErrValidacao", err)
+		}
+	})
+
+	// Técnico esquecer de marcar não pode deixar a OS sem onde lançar a nota:
+	// o Administrador sobrescreve a declaração no mesmo POST.
+	t.Run("Administrador marca a nota que o Técnico não declarou", func(t *testing.T) {
+		os := osConcluidaReparo("PAT-CUSTO-8")
+		if os.Custo.TemNotaFiscal {
+			t.Fatal("encerramento sem declaração devia nascer com temNotaFiscal false")
+		}
+		numero := "NF-777"
+		corrigida, err := svcOS.CorrigirCusto(ctx, tenantID, adminCorretor.Id, os.Id, model.LancamentoCustoManutencaoPayload{
+			CustoManutencao: 50, TemNotaFiscal: true, NumeroNotaFiscal: &numero,
+		})
+		if err != nil {
+			t.Fatalf("Administrador devia poder marcar a nota: %v", err)
+		}
+		if !corrigida.Custo.TemNotaFiscal {
+			t.Error("temNotaFiscal devia ter virado true")
+		}
+	})
+
+	// Desmarcar limpa o que já estava gravado -- senão ck_custo_nota_fiscal
+	// barraria o UPDATE e o Administrador levaria um 500 genérico.
+	t.Run("Administrador desmarcando a nota limpa número e série", func(t *testing.T) {
+		os := osConcluidaReparo("PAT-CUSTO-9")
+		numero, serie := "NF-555", "2"
+		if _, err := svcOS.CorrigirCusto(ctx, tenantID, adminCorretor.Id, os.Id, model.LancamentoCustoManutencaoPayload{
+			CustoManutencao: 50, TemNotaFiscal: true,
+			NumeroNotaFiscal: &numero, SerieNotaFiscal: &serie,
+		}); err != nil {
+			t.Fatalf("erro ao lançar a nota: %v", err)
+		}
+
+		limpa, err := svcOS.CorrigirCusto(ctx, tenantID, adminCorretor.Id, os.Id, model.LancamentoCustoManutencaoPayload{
+			CustoManutencao: 50, TemNotaFiscal: false,
+		})
+		if err != nil {
+			t.Fatalf("erro ao desmarcar a nota: %v", err)
+		}
+		if limpa.Custo.TemNotaFiscal {
+			t.Error("temNotaFiscal devia ter virado false")
+		}
+		if limpa.Custo.NumeroNotaFiscal != nil || limpa.Custo.SerieNotaFiscal != nil {
+			t.Errorf("número/série deviam ter sido limpos, veio %v / %v",
+				limpa.Custo.NumeroNotaFiscal, limpa.Custo.SerieNotaFiscal)
+		}
+	})
+
+	// 0 é valor de negócio legítimo (serviço sem peça, conserto em garantia) --
+	// ck_custo_nao_negativo permite e o binding é `gte=0`, não `required`. Sem
+	// este teste nada impede alguém de trocar por `required` e transformar uma
+	// OS sem custo em "campo obrigatório não preenchido".
+	t.Run("custo zero é aceito e volta como zero", func(t *testing.T) {
+		os := osConcluidaMaquinario("PAT-CUSTO-10", "Conserto em garantia")
+		zero := 0.0
+		corrigida, err := svcOS.CorrigirCusto(ctx, tenantID, adminCorretor.Id, os.Id, model.LancamentoCustoManutencaoPayload{
+			CustoHoraTecnico: &zero, CustoManutencao: 0,
+		})
+		if err != nil {
+			t.Fatalf("custo zero devia ser aceito: %v", err)
+		}
+		if corrigida.Custo.CustoHoraTecnico == nil || *corrigida.Custo.CustoHoraTecnico != 0 {
+			t.Errorf("custoHoraTecnico = %v, esperado 0", corrigida.Custo.CustoHoraTecnico)
+		}
+		if corrigida.Custo.CustoManutencao != 0 || corrigida.Custo.CustoTotal != 0 {
+			t.Errorf("custoManutencao/custoTotal = %v/%v, esperado 0/0",
+				corrigida.Custo.CustoManutencao, corrigida.Custo.CustoTotal)
 		}
 	})
 }

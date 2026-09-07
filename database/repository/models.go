@@ -558,6 +558,7 @@ type OsCusto struct {
 	LancadoPorID             int64
 	LancadoEm                pgtype.Timestamptz
 	CustoRevisadoEm          pgtype.Timestamptz
+	TemNotaFiscal            bool
 }
 
 type OsEncerramento struct {

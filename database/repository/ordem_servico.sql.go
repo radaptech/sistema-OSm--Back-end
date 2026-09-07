@@ -75,11 +75,12 @@ SET custo_hora_tecnico = $1,
     numero_nota_fiscal = $3,
     serie_nota_fiscal = $4,
     descricao_servico_terceiro = $5,
-    lancado_por_id = $6,
+    tem_nota_fiscal = $6,
+    lancado_por_id = $7,
     lancado_em = now(),
     custo_revisado_em = now()
-WHERE tenant_id = $7 AND ordem_servico_id = $8
-RETURNING id, tenant_id, ordem_servico_id, tipo, custo_hora_tecnico, custo_manutencao, numero_nota_fiscal, serie_nota_fiscal, descricao_servico_terceiro, lancado_por_id, lancado_em, custo_revisado_em
+WHERE tenant_id = $8 AND ordem_servico_id = $9
+RETURNING id, tenant_id, ordem_servico_id, tipo, custo_hora_tecnico, custo_manutencao, numero_nota_fiscal, serie_nota_fiscal, descricao_servico_terceiro, lancado_por_id, lancado_em, custo_revisado_em, tem_nota_fiscal
 `
 
 type AtualizarCustoParams struct {
@@ -88,6 +89,7 @@ type AtualizarCustoParams struct {
 	NumeroNotaFiscal         *string
 	SerieNotaFiscal          *string
 	DescricaoServicoTerceiro *string
+	TemNotaFiscal            bool
 	LancadoPorID             int64
 	TenantID                 int64
 	OrdemServicoID           int64
@@ -110,6 +112,12 @@ type AtualizarCustoParams struct {
 // Sem WHERE por tipo: os_custo.tipo é fixo desde o INSERT (CriarCusto) e não
 // muda depois de Concluída, então não há o que recomparar contra a OS.
 //
+// tem_nota_fiscal é sobrescrito aqui de propósito, apesar de nascer como
+// declaração do Técnico: se ele esquecer de marcar, o Administrador ficaria
+// sem onde lançar a nota que tem na mão -- e a tela dele traz o mesmo
+// controle. Desmarcar limpa número e série no mesmo UPDATE (o service manda
+// nil nos dois), senão ck_custo_nota_fiscal barra a escrita.
+//
 // custo_revisado_em = now() na mesma tacada: toda passagem do Administrador
 // por esta query É a conferência contra a nota, então é aqui que a marca
 // nasce. É o que move a OS de "Pendentes" para "Revisadas" em Custos
@@ -122,6 +130,7 @@ func (q *Queries) AtualizarCusto(ctx context.Context, arg AtualizarCustoParams) 
 		arg.NumeroNotaFiscal,
 		arg.SerieNotaFiscal,
 		arg.DescricaoServicoTerceiro,
+		arg.TemNotaFiscal,
 		arg.LancadoPorID,
 		arg.TenantID,
 		arg.OrdemServicoID,
@@ -140,6 +149,7 @@ func (q *Queries) AtualizarCusto(ctx context.Context, arg AtualizarCustoParams) 
 		&i.LancadoPorID,
 		&i.LancadoEm,
 		&i.CustoRevisadoEm,
+		&i.TemNotaFiscal,
 	)
 	return i, err
 }
@@ -147,12 +157,13 @@ func (q *Queries) AtualizarCusto(ctx context.Context, arg AtualizarCustoParams) 
 const criarCusto = `-- name: CriarCusto :one
 INSERT INTO os_custo (
     tenant_id, ordem_servico_id, tipo,
-    custo_hora_tecnico, custo_manutencao, lancado_por_id
+    custo_hora_tecnico, custo_manutencao, lancado_por_id, tem_nota_fiscal
 ) VALUES (
     $1, $2, $3,
-    $4, $5, $6
+    $4, $5, $6,
+    $7
 )
-RETURNING id, tenant_id, ordem_servico_id, tipo, custo_hora_tecnico, custo_manutencao, numero_nota_fiscal, serie_nota_fiscal, descricao_servico_terceiro, lancado_por_id, lancado_em, custo_revisado_em
+RETURNING id, tenant_id, ordem_servico_id, tipo, custo_hora_tecnico, custo_manutencao, numero_nota_fiscal, serie_nota_fiscal, descricao_servico_terceiro, lancado_por_id, lancado_em, custo_revisado_em, tem_nota_fiscal
 `
 
 type CriarCustoParams struct {
@@ -162,16 +173,21 @@ type CriarCustoParams struct {
 	CustoHoraTecnico pgtype.Float8
 	CustoManutencao  pgtype.Float8
 	LancadoPorID     int64
+	TemNotaFiscal    bool
 }
 
 // Nasce na mesma transação do encerramento (docs/modelagem, 2.3 revisão 4:
 // "os dois momentos deixaram de ser sequenciais"), lancado_por_id = o
 // próprio Técnico -- o Administrador só CORRIGE depois, em
-// POST /ordens-servico/:id/custo (fase 2, fora daqui), inclusive as três
-// colunas de nota fiscal, que por isso nem entram neste INSERT (ficam
-// NULL, satisfeito por ck_custo_por_tipo quando tipo <> 'terceiros' --
-// e quando É 'terceiros', são opcionais mesmo até o Administrador
-// conferir contra a nota).
+// POST /ordens-servico/:id/custo (fora daqui), inclusive o NÚMERO e a SÉRIE
+// da nota, que por isso não entram neste INSERT e ficam NULL.
+//
+// tem_nota_fiscal, esse sim, entra: é declaração do TÉCNICO, não do
+// Administrador. Só quem executou sabe se houve compra (peça, material,
+// fatura da empresa) ou se foi só mão de obra -- e é essa resposta que
+// decide se os campos de NF aparecem na tela do Administrador depois. Com
+// `false` aqui, ck_custo_nota_fiscal exige os dois campos NULL, que é
+// exatamente o que este INSERT deixa.
 //
 // custo_hora_tecnico é quem o service decide se manda ou NULL
 // (pgtype.Float8{Valid: false}): só existe em 'maquinario'
@@ -189,6 +205,7 @@ func (q *Queries) CriarCusto(ctx context.Context, arg CriarCustoParams) (OsCusto
 		arg.CustoHoraTecnico,
 		arg.CustoManutencao,
 		arg.LancadoPorID,
+		arg.TemNotaFiscal,
 	)
 	var i OsCusto
 	err := row.Scan(
@@ -204,6 +221,7 @@ func (q *Queries) CriarCusto(ctx context.Context, arg CriarCustoParams) (OsCusto
 		&i.LancadoPorID,
 		&i.LancadoEm,
 		&i.CustoRevisadoEm,
+		&i.TemNotaFiscal,
 	)
 	return i, err
 }
@@ -532,6 +550,7 @@ SELECT
     c.numero_nota_fiscal,
     c.serie_nota_fiscal,
     c.descricao_servico_terceiro,
+    c.tem_nota_fiscal,
     c.lancado_em,
     c.custo_revisado_em,
     lanc.nome AS lancado_por_nome
@@ -641,6 +660,7 @@ type ListarOrdensServicoRow struct {
 	NumeroNotaFiscal         *string
 	SerieNotaFiscal          *string
 	DescricaoServicoTerceiro *string
+	TemNotaFiscal            *bool
 	LancadoEm                pgtype.Timestamptz
 	CustoRevisadoEm          pgtype.Timestamptz
 	LancadoPorNome           *string
@@ -773,6 +793,7 @@ func (q *Queries) ListarOrdensServico(ctx context.Context, arg ListarOrdensServi
 			&i.NumeroNotaFiscal,
 			&i.SerieNotaFiscal,
 			&i.DescricaoServicoTerceiro,
+			&i.TemNotaFiscal,
 			&i.LancadoEm,
 			&i.CustoRevisadoEm,
 			&i.LancadoPorNome,

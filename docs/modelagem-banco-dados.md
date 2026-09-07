@@ -293,6 +293,21 @@ número vai para um relatório.
 > `terceiros`, porque ela conta o que a *empresa externa* fez, e o que o Técnico fez já mora em
 > `os_encerramento.solucao` (1.4.3). `custo_hora_tecnico` também segue só em `maquinario`. A
 > migration só amplia o aceito, então não há backfill: toda linha gravada continua válida.
+>
+> **Migration `000011`: a nota passa a ser declarada, não adivinhada.** A `000010` soltou a nota
+> do tipo, mas deixou um buraco — nada distinguia "esta OS não gerou nota" de "gerou e ninguém
+> preencheu ainda", e o Administrador via os campos em toda OS sem saber onde valia cobrar o
+> documento. `os_custo.tem_nota_fiscal boolean NOT NULL DEFAULT false` é essa declaração, feita
+> pelo **Técnico** no encerramento (`CriarCusto`) — é ele quem viu se houve compra. `DEFAULT
+> false` porque serviço só de mão de obra é o caso comum. O **Administrador pode corrigir**
+> (`AtualizarCusto` também grava a coluna): Técnico esquecer de marcar não pode deixar a OS sem
+> onde lançar a nota. Backfill pelo dado existente: linha com número gravado teve nota.
+>
+> O `CHECK` novo é **separado**, `ck_custo_nota_fiscal`, e não mais uma cláusula dentro de
+> `ck_custo_por_tipo` — são eixos diferentes: um fala do **tipo** da OS (o que a natureza do
+> serviço permite), o outro do que foi **declarado** nesta OS específica. Junto, a mensagem de
+> erro ficaria ambígua. Só a direção "declarou que não teve" é travada; "declarou que teve e
+> ainda não preencheu" é estado legítimo — é a própria fila de conferência do Administrador.
 
 ### 2.4 `ENUM` no que é regra de código, tabela no que o cliente cadastra
 

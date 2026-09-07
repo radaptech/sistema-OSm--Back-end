@@ -41,11 +41,17 @@ type EncerramentoOrdemServico struct {
 // 'terceiros' quem trabalhou foi a empresa e em 'reparo' o serviço não cobra
 // hora. `null` ali é a regra de negócio aparecendo, não dado faltando.
 //
+// TemNotaFiscal é a declaração do Técnico no encerramento: houve compra (peça,
+// material, fatura da empresa) ou foi só mão de obra? É ela que decide se a
+// tela do Administrador mostra os campos de nota -- sem ela, "OS que não gera
+// nota" e "nota ainda não preenchida" seriam indistinguíveis. Sem `omitempty`:
+// `false` é resposta, não ausência de dado, e some com omitempty.
+//
 // NumeroNotaFiscal/SerieNotaFiscal valem em QUALQUER tipo desde a migration
 // 000010 (maquinário troca peça comprada com nota, reparo consome material
-// com nota) -- `omitempty` aqui é "esta OS não teve nota", não "este tipo não
-// pode ter". DescricaoServicoTerceiro é a que continua presa a 'terceiros':
-// ela conta o que a empresa externa fez, e o que o Técnico fez já mora em
+// com nota), e só existem quando TemNotaFiscal é true (ck_custo_nota_fiscal).
+// DescricaoServicoTerceiro é a que continua presa a 'terceiros': ela conta o
+// que a empresa externa fez, e o que o Técnico fez já mora em
 // EncerramentoOrdemServico.Solucao, que existe para todo tipo.
 //
 // CustoTotal é derivado, somado em MontarOrdemServico -- ver a nota lá.
@@ -59,6 +65,7 @@ type CustoOrdemServico struct {
 	CustoHoraTecnico         *float64       `json:"custoHoraTecnico"`
 	CustoManutencao          float64        `json:"custoManutencao"`
 	CustoTotal               float64        `json:"custoTotal"`
+	TemNotaFiscal            bool           `json:"temNotaFiscal"`
 	NumeroNotaFiscal         *string        `json:"numeroNotaFiscal,omitempty"`
 	SerieNotaFiscal          *string        `json:"serieNotaFiscal,omitempty"`
 	DescricaoServicoTerceiro *string        `json:"descricaoServicoTerceiro,omitempty"`
@@ -88,6 +95,12 @@ type EncerramentoOrdemServicoPayload struct {
 	Solucao           string   `json:"solucao" binding:"required"`
 	CustoHoraTecnico  *float64 `json:"custoHoraTecnico" binding:"omitempty,gte=0"`
 	CustoManutencao   float64  `json:"custoManutencao" binding:"gte=0"`
+	// Declaração do Técnico: houve compra com nota (peça, material, fatura da
+	// empresa) ou foi só mão de obra? Decide se a tela do Administrador vai
+	// pedir número e série depois. Sem binding de propósito: `required` num
+	// bool rejeita `false`, que aqui é a resposta mais comum -- ausente vira
+	// false, o mesmo DEFAULT da coluna.
+	TemNotaFiscal bool `json:"temNotaFiscal"`
 }
 
 // PausaOrdemServicoPayload é o corpo de POST /ordens-servico/:id/pausar --
@@ -127,11 +140,16 @@ type AcionamentoTerceiroPayload struct {
 // Desde a migration 000010 os dois de nota fiscal valem em qualquer tipo; só
 // DescricaoServicoTerceiro segue restrita a 'terceiros' (ck_custo_por_tipo).
 type LancamentoCustoManutencaoPayload struct {
-	CustoHoraTecnico         *float64 `json:"custoHoraTecnico" binding:"omitempty,gte=0"`
-	CustoManutencao          float64  `json:"custoManutencao" binding:"gte=0"`
-	NumeroNotaFiscal         *string  `json:"numeroNotaFiscal,omitempty"`
-	SerieNotaFiscal          *string  `json:"serieNotaFiscal,omitempty"`
-	DescricaoServicoTerceiro *string  `json:"descricaoServicoTerceiro,omitempty"`
+	CustoHoraTecnico *float64 `json:"custoHoraTecnico" binding:"omitempty,gte=0"`
+	CustoManutencao  float64  `json:"custoManutencao" binding:"gte=0"`
+	// Repetido aqui, e não só no encerramento, porque o Administrador PODE
+	// corrigir a declaração do Técnico: sem isso, um Técnico que esqueceu de
+	// marcar deixaria a OS sem onde lançar a nota que o Administrador tem na
+	// mão. Mesmo motivo de não ter binding: `false` é resposta válida.
+	TemNotaFiscal            bool    `json:"temNotaFiscal"`
+	NumeroNotaFiscal         *string `json:"numeroNotaFiscal,omitempty"`
+	SerieNotaFiscal          *string `json:"serieNotaFiscal,omitempty"`
+	DescricaoServicoTerceiro *string `json:"descricaoServicoTerceiro,omitempty"`
 }
 
 // OrdemServico espelha OrdemServico do front (ordemServico.ts) e serve os DOIS
@@ -284,9 +302,12 @@ func MontarOrdemServico(os repository.ListarOrdensServicoRow, pausas []repositor
 			total += *horaTecnico
 		}
 		ordem.Custo = &CustoOrdemServico{
-			CustoHoraTecnico:         horaTecnico,
-			CustoManutencao:          os.CustoManutencao.Float64,
-			CustoTotal:               total,
+			CustoHoraTecnico: horaTecnico,
+			CustoManutencao:  os.CustoManutencao.Float64,
+			CustoTotal:       total,
+			// *bool na linha porque os_custo entra por LEFT JOIN; nil só
+			// acontece em OS sem custo, e aí nem chegamos aqui.
+			TemNotaFiscal:            os.TemNotaFiscal != nil && *os.TemNotaFiscal,
 			NumeroNotaFiscal:         os.NumeroNotaFiscal,
 			SerieNotaFiscal:          os.SerieNotaFiscal,
 			DescricaoServicoTerceiro: os.DescricaoServicoTerceiro,

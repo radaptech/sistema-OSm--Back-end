@@ -167,11 +167,15 @@ RETURNING *;
 -- Nasce na mesma transação do encerramento (docs/modelagem, 2.3 revisão 4:
 -- "os dois momentos deixaram de ser sequenciais"), lancado_por_id = o
 -- próprio Técnico -- o Administrador só CORRIGE depois, em
--- POST /ordens-servico/:id/custo (fase 2, fora daqui), inclusive as três
--- colunas de nota fiscal, que por isso nem entram neste INSERT (ficam
--- NULL, satisfeito por ck_custo_por_tipo quando tipo <> 'terceiros' --
--- e quando É 'terceiros', são opcionais mesmo até o Administrador
--- conferir contra a nota).
+-- POST /ordens-servico/:id/custo (fora daqui), inclusive o NÚMERO e a SÉRIE
+-- da nota, que por isso não entram neste INSERT e ficam NULL.
+--
+-- tem_nota_fiscal, esse sim, entra: é declaração do TÉCNICO, não do
+-- Administrador. Só quem executou sabe se houve compra (peça, material,
+-- fatura da empresa) ou se foi só mão de obra -- e é essa resposta que
+-- decide se os campos de NF aparecem na tela do Administrador depois. Com
+-- `false` aqui, ck_custo_nota_fiscal exige os dois campos NULL, que é
+-- exatamente o que este INSERT deixa.
 --
 -- custo_hora_tecnico é quem o service decide se manda ou NULL
 -- (pgtype.Float8{Valid: false}): só existe em 'maquinario'
@@ -183,10 +187,11 @@ RETURNING *;
 -- sqlc.yaml, que por isso continua morto de propósito).
 INSERT INTO os_custo (
     tenant_id, ordem_servico_id, tipo,
-    custo_hora_tecnico, custo_manutencao, lancado_por_id
+    custo_hora_tecnico, custo_manutencao, lancado_por_id, tem_nota_fiscal
 ) VALUES (
     sqlc.arg(tenant_id), sqlc.arg(ordem_servico_id), sqlc.arg(tipo),
-    sqlc.arg(custo_hora_tecnico), sqlc.arg(custo_manutencao), sqlc.arg(lancado_por_id)
+    sqlc.arg(custo_hora_tecnico), sqlc.arg(custo_manutencao), sqlc.arg(lancado_por_id),
+    sqlc.arg(tem_nota_fiscal)
 )
 RETURNING *;
 
@@ -208,6 +213,12 @@ RETURNING *;
 -- Sem WHERE por tipo: os_custo.tipo é fixo desde o INSERT (CriarCusto) e não
 -- muda depois de Concluída, então não há o que recomparar contra a OS.
 --
+-- tem_nota_fiscal é sobrescrito aqui de propósito, apesar de nascer como
+-- declaração do Técnico: se ele esquecer de marcar, o Administrador ficaria
+-- sem onde lançar a nota que tem na mão -- e a tela dele traz o mesmo
+-- controle. Desmarcar limpa número e série no mesmo UPDATE (o service manda
+-- nil nos dois), senão ck_custo_nota_fiscal barra a escrita.
+--
 -- custo_revisado_em = now() na mesma tacada: toda passagem do Administrador
 -- por esta query É a conferência contra a nota, então é aqui que a marca
 -- nasce. É o que move a OS de "Pendentes" para "Revisadas" em Custos
@@ -219,6 +230,7 @@ SET custo_hora_tecnico = sqlc.narg(custo_hora_tecnico),
     numero_nota_fiscal = sqlc.narg(numero_nota_fiscal),
     serie_nota_fiscal = sqlc.narg(serie_nota_fiscal),
     descricao_servico_terceiro = sqlc.narg(descricao_servico_terceiro),
+    tem_nota_fiscal = sqlc.arg(tem_nota_fiscal),
     lancado_por_id = sqlc.arg(lancado_por_id),
     lancado_em = now(),
     custo_revisado_em = now()
@@ -319,6 +331,7 @@ SELECT
     c.numero_nota_fiscal,
     c.serie_nota_fiscal,
     c.descricao_servico_terceiro,
+    c.tem_nota_fiscal,
     c.lancado_em,
     c.custo_revisado_em,
     lanc.nome AS lancado_por_nome
