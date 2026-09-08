@@ -180,12 +180,14 @@ func TestLogin(t *testing.T) {
 		LojasIds: []int64{lojaA, lojaB}, Area: &area,
 	})
 
-	login := func(email, perfil, senha string) (string, model.SessaoUsuario, error) {
-		return svc.Login(ctx, model.Login{Email: email, Perfil: perfil, Senha: senha}, tenantID)
+	// Sem perfil: ele saiu do corpo do login (ver model.Login). Quem diz o perfil
+	// é a linha do banco, e é isso que os subtestes abaixo conferem na sessão.
+	login := func(email, senha string) (string, model.SessaoUsuario, error) {
+		return svc.Login(ctx, model.Login{Email: email, Senha: senha}, tenantID)
 	}
 
 	t.Run("administrador não tem escopo nenhum", func(t *testing.T) {
-		token, sessao, err := login("ana@teste.com", "administrador", senha)
+		token, sessao, err := login("ana@teste.com", senha)
 		if err != nil {
 			t.Fatalf("login falhou: %v", err)
 		}
@@ -201,7 +203,7 @@ func TestLogin(t *testing.T) {
 	})
 
 	t.Run("solicitante traz loja, setor e nome do setor", func(t *testing.T) {
-		_, sessao, err := login("bruno@teste.com", "solicitante", senha)
+		_, sessao, err := login("bruno@teste.com", senha)
 		if err != nil {
 			t.Fatalf("login falhou: %v", err)
 		}
@@ -223,7 +225,7 @@ func TestLogin(t *testing.T) {
 	})
 
 	t.Run("gestor recebe cada setor no escopo da propria loja", func(t *testing.T) {
-		_, sessao, err := login("carla@teste.com", "gestor", senha)
+		_, sessao, err := login("carla@teste.com", senha)
 		if err != nil {
 			t.Fatalf("login falhou: %v", err)
 		}
@@ -274,7 +276,7 @@ func TestLogin(t *testing.T) {
 	})
 
 	t.Run("gestor com acesso total serializa setoresIds como todos", func(t *testing.T) {
-		_, sessao, err := login("dora@teste.com", "gestor", senha)
+		_, sessao, err := login("dora@teste.com", senha)
 		if err != nil {
 			t.Fatalf("login falhou: %v", err)
 		}
@@ -288,7 +290,7 @@ func TestLogin(t *testing.T) {
 	})
 
 	t.Run("tecnico traz tecnicoId igual ao proprio id", func(t *testing.T) {
-		_, sessao, err := login("eder@teste.com", "tecnico", senha)
+		_, sessao, err := login("eder@teste.com", senha)
 		if err != nil {
 			t.Fatalf("login falhou: %v", err)
 		}
@@ -301,17 +303,41 @@ func TestLogin(t *testing.T) {
 	})
 
 	t.Run("credenciais invalidas nao vazam qual campo errou", func(t *testing.T) {
+		// "perfil trocado" saiu da tabela junto com o campo: escolher a aba errada
+		// deixou de ser um jeito de falhar o login, que era o único efeito que ele
+		// tinha (ver model.Login).
 		casos := []struct {
-			nome, email, perfil, senha string
+			nome, email, senha string
 		}{
-			{"senha errada", "bruno@teste.com", "solicitante", "senha-errada-123"},
-			{"email inexistente", "ninguem@teste.com", "solicitante", senha},
-			{"perfil trocado", "bruno@teste.com", "administrador", senha},
+			{"senha errada", "bruno@teste.com", "senha-errada-123"},
+			{"email inexistente", "ninguem@teste.com", senha},
 		}
 		for _, c := range casos {
-			_, _, err := login(c.email, c.perfil, c.senha)
+			_, _, err := login(c.email, c.senha)
 			if !errors.Is(err, helper.ErrCredenciaisInvalidas) {
 				t.Fatalf("%s: esperava ErrCredenciaisInvalidas, veio %v", c.nome, err)
+			}
+		}
+	})
+
+	// O perfil saiu do corpo do login, então esta é a garantia que sobrou no lugar
+	// da comparação antiga: quem responde "qual é o seu perfil" é a linha do
+	// banco, e é esse valor que vai para a sessão (e para o token, logo depois).
+	// Sem este teste, trocar montarSessao por um perfil fixo passaria batido.
+	t.Run("perfil da sessao vem do banco, nao do corpo", func(t *testing.T) {
+		casos := []struct{ email, esperado string }{
+			{"ana@teste.com", "administrador"},
+			{"bruno@teste.com", "solicitante"},
+			{"carla@teste.com", "gestor"},
+			{"eder@teste.com", "tecnico"},
+		}
+		for _, c := range casos {
+			_, sessao, err := login(c.email, senha)
+			if err != nil {
+				t.Fatalf("%s: login falhou: %v", c.email, err)
+			}
+			if sessao.Perfil != c.esperado {
+				t.Errorf("%s: perfil = %q, esperado %q", c.email, sessao.Perfil, c.esperado)
 			}
 		}
 	})
@@ -320,7 +346,7 @@ func TestLogin(t *testing.T) {
 		if _, err := pool.Exec(ctx, `UPDATE usuario SET ativo = false WHERE id = $1`, tecnico.Id); err != nil {
 			t.Fatalf("erro ao desativar: %v", err)
 		}
-		if _, _, err := login("eder@teste.com", "tecnico", senha); !errors.Is(err, helper.ErrCredenciaisInvalidas) {
+		if _, _, err := login("eder@teste.com", senha); !errors.Is(err, helper.ErrCredenciaisInvalidas) {
 			t.Fatalf("esperava ErrCredenciaisInvalidas, veio %v", err)
 		}
 	})
@@ -547,7 +573,7 @@ func TestAtualizarEDesativarUsuario(t *testing.T) {
 		if _, err := svc.AtualizarUsuario(ctx, u.Id, base, tenantID); err != nil {
 			t.Fatalf("erro ao atualizar sem senha: %v", err)
 		}
-		if _, _, err := svc.Login(ctx, model.Login{Email: "caio@editar.com", Perfil: "solicitante", Senha: senhaOriginal}, tenantID); err != nil {
+		if _, _, err := svc.Login(ctx, model.Login{Email: "caio@editar.com", Senha: senhaOriginal}, tenantID); err != nil {
 			t.Fatalf("senha antiga devia continuar valendo: %v", err)
 		}
 
@@ -557,10 +583,10 @@ func TestAtualizarEDesativarUsuario(t *testing.T) {
 		if _, err := svc.AtualizarUsuario(ctx, u.Id, comSenha, tenantID); err != nil {
 			t.Fatalf("erro ao atualizar com senha: %v", err)
 		}
-		if _, _, err := svc.Login(ctx, model.Login{Email: "caio@editar.com", Perfil: "solicitante", Senha: nova}, tenantID); err != nil {
+		if _, _, err := svc.Login(ctx, model.Login{Email: "caio@editar.com", Senha: nova}, tenantID); err != nil {
 			t.Fatalf("senha nova devia valer: %v", err)
 		}
-		if _, _, err := svc.Login(ctx, model.Login{Email: "caio@editar.com", Perfil: "solicitante", Senha: senhaOriginal}, tenantID); !errors.Is(err, helper.ErrCredenciaisInvalidas) {
+		if _, _, err := svc.Login(ctx, model.Login{Email: "caio@editar.com", Senha: senhaOriginal}, tenantID); !errors.Is(err, helper.ErrCredenciaisInvalidas) {
 			t.Fatalf("senha antiga devia ter morrido, erro = %v", err)
 		}
 	})
@@ -650,7 +676,7 @@ func TestAtualizarEDesativarUsuario(t *testing.T) {
 		if err := svc.DesativarUsuario(ctx, u.Id, tenantID, admin.Id); err != nil {
 			t.Fatalf("erro ao desativar: %v", err)
 		}
-		if _, _, err := svc.Login(ctx, model.Login{Email: "gil@editar.com", Perfil: "solicitante", Senha: senhaOriginal}, tenantID); !errors.Is(err, helper.ErrCredenciaisInvalidas) {
+		if _, _, err := svc.Login(ctx, model.Login{Email: "gil@editar.com", Senha: senhaOriginal}, tenantID); !errors.Is(err, helper.ErrCredenciaisInvalidas) {
 			t.Errorf("desativado não pode logar, erro = %v", err)
 		}
 		if _, err := svc.ObterSessao(ctx, u.Id, tenantID); !errors.Is(err, helper.ErrSessaoExpirada) {
