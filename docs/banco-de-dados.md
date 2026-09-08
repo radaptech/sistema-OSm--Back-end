@@ -23,7 +23,9 @@ O modelo de dados em si (o porquê de cada constraint) está em
 - Aplicadas até aqui: `000001` schema inicial, `000002` horas parada desde a solicitação,
   `000003` chave do R2, `000004` criticidade vira ENUM, `000005` foto só na solicitação
   humana, `000006` seed de `area_tecnico`, `000007` urgência vira ENUM, `000008`
-  preventiva vai direto para o técnico.
+  preventiva vai direto para o técnico, `000009` custo revisado pelo Administrador,
+  `000010` nota fiscal em qualquer tipo, `000011` nota fiscal declarada no encerramento,
+  `000012` custo itemizado por tarefa e notas fiscais em lista.
 - ⚠️ **Tabela e tipo dividem namespace no Postgres** — trocar uma tabela por um ENUM
   homônimo exige dropar a tabela **antes** de criar o tipo (foi o caso de `000004`).
 
@@ -35,7 +37,15 @@ O modelo de dados em si (o porquê de cada constraint) está em
 - Convenção de nomenclatura: em português, verbo primeiro (`CriarX`, `ObterXPorId`,
   `ListarX`, `AtualizarX`, `DeletarX`), espelhando o estilo do resto do Go do projeto.
 - **Exclusão é sempre soft delete** — ver "Soft delete" em
-  `docs/modelagem-banco-dados.md`. Não há `DELETE` de linha em lugar nenhum.
+  `docs/modelagem-banco-dados.md`.
+  ⚠️ **Duas exceções, ambas da migration `000012`**: `DeletarItensDeCustoDaOrdemServico` e
+  `DeletarNotasFiscaisDaOrdemServico` apagam linha de verdade. A regra do soft delete
+  existe para não perder histórico de **entidade** que alguém consultou; item de custo e
+  nota fiscal não são entidades, são a composição de um valor que está sendo **reescrito
+  inteiro** na mesma transação (ver "Substituição de conjunto" abaixo). Um `ativo` ali
+  obrigaria toda soma a filtrar por ele e deixaria a tela mostrando a peça que o
+  Administrador acabou de tirar. Fora dessas duas, não há `DELETE` de linha em lugar
+  nenhum.
   ⚠️ A coluna é **`ativa`** na `loja`/`maquina`/`preventiva` (feminino) e **`ativo`** em
   `usuario`/`setor`.
   Em `preventiva` o soft delete não é só convenção: **`fk_solicitacao_preventiva` não tem
@@ -148,6 +158,25 @@ O modelo de dados em si (o porquê de cada constraint) está em
   também — as duas fazem `SELECT os.*`, e o Postgres resolve isso em colunas concretas na
   criação da view, então as duas ficam dependentes de `urgencia_id` por baixo mesmo sem
   citar a coluna no texto; `DROP COLUMN` direto falha com "other objects depend on it".
+- **Substituição de conjunto, e não merge, também no custo (migration `000012`):**
+  `gravarItensDeCusto` e `gravarNotasFiscais` (`internal/service/ordemServicoCusto.go`)
+  apagam tudo da OS e regravam, mesmo padrão das preventivas em `CadastrarMaquina` e do
+  escopo em `AtualizarUsuario`. O motivo é o mesmo: a tela manda a lista inteira já
+  editada, então merge incremental precisaria de um id por linha que o formulário não tem,
+  e uma linha removida na tela continuaria no banco.
+  ⚠️ `os_custo.custo_manutencao` e `custo_hora_tecnico` **continuam existindo** e passam a
+  ser a SOMA da coluna correspondente dos itens, escrita pelo service na mesma transação.
+  Isso contraria a seção 3.2 de `docs/modelagem-banco-dados.md` ("é um total que se
+  calcula") e a exceção é consciente — as duas colunas são lidas por `vw_os_finalizada`,
+  `ListarOrdensServico` e `ListarHistoricoOsDaMaquina`. O que a decisão exige em troca é
+  que **o servidor nunca aceite o total do cliente**: o payload não carrega total nenhum, o
+  service soma o que acabou de gravar, e há teste conferindo a soma depois do commit.
+- **`os_custo_item.custo_manutencao`/`custo_hora_tecnico` reusam os nomes de coluna de
+  `os_custo`**, e isso não é coincidência: o override do `sqlc.yaml` casa por NOME de
+  coluna, em qualquer tabela, então as duas colunas novas já saem `pgtype.Float8` sem
+  override novo. Foi um dos ganhos de a linha ter virado uma TAREFA com os dois valores em
+  vez de um par `categoria` + `valor` — uma coluna chamada `valor` exigiria mais um
+  override para a mesma grandeza.
 - ⚠️ **Armadilha do sqlc em coluna calculada:** expressão booleana composta vira `*bool`,
   e `COALESCE` sozinho vira `interface{}`. Para sair `bool` limpo, **feche com cast**:
   `COALESCE(<expr>, false)::boolean AS x` — é o que `vencida` usa nas duas queries de
@@ -159,6 +188,13 @@ O modelo de dados em si (o porquê de cada constraint) está em
 - `AvancarProximaData` soma o intervalo **a partir da `proxima_data` vencida, não de hoje**
   — senão um ciclo processado com atraso arrastaria todos os seguintes (vencida há 5 dias
   com intervalo 30 vai pra hoje+25, não hoje+30).
+- **`ObterItensDeCustoDasOrdensServico` e `ObterNotasFiscaisDasOrdensServico` leem em
+  lote**, mesmo desenho de `ObterPausasDasOrdensServico`: 1:N no JOIN duplicaria a OS por
+  linha, e uma query por OS seria N+1. As três são chamadas por `montarOrdensServicoEmLote`
+  com os ids que `ListarOrdensServico` devolveu — três queries fixas, independentes do
+  tamanho da página. Nenhuma delas filtra por `tenant_id`, mesmo onde a coluna existe: os
+  ids já vieram de uma listagem recortada por tenant E por escopo. Nunca as chame com ids
+  de outra origem.
 - ⚠️ **`ListarPreventivasVencidas` é a única query do projeto sem `tenant_id` no `WHERE`**,
   e sem parâmetro nenhum: é do job, não de um request — não há token, e o `tenant_id` viaja
   na linha direto pro INSERT da solicitação. Não "conserte" adicionando filtro. Ver a seção

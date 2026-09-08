@@ -19,7 +19,8 @@ API Go/Gin, multi-tenant por subdomínio, consumida pelo front em `../sistema-OS
 - **401 é só "sem sessão"**; perfil/escopo errado é **403** — 401 fora de `/login` desloga o usuário.
 - **Resposta**: tags camelCase, sempre com `id`; data é `*config.DataBr` (`dd/mm/yyyy HH:MM:SS`) — valor não-ponteiro serializa `{}` calado; listagem devolve slice não-nil, `null` quebra o `.map`.
 - **Erros**: `errors.Is(err, pgx.ErrNoRows)` **antes** de `TraduzErroPostgres` (senão id inexistente vira 500); sentinela na frente do `%w` (`fmt.Errorf("%w: detalhe", helper.ErrX)`).
-- **Exclusão é sempre soft delete**, sem reativação pela API; coluna `ativa` (loja/máquina/preventiva) ou `ativo` (usuário/setor); query de desativar é `:execrows` e `linhas == 0` → `ErrNaoEncontrado`.
+- **Exclusão é sempre soft delete**, sem reativação pela API; coluna `ativa` (loja/máquina/preventiva) ou `ativo` (usuário/setor); query de desativar é `:execrows` e `linhas == 0` → `ErrNaoEncontrado`. Exceção: `os_custo_item` e `os_nota_fiscal` apagam de verdade — são composição de um valor reescrito inteiro, não entidade.
+- **Custo da OS é uma lista de TAREFAS** (`os_custo_item`, migration `000012`), cada uma com material e mão de obra; os agregados de `os_custo` são a soma que **o servidor** calcula, nunca um total vindo do cliente.
 - **Transição de estado é `POST` em sub-recurso** (`/iniciar`, `/rejeitar`), nunca `PATCH` de `status`.
 - **Não simplifique constraint/trigger/view** sem ler o porquê em `docs/modelagem-banco-dados.md`.
 

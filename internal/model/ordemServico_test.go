@@ -35,7 +35,7 @@ func osAberta() repository.ListarOrdensServicoRow {
 func TestOrdemServicoSerializaDatasNoFormatoBr(t *testing.T) {
 
 	corpo := map[string]any{}
-	bruto, err := json.Marshal(MontarOrdemServico(osAberta(), nil))
+	bruto, err := json.Marshal(MontarOrdemServico(osAberta(), nil, nil, nil))
 	if err != nil {
 		t.Fatalf("erro ao serializar: %v", err)
 	}
@@ -59,7 +59,7 @@ func TestOrdemServicoSerializaDatasNoFormatoBr(t *testing.T) {
 func TestOrdemServicoAbertaOmiteOCicloDeVida(t *testing.T) {
 
 	corpo := map[string]any{}
-	bruto, _ := json.Marshal(MontarOrdemServico(osAberta(), nil))
+	bruto, _ := json.Marshal(MontarOrdemServico(osAberta(), nil, nil, nil))
 	if err := json.Unmarshal(bruto, &corpo); err != nil {
 		t.Fatalf("erro ao desserializar: %v", err)
 	}
@@ -119,7 +119,7 @@ func TestOrdemServicoCustoTotal(t *testing.T) {
 			linha.CustoHoraTecnico, linha.CustoManutencao = caso.horaTecnico, caso.manutencao
 			linha.LancadoPorNome, linha.LancadoEm = ptr("Ana"), ts(time.Now())
 
-			ordem := MontarOrdemServico(linha, nil)
+			ordem := MontarOrdemServico(linha, nil, nil, nil)
 
 			if !caso.temCusto {
 				if ordem.Custo != nil {
@@ -150,7 +150,7 @@ func TestOrdemServicoHorasNulasNaoViramZero(t *testing.T) {
 	linha.HorasTrabalhadas = f8(4)
 	// HorasParada fica no zero value: Valid falso.
 
-	ordem := MontarOrdemServico(linha, nil)
+	ordem := MontarOrdemServico(linha, nil, nil, nil)
 	if ordem.HorasParada != nil {
 		t.Errorf("horasParada = %v, esperado nil", *ordem.HorasParada)
 	}
@@ -180,7 +180,7 @@ func TestOrdemServicoPausas(t *testing.T) {
 			PausadaEm: ts(agora.Add(-30 * time.Minute))},
 	}
 
-	ordem := MontarOrdemServico(osAberta(), pausas)
+	ordem := MontarOrdemServico(osAberta(), pausas, nil, nil)
 
 	if len(ordem.Pausas) != 2 {
 		t.Fatalf("pausas = %d, esperado 2 (o histórico inteiro)", len(ordem.Pausas))
@@ -199,7 +199,7 @@ func TestOrdemServicoPausas(t *testing.T) {
 	}
 
 	// Sem pausa em aberto, pausaAtual some mas o histórico fica.
-	semAberta := MontarOrdemServico(osAberta(), pausas[:1])
+	semAberta := MontarOrdemServico(osAberta(), pausas[:1], nil, nil)
 	if semAberta.PausaAtual != nil {
 		t.Errorf("pausaAtual = %+v, esperado nil", semAberta.PausaAtual)
 	}
@@ -233,7 +233,7 @@ func TestOrdemServicoEncerrada(t *testing.T) {
 	linha.Solucao = ptr("Troca da resistência")
 	linha.EncerradoPorNome = ptr("Eder")
 
-	ordem := MontarOrdemServico(linha, nil)
+	ordem := MontarOrdemServico(linha, nil, nil, nil)
 
 	if ordem.Encerramento == nil {
 		t.Fatal("encerramento devia existir")
@@ -249,5 +249,101 @@ func TestOrdemServicoEncerrada(t *testing.T) {
 	// Encerrada mas sem custo lançado: é a fila de Custos Pendentes.
 	if ordem.Custo != nil {
 		t.Errorf("custo = %+v, esperado nil", ordem.Custo)
+	}
+}
+
+// Itens e notas fiscais viraram listas na migration 000012. Este teste tranca
+// as três coisas que a tela quebra se mudarem: as duas listas sempre existirem
+// no JSON (o front faz `.map` direto, `null` estoura), a série ausente sair
+// como ausência e não como string vazia, e a hora técnica NULA de uma tarefa
+// sobreviver como null em vez de virar zero.
+func TestOrdemServicoItensENotasFiscais(t *testing.T) {
+
+	linha := osAberta()
+	linha.CustoHoraTecnico, linha.CustoManutencao = f8(90), f8(420)
+	linha.LancadoPorNome, linha.LancadoEm = ptr("Ana"), ts(time.Now())
+	temNota := true
+	linha.TemNotaFiscal = &temNota
+
+	itens := []repository.ObterItensDeCustoDasOrdensServicoRow{
+		{ID: 1, OrdemServicoID: 1, Descricao: "Troca do rolamento", CustoManutencao: f8(180), CustoHoraTecnico: f8(50)},
+		// Tarefa sem mão de obra cobrada: a coluna vem NULA, e é isso que
+		// distingue "não cobrou hora" de "cobrou zero" na tela.
+		{ID: 2, OrdemServicoID: 1, Descricao: "Troca da fita", CustoManutencao: f8(240)},
+	}
+	notas := []repository.ObterNotasFiscaisDasOrdensServicoRow{
+		{ID: 1, OrdemServicoID: 1, Numero: "NF-4471", Serie: ptr("1")},
+		{ID: 2, OrdemServicoID: 1, Numero: "NF-9002"},
+	}
+
+	ordem := MontarOrdemServico(linha, nil, itens, notas)
+	if ordem.Custo == nil {
+		t.Fatal("custo devia existir")
+	}
+	if len(ordem.Custo.Itens) != 2 || len(ordem.Custo.NotasFiscais) != 2 {
+		t.Fatalf("itens/notas = %d/%d, esperado 2/2", len(ordem.Custo.Itens), len(ordem.Custo.NotasFiscais))
+	}
+	if ordem.Custo.Itens[0].Descricao != "Troca do rolamento" ||
+		ordem.Custo.Itens[0].CustoManutencao != 180 ||
+		ordem.Custo.Itens[0].CustoHoraTecnico == nil ||
+		*ordem.Custo.Itens[0].CustoHoraTecnico != 50 {
+		t.Errorf("primeira tarefa = %+v", ordem.Custo.Itens[0])
+	}
+	// Nula, não zero: a tarefa não cobrou mão de obra.
+	if ordem.Custo.Itens[1].CustoHoraTecnico != nil {
+		t.Errorf("hora técnica ausente devia ser nil, veio %v", *ordem.Custo.Itens[1].CustoHoraTecnico)
+	}
+	if ordem.Custo.NotasFiscais[1].Serie != nil {
+		t.Errorf("série ausente devia ser nil, veio %q", *ordem.Custo.NotasFiscais[1].Serie)
+	}
+
+	// Os agregados NÃO são somados aqui: eles vêm de os_custo, escritos pelo
+	// service a partir dos mesmos itens. Este teste confere que a montagem
+	// respeita a coluna em vez de recalcular -- recalcular aqui esconderia uma
+	// divergência entre os_custo e os_custo_item em vez de deixá-la aparecer.
+	if ordem.Custo.CustoManutencao != 420 || ordem.Custo.CustoTotal != 510 {
+		t.Errorf("agregados = %v/%v, esperado 420/510", ordem.Custo.CustoManutencao, ordem.Custo.CustoTotal)
+	}
+
+	corpo := map[string]any{}
+	bruto, _ := json.Marshal(ordem)
+	if err := json.Unmarshal(bruto, &corpo); err != nil {
+		t.Fatalf("json inválido: %v", err)
+	}
+	custo, _ := corpo["custo"].(map[string]any)
+	for _, campo := range []string{"itens", "notasFiscais"} {
+		if custo[campo] == nil {
+			t.Errorf("%q é obrigatório no contrato e veio null -- o front faz .map", campo)
+		}
+	}
+	nota := custo["notasFiscais"].([]any)[1].(map[string]any)
+	if _, presente := nota["serie"]; presente {
+		t.Error("série ausente não devia ser emitida, nem como string vazia")
+	}
+}
+
+// Custo lançado sem nenhum item é o estado das OS que já existiam antes da
+// 000012 e não passaram pelo backfill (ex.: INSERT direto num teste). As duas
+// listas têm que sair vazias, nunca null.
+func TestOrdemServicoCustoSemItensEmiteListasVazias(t *testing.T) {
+
+	linha := osAberta()
+	linha.CustoManutencao = f8(30)
+	linha.LancadoPorNome, linha.LancadoEm = ptr("Ana"), ts(time.Now())
+
+	ordem := MontarOrdemServico(linha, nil, nil, nil)
+	if ordem.Custo == nil {
+		t.Fatal("custo devia existir")
+	}
+	if ordem.Custo.Itens == nil || ordem.Custo.NotasFiscais == nil {
+		t.Fatalf("listas = %v/%v, esperado vazias e não nulas", ordem.Custo.Itens, ordem.Custo.NotasFiscais)
+	}
+
+	corpo := map[string]any{}
+	bruto, _ := json.Marshal(ordem)
+	json.Unmarshal(bruto, &corpo)
+	custo := corpo["custo"].(map[string]any)
+	if itens, ok := custo["itens"].([]any); !ok || len(itens) != 0 {
+		t.Errorf("itens = %v, esperado [] no JSON", custo["itens"])
 	}
 }

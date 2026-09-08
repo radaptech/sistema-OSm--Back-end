@@ -28,6 +28,11 @@ Documento gerado a partir da revisão do código do front-end (`/src/tipos`, `/s
   ENUM**; muda o preenchimento de três colunas e some um índice — `preventiva.tecnico_id`
   (nova, nullable), `ordem_servico.aberta_por_id` perde o `NOT NULL`, e `uq_preventiva_pendente`
   é substituído por um lock de linha no job. Ver 1.5.
+- **Revisão 4.3** (07/09/2026, migration `000012`): **o custo deixa de ser um par de valores
+  e vira lista de tarefas; a nota fiscal deixa de ser uma e vira lista.** Duas tabelas novas,
+  `os_custo_item` e `os_nota_fiscal`, e duas colunas saem de `os_custo`
+  (`numero_nota_fiscal`, `serie_nota_fiscal`) — **21 tabelas + 9 tipos ENUM**. É a primeira
+  revisão que AUMENTA a contagem desde a 1. Ver 1.6.
 
 O diagrama em si está em [`der-banco-dados.mmd`](./der-banco-dados.mmd) (Mermaid, pronto para colar
 em <https://mermaid.live>), com [`.svg`](./der-banco-dados.svg) e [`.png`](./der-banco-dados.png)
@@ -73,18 +78,21 @@ npm run docs:der
 
 ### 1.3 Contagem
 
-| | Revisão 1 | Revisão 2 | Revisão 4 |
-|---|---|---|---|
-| Tabelas de negócio | 13 | 16 | 16 |
-| Tabelas de domínio (lookup) | 8 | 4 | 3 |
-| **Total de tabelas** | **21** | **20** | **19** |
-| Tipos `ENUM` nativos | 0 | 7 | 9 |
+| | Revisão 1 | Revisão 2 | Revisão 4 | Revisão 4.3 |
+|---|---|---|---|---|
+| Tabelas de negócio | 13 | 16 | 16 | 18 |
+| Tabelas de domínio (lookup) | 8 | 4 | 3 | 3 |
+| **Total de tabelas** | **21** | **20** | **19** | **21** |
+| Tipos `ENUM` nativos | 0 | 7 | 9 | 9 |
 
 Tabelas novas na revisão 2: `empresa_terceirizada`, `solicitacao_anexo`, `os_custo`.
 Tabelas que viraram `ENUM` na revisão 2: `perfil_usuario`, `status_solicitacao`, `status_os`,
 `marcador_impacto`.
 Na revisão 4, `tipo_defeito` deixa de ser tabela de domínio e vira `ENUM` de dois valores
 (1.4.4), e entra o `ENUM` `tipo_solicitacao` (1.4.1). Nenhuma tabela nova.
+Na revisão 4.3 entram `os_custo_item` e `os_nota_fiscal` (1.6). Nenhum `ENUM` novo — a
+primeira versão de `os_custo_item` tinha um (`categoria_custo`) e ele foi descartado junto
+com a forma que o exigia.
 
 ### 1.4 Mudanças estruturais da revisão 4
 
@@ -228,6 +236,75 @@ máquina de propósito, isso vira um campo do cadastro da preventiva, não uma l
 > seria "não abre com a anterior ainda não concluída", e aí ela é um `NOT EXISTS` sobre
 > `ordem_servico`, não um índice.
 
+### 1.6 Mudanças da revisão 4.3
+
+A decisão de negócio: **uma OS resolve N tarefas, e cada tarefa tem seu material e sua mão
+de obra.** Trocar o rolamento E a fita de uma serra fita são dois serviços, cada um com sua
+peça e seu tempo. O modelo antigo tinha uma coluna para cada grandeza da OS inteira, então
+o Técnico somava as peças de cabeça e digitava um total que ninguém conseguia conferir
+contra nota nenhuma.
+
+#### 1.6.1 `os_custo_item`: a linha é uma tarefa, não um valor
+
+Filha de `ordem_servico` (e não de `os_custo`) para carregar o par `(ordem_servico_id, tipo)`
+da FK composta — mesmo padrão de `os_custo` e `os_encerramento` (3.5). É o que deixa
+`ck_custo_item_hora_tecnico` ser um CHECK local: sem o `tipo` denormalizado na própria linha,
+um CHECK não enxergaria a tabela pai. `uq_custo_os` já garante um `os_custo` por OS, então
+não há ambiguidade sobre a qual custo o item pertence.
+
+As duas colunas de dinheiro convivem na mesma linha: `custo_manutencao` (NOT NULL) e
+`custo_hora_tecnico` (nullable, proibida fora de `maquinario`).
+
+> **A alternativa que foi construída e descartada.** A primeira versão era uma linha por
+> VALOR, com um `ENUM categoria_custo` (`manutencao` | `hora_tecnico`) dizendo de qual
+> grandeza ela era. Morreu na tela: para lançar duas peças de uma OS de maquinário o Técnico
+> tinha que criar uma terceira linha só para a mão de obra, escolhendo a categoria num
+> select, e o formulário o **bloqueava** até ele fazer isso. O erro não era de implementação
+> — era o modelo afirmando que duas peças são duas mãos de obra. Ficou registrado porque a
+> forma descartada é tentadora: ela normaliza mais e valida menos.
+
+#### 1.6.2 Os agregados de `os_custo` sobrevivem como soma, contra a seção 3.2
+
+`os_custo.custo_manutencao` e `custo_hora_tecnico` continuam existindo e passam a ser a
+soma da coluna correspondente dos itens. Isso contraria frontalmente a seção 3.2 ("é um
+total que se calcula. Guardado, ele passa a poder discordar do que o originou"), e a
+exceção é consciente: as duas colunas são lidas por `vw_os_finalizada`, por
+`ListarOrdensServico` e por `ListarHistoricoOsDaMaquina`. Derivá-las na leitura seria
+reescrever duas views e duas queries quentes para não mudar um pixel na tela.
+
+O preço da exceção é uma regra que passa a valer sempre: **o servidor nunca aceita o total
+do cliente.** O payload não carrega total nenhum; o service soma o que acabou de gravar, na
+mesma transação. Sem essa regra a exceção vira exatamente o problema que 3.2 descreve.
+
+#### 1.6.3 `os_nota_fiscal`: N documentos, sem vínculo com os itens
+
+Duas peças compradas em lojas diferentes geram dois documentos, e o par escalar
+`numero_nota_fiscal`/`serie_nota_fiscal` só comportava o primeiro. As duas colunas saem de
+`os_custo` (o backfill leva o que havia para a tabela nova) junto com `ck_custo_nota_fiscal`.
+
+**Não há FK ligando item a nota, e isso é decisão, não lacuna.** Uma nota pode cobrir as
+duas peças (compra única) e uma peça pode não ter nota nenhuma (estoque próprio), então
+qualquer amarração 1:1 estaria errada metade das vezes. Se a conciliação item a item for
+pedida um dia, ela entra como `os_custo_item.nota_fiscal_id` nullable, sem mexer no que
+existe.
+
+`tem_nota_fiscal` (000011) **sobrevive** e não virou "a lista está vazia": lista vazia com a
+declaração marcada é a fila de conferência do Administrador, e é exatamente o caso que a
+000011 existe para distinguir.
+
+#### 1.6.4 A regra "maquinário exige hora técnica" morreu junto
+
+Ela vinha de `custo_hora_tecnico` ser um campo escalar obrigatório. Com uma linha por tarefa,
+obrigava o Técnico a inventar uma tarefa só para carregar a mão de obra numa OS que trocou
+duas peças e não cobrou hora nenhuma. Sem hora lançada o agregado é **zero** em maquinário
+(a coluna existe sempre lá, e zero é conserto sem mão de obra cobrada) e **NULL** nos outros
+dois tipos, que é o que `ck_custo_por_tipo` já exigia.
+
+> **Ponto em aberto que a mudança AMPLIA:** o item 2 da seção 6 ("histórico de lançamento de
+> custo"). Antes o Administrador sobrescrevia um número; agora substitui a itemização inteira
+> que o Técnico escreveu, porque a edição é substituição de conjunto. O remédio continua
+> sendo `os_custo_historico` em append-only — a mudança não o resolve, só encarece adiá-lo.
+
 ---
 
 ## 2. Decisões travadas na revisão 2
@@ -308,6 +385,16 @@ número vai para um relatório.
 > serviço permite), o outro do que foi **declarado** nesta OS específica. Junto, a mensagem de
 > erro ficaria ambígua. Só a direção "declarou que não teve" é travada; "declarou que teve e
 > ainda não preencheu" é estado legítimo — é a própria fila de conferência do Administrador.
+>
+> **Revisão 4.3 (migration `000012`): as colunas de nota saíram de `os_custo`.**
+> `numero_nota_fiscal` e `serie_nota_fiscal` viraram a tabela `os_nota_fiscal`, e
+> `ck_custo_nota_fiscal` virou o trigger `trg_nota_fiscal_declarada` — um `CHECK` não
+> enxerga outra tabela (ver 1.6.3 e 5.4). Os três parágrafos acima descrevem o desenho
+> ANTERIOR e ficam por registro do raciocínio; o que sobreviveu intacto é
+> `tem_nota_fiscal`, que continua sendo a declaração do Técnico e continua distinguindo
+> "não gerou nota" de "gerou e ninguém preencheu". O custo em si também deixou de ser um
+> par de valores e virou lista de tarefas (1.6.1) — a leitura desta seção 2.3 vale para o
+> **porquê** da separação entre execução e custo, não para a forma das colunas.
 
 ### 2.4 `ENUM` no que é regra de código, tabela no que o cliente cadastra
 
@@ -643,6 +730,16 @@ END $$ LANGUAGE plpgsql;
 ALTER TABLE os_custo ADD CONSTRAINT ck_custo_por_tipo CHECK (
   (tipo = 'maquinario' OR custo_hora_tecnico IS NULL) AND
   (tipo = 'terceiros'  OR descricao_servico_terceiro IS NULL));
+
+-- Revisão 4.3: a mesma regra de hora técnica, agora por TAREFA. os_custo_item
+-- pendura em ordem_servico (não em os_custo) justamente para carregar o par
+-- (id, tipo) e deixar este CHECK ser local, sem trigger -- ver 1.6.1.
+ALTER TABLE os_custo_item ADD CONSTRAINT fk_custo_item_os_tipo
+  FOREIGN KEY (ordem_servico_id, tipo) REFERENCES ordem_servico (id, tipo)
+  ON UPDATE CASCADE;
+
+ALTER TABLE os_custo_item ADD CONSTRAINT ck_custo_item_hora_tecnico CHECK (
+  tipo = 'maquinario' OR custo_hora_tecnico IS NULL);
 ```
 
 > **O que saiu daqui na revisão 4:** a FK composta `(solicitacao_id, tipo)` entre OS e
@@ -695,6 +792,25 @@ CREATE UNIQUE INDEX uq_maquina_serie ON maquina (tenant_id, numero_serie)
 ALTER TABLE os_custo   ADD CONSTRAINT ck_custo_nao_negativo
   CHECK (custo_manutencao >= 0 AND COALESCE(custo_hora_tecnico, 0) >= 0);
 ALTER TABLE preventiva ADD CONSTRAINT ck_intervalo CHECK (intervalo_dias > 0);
+
+-- Revisão 4.3. O espelho do CHECK acima na tabela filha, mais a exigência de a
+-- linha ter nome: uma linha de dinheiro anônima não é conferível contra nota,
+-- que é o ponto inteiro de itemizar. btrim porque `binding:"required"` do Go
+-- passa numa string de espaços.
+ALTER TABLE os_custo_item ADD CONSTRAINT ck_custo_item_valores
+  CHECK (custo_manutencao >= 0 AND COALESCE(custo_hora_tecnico, 0) >= 0);
+ALTER TABLE os_custo_item ADD CONSTRAINT ck_custo_item_descricao
+  CHECK (btrim(descricao) <> '');
+ALTER TABLE os_nota_fiscal ADD CONSTRAINT ck_nota_fiscal_numero
+  CHECK (btrim(numero) <> '');
+
+-- NULLS NOT DISTINCT (Postgres 15+) porque série é opcional: no UNIQUE comum
+-- NULL nunca colide com NULL, e a mesma nota sem série entraria quantas vezes o
+-- Administrador clicasse em salvar. Violação vira 409, não 500 -- o `case` de
+-- ErrDadoDuplicado entrou no controller junto, porque até a 000011 esta rota era
+-- um UPDATE 1:1 e não tinha como colidir.
+ALTER TABLE os_nota_fiscal ADD CONSTRAINT uq_nota_fiscal_os
+  UNIQUE NULLS NOT DISTINCT (ordem_servico_id, numero, serie);
 ```
 
 **Coerência do `tenant_id` denormalizado.** O banco precisa impedir que uma máquina do tenant A
@@ -727,6 +843,17 @@ transação:
    justamente a ausência de linhas em `usuario_escopo`; um escopo cadastrado seria uma contradição
    silenciosa.
 
+E uma terceira, da revisão 4.3, que precisa de trigger mas **não** deferida:
+
+3. **Nota fiscal só entra em OS declarada como tendo nota.** A declaração está em
+   `os_custo.tem_nota_fiscal` e a nota em `os_nota_fiscal`, e um `CHECK` não enxerga outra
+   tabela. Aqui a regra é "o filho NÃO pode existir" (e não "TEM que existir", como a foto da
+   solicitação), então o pai já está gravado quando o filho chega: `BEFORE INSERT OR UPDATE`
+   comum resolve. Só essa direção é travada — declarar que teve e ainda não preencher é
+   estado legítimo. A direção inversa, desmarcar a declaração com nota já cadastrada, é do
+   service, que apaga as notas na mesma escrita: um trigger ali teria que decidir sozinho
+   entre apagar o dado do usuário e recusar a edição, e nenhuma das duas é decisão de banco.
+
 ### 5.5 Índices e isolamento
 
 **Índices:** todas as FKs, mais `(tecnico_id, status)` em `ordem_servico` — a consulta exata do
@@ -756,12 +883,16 @@ garantindo o corte no banco e não só na aplicação.
    `bucket`: o bucket de cada tipo de anexo é fixo no código que registra a rota, não varia por
    linha. Falta política de retenção: foto de OS de 2019 continua ocupando espaço — ainda em aberto.
 
-2. **Histórico de lançamento de custo.** *(mais urgente desde a revisão 4)*
+2. **Histórico de lançamento de custo.** *(mais urgente desde a revisão 4, e ainda mais desde a 4.3)*
    `os_custo` é 1:1 com a OS e guarda quem lançou e quando — mas se o Administrador corrigir o valor,
    o anterior se perde. Isso deixou de ser hipótese: agora a linha **nasce** com o valor do Técnico e
    o fluxo normal é o Administrador editá-la contra a nota fiscal (seção 2.3), então o valor
    original é sobrescrito em toda OS terceirizada. Se o número for para relatório contábil, vale
    `os_custo_historico` em append-only, com a linha vigente sendo a mais recente.
+   ⚠️ **A revisão 4.3 amplia o buraco**: como a edição do Administrador é substituição do
+   conjunto (`DELETE` + regrava), o que se perde deixou de ser um número e passou a ser a
+   **itemização inteira** que o Técnico escreveu — quais tarefas ele executou e quanto cada
+   uma custou. Há um marcador `ponytail:` em `CorrigirCusto` apontando para este item.
 
 3. ~~**`setor` dinâmico vs. enum estático.**~~ **Resolvido na revisão 3.**
    O banco sempre modelou setor como tabela — era o front que ainda validava `setor` contra a união
