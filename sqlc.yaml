@@ -51,4 +51,10 @@ sql:
           - column: "*.custo_hora_tecnico"
             go_type: "github.com/jackc/pgx/v5/pgtype.Float8"
           - column: "*.custo_manutencao"
-            go_type: "github.com/jackc/pgx/v5/pgtype.Float8" 
+            go_type: "github.com/jackc/pgx/v5/pgtype.Float8"
+          # os_custo_item (migration 000012) reusa os DOIS nomes de coluna de
+          # os_custo, então os overrides acima já a cobrem: eles casam por NOME
+          # de coluna, em qualquer tabela. Foi um dos ganhos de a linha ter
+          # virado uma TAREFA com os dois valores em vez de um par
+          # categoria+valor -- uma coluna chamada `valor` exigiria um override
+          # novo para a mesma grandeza, com a mesma nota explicando o porquê.

@@ -169,6 +169,28 @@ type Querier interface {
 	// Chamada em loop pelo service, na mesma transação da solicitação: sem
 	// solicitação persistida ainda não há id para pendurar o impacto.
 	CriarImpactoSolicitacao(ctx context.Context, arg CriarImpactoSolicitacaoParams) error
+	// Uma TAREFA da OS, com o custo de material e o de mão de obra dela (migration
+	// 000012). Chamada em laço por gravarItensDeCusto, sempre depois de
+	// DeletarItensDeCustoDaOrdemServico na mesma transação -- substitui o conjunto
+	// inteiro, não faz merge incremental, mesmo padrão de gravarPreventivas e
+	// gravarEscopo.
+	//
+	// Uma linha por chamada, e não um INSERT em lote com unnest, por dois motivos.
+	// O que decide: o sqlc não resolve `unnest(a, b, c)` de múltiplos argumentos e
+	// para com "function unnest(unknown, unknown, unknown) does not exist", mesmo
+	// com os casts explícitos nos parâmetros. O que confirma: gravarPreventivas já
+	// grava em laço dentro da transação, e a lista aqui tem o tamanho de um
+	// formulário, não de uma importação.
+	//
+	// custo_hora_tecnico é `narg` porque é nulo em duas situações diferentes e as
+	// duas são legítimas: fora de 'maquinario' a coluna é PROIBIDA
+	// (ck_custo_item_hora_tecnico), e dentro dele a tarefa pode simplesmente não
+	// ter cobrado mão de obra. Quem distingue é o service.
+	//
+	// btrim na descrição espelha ck_custo_item_descricao. O service já recusa o
+	// vazio antes, com mensagem própria; aqui é só para não gravar a margem que o
+	// usuário digitou sem querer.
+	CriarItemDeCusto(ctx context.Context, arg CriarItemDeCustoParams) error
 	// Loja é a unidade/filial dentro do tenant. Exclusão é sempre soft delete
 	// (ativa = false) -- ver "Soft delete" em docs/modelagem-banco-dados.md:
 	// máquina, setor e todo o histórico de OS apontam pra loja, então apagar de
@@ -214,6 +236,20 @@ type Querier interface {
 	// o banco já recusa sozinho um setor de outro tenant, sem checagem extra
 	// aqui.
 	CriarMaquina(ctx context.Context, arg CriarMaquinaParams) (Maquina, error)
+	// Espelho de CriarItemDeCusto para os documentos que o Administrador registra
+	// na conferência (migration 000012). Mesma substituição de conjunto, sempre
+	// depois de DeletarNotasFiscaisDaOrdemServico, e em laço pelo mesmo motivo.
+	//
+	// ⚠️ NULLIF na série porque ela é opcional e o React Hook Form manda string
+	// vazia no campo que ninguém preencheu -- mesmo papel do textoOuNil do
+	// service. Sem ele o banco guardaria '' numa coluna nullable, e aí
+	// uq_nota_fiscal_os passaria a tratar "sem série" e "série vazia" como dois
+	// documentos diferentes, deixando a duplicata entrar.
+	//
+	// O trigger trg_nota_fiscal_declarada barra a escrita se a OS não estiver com
+	// tem_nota_fiscal. O service confere antes para a mensagem sair nomeando o
+	// campo, mesmo padrão dos CHECKs espelhados em Go.
+	CriarNotaFiscal(ctx context.Context, arg CriarNotaFiscalParams) error
 	// Insere a OS da preventiva vencida, na mesma transação de
 	// CriarSolicitacaoPreventiva e AvancarProximaData. É o irmão automático de
 	// CriarOrdemServicoDeSolicitacao: o mesmo INSERT, sem os campos que só um
@@ -417,6 +453,18 @@ type Querier interface {
 	// vinculado ao usuário (solicitante/técnico/gestor).
 	CriarUsuario(ctx context.Context, arg CriarUsuarioParams) (Usuario, error)
 	DeletarEscoposPorUsuario(ctx context.Context, usuarioID int64) error
+	// DELETE de verdade, não soft delete, e é a única exceção do projeto junto com
+	// a irmã de nota fiscal. A regra "exclusão é sempre soft delete" existe para
+	// não perder histórico de entidade que alguém consultou; item de custo não é
+	// entidade, é uma linha de composição de um valor que está sendo reescrito
+	// inteiro na mesma transação. Um `ativo` aqui obrigaria toda soma a filtrar
+	// por ele e deixaria a listagem mostrando peça que o Administrador tirou.
+	DeletarItensDeCustoDaOrdemServico(ctx context.Context, arg DeletarItensDeCustoDaOrdemServicoParams) error
+	// Mesmo raciocínio do DELETE de itens acima. Serve dois casos: a substituição
+	// do conjunto em CorrigirCusto e o Administrador DESMARCANDO tem_nota_fiscal,
+	// que tem que apagar as notas na mesma escrita -- é a direção que o trigger
+	// não cobre de propósito (ver a nota na migration 000012).
+	DeletarNotasFiscaisDaOrdemServico(ctx context.Context, arg DeletarNotasFiscaisDaOrdemServicoParams) error
 	// Roda antes de DeletarEscoposPorUsuario -- não há ON DELETE CASCADE entre
 	// as duas tabelas.
 	DeletarSetoresDosEscoposPorUsuario(ctx context.Context, usuarioID int64) error
@@ -802,6 +850,21 @@ type Querier interface {
 	// mesmo padrão de ObterEscoposSessaoPorUsuarios (usuario_escopo.sql): quem
 	// lista usa a plural para não fazer N+1, uma query por solicitação da página.
 	ObterImpactosDasSolicitacoes(ctx context.Context, solicitacaoIds []int64) ([]SolicitacaoImpacto, error)
+	// Itens de uma página inteira de OS numa ida só, mesmo desenho de
+	// ObterPausasDasOrdensServico: 1:N no JOIN duplicaria a OS por item, e uma
+	// query por OS seria N+1.
+	//
+	// Sem tenant_id no WHERE pelo mesmo motivo da query de pausas, apesar de a
+	// coluna existir aqui: os ids sempre vêm de ListarOrdensServico, que já
+	// recortou por tenant E por escopo. Nunca chame com ids de outra origem.
+	//
+	// ORDER BY id: é a ordem em que o Técnico digitou, e é ela que a tela repete.
+	// Ordenar por valor embaralharia a lista a cada leitura.
+	//
+	// ⚠️ As duas colunas de dinheiro saem CRUAS, sem `::float8`: o override do
+	// sqlc.yaml casa por NOME DE COLUNA, e o cast quebraria o vínculo -- mesma
+	// armadilha documentada em ListarOrdensServico.
+	ObterItensDeCustoDasOrdensServico(ctx context.Context, ordensServicoIds []int64) ([]ObterItensDeCustoDasOrdensServicoRow, error)
 	// Igual a ObterLojaPorID, com FOR SHARE: usada dentro da transação que cria
 	// setor, para a loja não ser desativada entre o cheque de `ativa` e o INSERT.
 	// FOR SHARE e não FOR UPDATE porque ninguém aqui altera a loja -- só precisa
@@ -826,6 +889,9 @@ type Querier interface {
 	// custo e indisponibilidade de máquina de outra loja enumerando id -- mesma
 	// lacuna que ObterSolicitacaoPorID fechou na fase 1.
 	ObterMaquinaPorID(ctx context.Context, arg ObterMaquinaPorIDParams) (ObterMaquinaPorIDRow, error)
+	// Espelho de ObterItensDeCustoDasOrdensServico; ver as notas de lá sobre a
+	// ausência de tenant_id e sobre a ordenação.
+	ObterNotasFiscaisDasOrdensServico(ctx context.Context, ordensServicoIds []int64) ([]ObterNotasFiscaisDasOrdensServicoRow, error)
 	// ==========================================================================
 	// Ordem de serviço -- leitura e ciclo de vida.
 	//

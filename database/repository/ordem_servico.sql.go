@@ -72,22 +72,18 @@ const atualizarCusto = `-- name: AtualizarCusto :one
 UPDATE os_custo
 SET custo_hora_tecnico = $1,
     custo_manutencao = $2,
-    numero_nota_fiscal = $3,
-    serie_nota_fiscal = $4,
-    descricao_servico_terceiro = $5,
-    tem_nota_fiscal = $6,
-    lancado_por_id = $7,
+    descricao_servico_terceiro = $3,
+    tem_nota_fiscal = $4,
+    lancado_por_id = $5,
     lancado_em = now(),
     custo_revisado_em = now()
-WHERE tenant_id = $8 AND ordem_servico_id = $9
-RETURNING id, tenant_id, ordem_servico_id, tipo, custo_hora_tecnico, custo_manutencao, numero_nota_fiscal, serie_nota_fiscal, descricao_servico_terceiro, lancado_por_id, lancado_em, custo_revisado_em, tem_nota_fiscal
+WHERE tenant_id = $6 AND ordem_servico_id = $7
+RETURNING id, tenant_id, ordem_servico_id, tipo, custo_hora_tecnico, custo_manutencao, descricao_servico_terceiro, lancado_por_id, lancado_em, custo_revisado_em, tem_nota_fiscal
 `
 
 type AtualizarCustoParams struct {
 	CustoHoraTecnico         pgtype.Float8
 	CustoManutencao          pgtype.Float8
-	NumeroNotaFiscal         *string
-	SerieNotaFiscal          *string
 	DescricaoServicoTerceiro *string
 	TemNotaFiscal            bool
 	LancadoPorID             int64
@@ -127,8 +123,6 @@ func (q *Queries) AtualizarCusto(ctx context.Context, arg AtualizarCustoParams) 
 	row := q.db.QueryRow(ctx, atualizarCusto,
 		arg.CustoHoraTecnico,
 		arg.CustoManutencao,
-		arg.NumeroNotaFiscal,
-		arg.SerieNotaFiscal,
 		arg.DescricaoServicoTerceiro,
 		arg.TemNotaFiscal,
 		arg.LancadoPorID,
@@ -143,8 +137,6 @@ func (q *Queries) AtualizarCusto(ctx context.Context, arg AtualizarCustoParams) 
 		&i.Tipo,
 		&i.CustoHoraTecnico,
 		&i.CustoManutencao,
-		&i.NumeroNotaFiscal,
-		&i.SerieNotaFiscal,
 		&i.DescricaoServicoTerceiro,
 		&i.LancadoPorID,
 		&i.LancadoEm,
@@ -163,7 +155,7 @@ INSERT INTO os_custo (
     $4, $5, $6,
     $7
 )
-RETURNING id, tenant_id, ordem_servico_id, tipo, custo_hora_tecnico, custo_manutencao, numero_nota_fiscal, serie_nota_fiscal, descricao_servico_terceiro, lancado_por_id, lancado_em, custo_revisado_em, tem_nota_fiscal
+RETURNING id, tenant_id, ordem_servico_id, tipo, custo_hora_tecnico, custo_manutencao, descricao_servico_terceiro, lancado_por_id, lancado_em, custo_revisado_em, tem_nota_fiscal
 `
 
 type CriarCustoParams struct {
@@ -215,8 +207,6 @@ func (q *Queries) CriarCusto(ctx context.Context, arg CriarCustoParams) (OsCusto
 		&i.Tipo,
 		&i.CustoHoraTecnico,
 		&i.CustoManutencao,
-		&i.NumeroNotaFiscal,
-		&i.SerieNotaFiscal,
 		&i.DescricaoServicoTerceiro,
 		&i.LancadoPorID,
 		&i.LancadoEm,
@@ -282,6 +272,95 @@ func (q *Queries) CriarEncerramento(ctx context.Context, arg CriarEncerramentoPa
 	return i, err
 }
 
+const criarItemDeCusto = `-- name: CriarItemDeCusto :exec
+INSERT INTO os_custo_item (
+    tenant_id, ordem_servico_id, tipo, descricao, custo_manutencao, custo_hora_tecnico
+) VALUES (
+    $1, $2, $3,
+    btrim($4), $5, $6
+)
+`
+
+type CriarItemDeCustoParams struct {
+	TenantID         int64
+	OrdemServicoID   int64
+	Tipo             TipoOs
+	Descricao        string
+	CustoManutencao  pgtype.Float8
+	CustoHoraTecnico pgtype.Float8
+}
+
+// Uma TAREFA da OS, com o custo de material e o de mão de obra dela (migration
+// 000012). Chamada em laço por gravarItensDeCusto, sempre depois de
+// DeletarItensDeCustoDaOrdemServico na mesma transação -- substitui o conjunto
+// inteiro, não faz merge incremental, mesmo padrão de gravarPreventivas e
+// gravarEscopo.
+//
+// Uma linha por chamada, e não um INSERT em lote com unnest, por dois motivos.
+// O que decide: o sqlc não resolve `unnest(a, b, c)` de múltiplos argumentos e
+// para com "function unnest(unknown, unknown, unknown) does not exist", mesmo
+// com os casts explícitos nos parâmetros. O que confirma: gravarPreventivas já
+// grava em laço dentro da transação, e a lista aqui tem o tamanho de um
+// formulário, não de uma importação.
+//
+// custo_hora_tecnico é `narg` porque é nulo em duas situações diferentes e as
+// duas são legítimas: fora de 'maquinario' a coluna é PROIBIDA
+// (ck_custo_item_hora_tecnico), e dentro dele a tarefa pode simplesmente não
+// ter cobrado mão de obra. Quem distingue é o service.
+//
+// btrim na descrição espelha ck_custo_item_descricao. O service já recusa o
+// vazio antes, com mensagem própria; aqui é só para não gravar a margem que o
+// usuário digitou sem querer.
+func (q *Queries) CriarItemDeCusto(ctx context.Context, arg CriarItemDeCustoParams) error {
+	_, err := q.db.Exec(ctx, criarItemDeCusto,
+		arg.TenantID,
+		arg.OrdemServicoID,
+		arg.Tipo,
+		arg.Descricao,
+		arg.CustoManutencao,
+		arg.CustoHoraTecnico,
+	)
+	return err
+}
+
+const criarNotaFiscal = `-- name: CriarNotaFiscal :exec
+INSERT INTO os_nota_fiscal (tenant_id, ordem_servico_id, numero, serie)
+VALUES (
+    $1, $2,
+    btrim($3), NULLIF(btrim($4), '')
+)
+`
+
+type CriarNotaFiscalParams struct {
+	TenantID       int64
+	OrdemServicoID int64
+	Numero         string
+	Serie          string
+}
+
+// Espelho de CriarItemDeCusto para os documentos que o Administrador registra
+// na conferência (migration 000012). Mesma substituição de conjunto, sempre
+// depois de DeletarNotasFiscaisDaOrdemServico, e em laço pelo mesmo motivo.
+//
+// ⚠️ NULLIF na série porque ela é opcional e o React Hook Form manda string
+// vazia no campo que ninguém preencheu -- mesmo papel do textoOuNil do
+// service. Sem ele o banco guardaria ” numa coluna nullable, e aí
+// uq_nota_fiscal_os passaria a tratar "sem série" e "série vazia" como dois
+// documentos diferentes, deixando a duplicata entrar.
+//
+// O trigger trg_nota_fiscal_declarada barra a escrita se a OS não estiver com
+// tem_nota_fiscal. O service confere antes para a mensagem sair nomeando o
+// campo, mesmo padrão dos CHECKs espelhados em Go.
+func (q *Queries) CriarNotaFiscal(ctx context.Context, arg CriarNotaFiscalParams) error {
+	_, err := q.db.Exec(ctx, criarNotaFiscal,
+		arg.TenantID,
+		arg.OrdemServicoID,
+		arg.Numero,
+		arg.Serie,
+	)
+	return err
+}
+
 const criarPausa = `-- name: CriarPausa :one
 INSERT INTO os_pausa (ordem_servico_id, status_anterior, motivo)
 VALUES ($1, $2, $3)
@@ -313,6 +392,46 @@ func (q *Queries) CriarPausa(ctx context.Context, arg CriarPausaParams) (OsPausa
 		&i.RetomadaEm,
 	)
 	return i, err
+}
+
+const deletarItensDeCustoDaOrdemServico = `-- name: DeletarItensDeCustoDaOrdemServico :exec
+DELETE FROM os_custo_item
+WHERE tenant_id = $1 AND ordem_servico_id = $2
+`
+
+type DeletarItensDeCustoDaOrdemServicoParams struct {
+	TenantID       int64
+	OrdemServicoID int64
+}
+
+// DELETE de verdade, não soft delete, e é a única exceção do projeto junto com
+// a irmã de nota fiscal. A regra "exclusão é sempre soft delete" existe para
+// não perder histórico de entidade que alguém consultou; item de custo não é
+// entidade, é uma linha de composição de um valor que está sendo reescrito
+// inteiro na mesma transação. Um `ativo` aqui obrigaria toda soma a filtrar
+// por ele e deixaria a listagem mostrando peça que o Administrador tirou.
+func (q *Queries) DeletarItensDeCustoDaOrdemServico(ctx context.Context, arg DeletarItensDeCustoDaOrdemServicoParams) error {
+	_, err := q.db.Exec(ctx, deletarItensDeCustoDaOrdemServico, arg.TenantID, arg.OrdemServicoID)
+	return err
+}
+
+const deletarNotasFiscaisDaOrdemServico = `-- name: DeletarNotasFiscaisDaOrdemServico :exec
+DELETE FROM os_nota_fiscal
+WHERE tenant_id = $1 AND ordem_servico_id = $2
+`
+
+type DeletarNotasFiscaisDaOrdemServicoParams struct {
+	TenantID       int64
+	OrdemServicoID int64
+}
+
+// Mesmo raciocínio do DELETE de itens acima. Serve dois casos: a substituição
+// do conjunto em CorrigirCusto e o Administrador DESMARCANDO tem_nota_fiscal,
+// que tem que apagar as notas na mesma escrita -- é a direção que o trigger
+// não cobre de propósito (ver a nota na migration 000012).
+func (q *Queries) DeletarNotasFiscaisDaOrdemServico(ctx context.Context, arg DeletarNotasFiscaisDaOrdemServicoParams) error {
+	_, err := q.db.Exec(ctx, deletarNotasFiscaisDaOrdemServico, arg.TenantID, arg.OrdemServicoID)
+	return err
 }
 
 const encerrarOrdemServico = `-- name: EncerrarOrdemServico :one
@@ -547,8 +666,6 @@ SELECT
     h.horas_parada,
     c.custo_hora_tecnico,
     c.custo_manutencao,
-    c.numero_nota_fiscal,
-    c.serie_nota_fiscal,
     c.descricao_servico_terceiro,
     c.tem_nota_fiscal,
     c.lancado_em,
@@ -664,8 +781,6 @@ type ListarOrdensServicoRow struct {
 	HorasParada              pgtype.Float8
 	CustoHoraTecnico         pgtype.Float8
 	CustoManutencao          pgtype.Float8
-	NumeroNotaFiscal         *string
-	SerieNotaFiscal          *string
 	DescricaoServicoTerceiro *string
 	TemNotaFiscal            *bool
 	LancadoEm                pgtype.Timestamptz
@@ -800,13 +915,107 @@ func (q *Queries) ListarOrdensServico(ctx context.Context, arg ListarOrdensServi
 			&i.HorasParada,
 			&i.CustoHoraTecnico,
 			&i.CustoManutencao,
-			&i.NumeroNotaFiscal,
-			&i.SerieNotaFiscal,
 			&i.DescricaoServicoTerceiro,
 			&i.TemNotaFiscal,
 			&i.LancadoEm,
 			&i.CustoRevisadoEm,
 			&i.LancadoPorNome,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const obterItensDeCustoDasOrdensServico = `-- name: ObterItensDeCustoDasOrdensServico :many
+SELECT id, ordem_servico_id, descricao, custo_manutencao, custo_hora_tecnico
+FROM os_custo_item
+WHERE ordem_servico_id = ANY($1::bigint[])
+ORDER BY ordem_servico_id, id
+`
+
+type ObterItensDeCustoDasOrdensServicoRow struct {
+	ID               int64
+	OrdemServicoID   int64
+	Descricao        string
+	CustoManutencao  pgtype.Float8
+	CustoHoraTecnico pgtype.Float8
+}
+
+// Itens de uma página inteira de OS numa ida só, mesmo desenho de
+// ObterPausasDasOrdensServico: 1:N no JOIN duplicaria a OS por item, e uma
+// query por OS seria N+1.
+//
+// Sem tenant_id no WHERE pelo mesmo motivo da query de pausas, apesar de a
+// coluna existir aqui: os ids sempre vêm de ListarOrdensServico, que já
+// recortou por tenant E por escopo. Nunca chame com ids de outra origem.
+//
+// ORDER BY id: é a ordem em que o Técnico digitou, e é ela que a tela repete.
+// Ordenar por valor embaralharia a lista a cada leitura.
+//
+// ⚠️ As duas colunas de dinheiro saem CRUAS, sem `::float8`: o override do
+// sqlc.yaml casa por NOME DE COLUNA, e o cast quebraria o vínculo -- mesma
+// armadilha documentada em ListarOrdensServico.
+func (q *Queries) ObterItensDeCustoDasOrdensServico(ctx context.Context, ordensServicoIds []int64) ([]ObterItensDeCustoDasOrdensServicoRow, error) {
+	rows, err := q.db.Query(ctx, obterItensDeCustoDasOrdensServico, ordensServicoIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ObterItensDeCustoDasOrdensServicoRow
+	for rows.Next() {
+		var i ObterItensDeCustoDasOrdensServicoRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.OrdemServicoID,
+			&i.Descricao,
+			&i.CustoManutencao,
+			&i.CustoHoraTecnico,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const obterNotasFiscaisDasOrdensServico = `-- name: ObterNotasFiscaisDasOrdensServico :many
+SELECT id, ordem_servico_id, numero, serie
+FROM os_nota_fiscal
+WHERE ordem_servico_id = ANY($1::bigint[])
+ORDER BY ordem_servico_id, id
+`
+
+type ObterNotasFiscaisDasOrdensServicoRow struct {
+	ID             int64
+	OrdemServicoID int64
+	Numero         string
+	Serie          *string
+}
+
+// Espelho de ObterItensDeCustoDasOrdensServico; ver as notas de lá sobre a
+// ausência de tenant_id e sobre a ordenação.
+func (q *Queries) ObterNotasFiscaisDasOrdensServico(ctx context.Context, ordensServicoIds []int64) ([]ObterNotasFiscaisDasOrdensServicoRow, error) {
+	rows, err := q.db.Query(ctx, obterNotasFiscaisDasOrdensServico, ordensServicoIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ObterNotasFiscaisDasOrdensServicoRow
+	for rows.Next() {
+		var i ObterNotasFiscaisDasOrdensServicoRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.OrdemServicoID,
+			&i.Numero,
+			&i.Serie,
 		); err != nil {
 			return nil, err
 		}

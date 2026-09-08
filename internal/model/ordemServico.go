@@ -47,11 +47,20 @@ type EncerramentoOrdemServico struct {
 // nota" e "nota ainda não preenchida" seriam indistinguíveis. Sem `omitempty`:
 // `false` é resposta, não ausência de dado, e some com omitempty.
 //
-// NumeroNotaFiscal/SerieNotaFiscal valem em QUALQUER tipo desde a migration
-// 000010 (maquinário troca peça comprada com nota, reparo consome material
-// com nota), e só existem quando TemNotaFiscal é true (ck_custo_nota_fiscal).
-// DescricaoServicoTerceiro é a que continua presa a 'terceiros': ela conta o
-// que a empresa externa fez, e o que o Técnico fez já mora em
+// Itens é a discriminação do custo, uma linha por TAREFA (migration 000012):
+// "trocar o rolamento, 180 de peça e 40 de mão de obra" em vez de um "420" que
+// ninguém consegue conferir contra nota nenhuma. CustoManutencao e
+// CustoHoraTecnico continuam existindo e são a SOMA da coluna correspondente
+// dos itens -- ver a nota longa na migration sobre por que o total continua
+// guardado.
+//
+// NotasFiscais substitui o par NumeroNotaFiscal/SerieNotaFiscal, que era
+// escalar e não comportava a segunda nota (duas peças compradas em lojas
+// diferentes geram dois documentos). Lista vazia com TemNotaFiscal true é
+// estado legítimo e frequente: é a fila de conferência do Administrador.
+//
+// DescricaoServicoTerceiro continua presa a 'terceiros': ela conta o que a
+// empresa externa fez, e o que o Técnico fez já mora em
 // EncerramentoOrdemServico.Solucao, que existe para todo tipo.
 //
 // CustoTotal é derivado, somado em MontarOrdemServico -- ver a nota lá.
@@ -62,16 +71,49 @@ type EncerramentoOrdemServico struct {
 // "Revisadas" em Custos Pendentes -- sem `omitempty` porque o front tipa
 // `string | null` e lê o nil.
 type CustoOrdemServico struct {
-	CustoHoraTecnico         *float64       `json:"custoHoraTecnico"`
-	CustoManutencao          float64        `json:"custoManutencao"`
-	CustoTotal               float64        `json:"custoTotal"`
-	TemNotaFiscal            bool           `json:"temNotaFiscal"`
-	NumeroNotaFiscal         *string        `json:"numeroNotaFiscal,omitempty"`
-	SerieNotaFiscal          *string        `json:"serieNotaFiscal,omitempty"`
-	DescricaoServicoTerceiro *string        `json:"descricaoServicoTerceiro,omitempty"`
-	LancadoPorNome           string         `json:"lancadoPorNome"`
-	LancadoEm                *config.DataBr `json:"lancadoEm"`
-	RevisadoEm               *config.DataBr `json:"revisadoEm"`
+	CustoHoraTecnico         *float64                 `json:"custoHoraTecnico"`
+	CustoManutencao          float64                  `json:"custoManutencao"`
+	CustoTotal               float64                  `json:"custoTotal"`
+	Itens                    []ItemCustoOrdemServico  `json:"itens"`
+	TemNotaFiscal            bool                     `json:"temNotaFiscal"`
+	NotasFiscais             []NotaFiscalOrdemServico `json:"notasFiscais"`
+	DescricaoServicoTerceiro *string                  `json:"descricaoServicoTerceiro,omitempty"`
+	LancadoPorNome           string                   `json:"lancadoPorNome"`
+	LancadoEm                *config.DataBr           `json:"lancadoEm"`
+	RevisadoEm               *config.DataBr           `json:"revisadoEm"`
+}
+
+// ItemCustoOrdemServico é uma TAREFA da OS (migration 000012): o que foi feito,
+// com o material que consumiu e a mão de obra que cobrou.
+//
+// CustoHoraTecnico é ponteiro sem `omitempty`, mesmo critério de
+// CustoOrdemServico: nulo é a regra de negócio aparecendo (fora de 'maquinario'
+// a coluna é proibida) ou a tarefa não ter cobrado hora, e nos dois casos o
+// front precisa distinguir de zero.
+//
+// Descricao é obrigatória (ck_custo_item_descricao): uma linha de dinheiro sem
+// nome não é conferível contra nota, que é o ponto inteiro de itemizar.
+type ItemCustoOrdemServico struct {
+	Id               int64    `json:"id"`
+	Descricao        string   `json:"descricao"`
+	CustoManutencao  float64  `json:"custoManutencao"`
+	CustoHoraTecnico *float64 `json:"custoHoraTecnico"`
+}
+
+// NotaFiscalOrdemServico é uma linha de os_nota_fiscal (migration 000012).
+//
+// Serie é ponteiro com `omitempty` porque a coluna é nullable de verdade --
+// nota de consumidor costuma não ter série, e string vazia sairia como `""`
+// parecendo uma série de um caractere em branco. Numero nunca é vazio
+// (ck_nota_fiscal_numero).
+//
+// Sem campo de valor de propósito: o valor já está nos itens, e uma segunda
+// fonte para a mesma grandeza só cria a pergunta de qual das duas está certa
+// no dia em que discordarem.
+type NotaFiscalOrdemServico struct {
+	Id     int64   `json:"id"`
+	Numero string  `json:"numero"`
+	Serie  *string `json:"serie,omitempty"`
 }
 
 // EncerramentoOrdemServicoPayload é o corpo de POST /ordens-servico/:id/encerrar
@@ -80,27 +122,57 @@ type CustoOrdemServico struct {
 // os_encerramento E os_custo na mesma escrita (docs/modelagem, 2.3 revisão 4)
 // -- por isso carrega os dois custos aqui, não só o que o Técnico apurou.
 //
-// `binding:"gte=0"` em vez de `required` nos dois custos: 0 é valor de
-// negócio legítimo (ck_custo_nao_negativo permite, ex. peça em garantia), e
-// `required` do validator rejeita zero em campo numérico -- trataria um
-// conserto de graça como campo vazio.
+// Desde a migration 000012 os custos entram como LISTA, não como dois
+// escalares: uma OS pode ter trocado o rolamento E a fita, e somar as duas de
+// cabeça antes de digitar era o que o Técnico fazia até aqui. Os agregados
+// (custo_manutencao/custo_hora_tecnico) continuam no banco, mas quem os calcula
+// é o service, somando o que gravou -- nunca o cliente.
 //
-// CustoHoraTecnico continua *float64 (ver CustoOrdemServico acima): só existe
-// em 'maquinario' (ck_custo_por_tipo), e o service -- que já leu o tipo da OS
-// -- é quem confere que a presença bate com o tipo, não este binding.
+// `dive` é obrigatório no binding: sem ele o validator olha a slice e ignora as
+// tags de dentro de ItemCustoPayload, e um item com valor negativo ou descrição
+// vazia chegaria intacto no CHECK do banco, virando 422 genérico.
 type EncerramentoOrdemServicoPayload struct {
-	TipoDefeito       string   `json:"tipoDefeito" binding:"required,oneof=Predial Corretiva"`
-	DefeitoConstatado string   `json:"defeitoConstatado" binding:"required"`
-	CausaRaiz         string   `json:"causaRaiz" binding:"required"`
-	Solucao           string   `json:"solucao" binding:"required"`
-	CustoHoraTecnico  *float64 `json:"custoHoraTecnico" binding:"omitempty,gte=0"`
-	CustoManutencao   float64  `json:"custoManutencao" binding:"gte=0"`
+	TipoDefeito       string             `json:"tipoDefeito" binding:"required,oneof=Predial Corretiva"`
+	DefeitoConstatado string             `json:"defeitoConstatado" binding:"required"`
+	CausaRaiz         string             `json:"causaRaiz" binding:"required"`
+	Solucao           string             `json:"solucao" binding:"required"`
+	Itens             []ItemCustoPayload `json:"itens" binding:"required,min=1,dive"`
 	// Declaração do Técnico: houve compra com nota (peça, material, fatura da
 	// empresa) ou foi só mão de obra? Decide se a tela do Administrador vai
 	// pedir número e série depois. Sem binding de propósito: `required` num
 	// bool rejeita `false`, que aqui é a resposta mais comum -- ausente vira
 	// false, o mesmo DEFAULT da coluna.
 	TemNotaFiscal bool `json:"temNotaFiscal"`
+}
+
+// ItemCustoPayload é uma TAREFA enviada pelo Técnico no encerramento e pelo
+// Administrador na correção.
+//
+// `gte=0` em vez de `required` nos dois valores: 0 é valor de negócio legítimo
+// (ck_custo_item_valores permite, ex. peça em garantia), e `required` do
+// validator rejeita zero em campo numérico -- trataria um conserto de graça
+// como campo vazio. Mesma armadilha que os custos escalares já evitavam.
+//
+// CustoHoraTecnico é ponteiro e opcional: uma tarefa pode ser só material (a
+// peça que o Técnico trocou sem cobrar hora). A regra "hora técnica só em
+// maquinário" NÃO cabe no binding: ela depende do tipo da OS, que só o service
+// conhece -- é ele quem responde 400 nomeando o campo, antes de
+// ck_custo_item_hora_tecnico estourar como 422 genérico.
+type ItemCustoPayload struct {
+	Descricao        string   `json:"descricao" binding:"required"`
+	CustoManutencao  float64  `json:"custoManutencao" binding:"gte=0"`
+	CustoHoraTecnico *float64 `json:"custoHoraTecnico" binding:"omitempty,gte=0"`
+}
+
+// NotaFiscalPayload é uma linha da lista de notas que o Administrador registra.
+// Só ele escreve isto: o Técnico apenas DECLARA que houve nota
+// (TemNotaFiscal), sem ter o documento em mãos no momento do encerramento.
+//
+// Serie sem `required` porque nota de consumidor costuma não ter série. Chega
+// como string vazia do formulário e o NULLIF de CriarNotaFiscal converte.
+type NotaFiscalPayload struct {
+	Numero string `json:"numero" binding:"required"`
+	Serie  string `json:"serie"`
 }
 
 // PausaOrdemServicoPayload é o corpo de POST /ordens-servico/:id/pausar --
@@ -129,27 +201,29 @@ type AcionamentoTerceiroPayload struct {
 // (CriarCusto), não uma criação -- por isso o service exige a OS `Concluída`
 // antes de aceitar isto.
 //
-// CustoHoraTecnico e os dois custos seguem o mesmo padrão de
-// EncerramentoOrdemServicoPayload: `gte=0` em vez de `required`, porque 0 é
-// valor de negócio legítimo (ck_custo_nao_negativo permite). A presença de
-// CustoHoraTecnico bater com o tipo da OS ('maquinario' ou não) é checada no
-// service, que já leu o tipo -- não dá pra validar isso só olhando o corpo.
+// Itens segue a mesma forma e as mesmas regras do encerramento (migration
+// 000012): o Administrador recebe a lista do Técnico pré-preenchida na tela e
+// devolve a lista inteira, corrigida. É SUBSTITUIÇÃO do conjunto, não patch --
+// mesmo padrão do escopo em AtualizarUsuario e das preventivas em
+// AtualizarMaquina. `min=1` porque uma OS concluída sem nenhum item de custo
+// seria uma OS sem custo, e esse estado não existe depois do encerramento.
 //
-// Os três campos são opcionais aqui, sem binding, mesmo raciocínio de
-// CustoHoraTecnico: quem decide se o que veio bate com o tipo é o service.
-// Desde a migration 000010 os dois de nota fiscal valem em qualquer tipo; só
-// DescricaoServicoTerceiro segue restrita a 'terceiros' (ck_custo_por_tipo).
+// NotasFiscais é o que só o Administrador escreve, e é a razão de a lista
+// existir: duas peças compradas em lojas diferentes chegam com dois
+// documentos. Sem `min` -- lista vazia é legítima e é o estado inicial de toda
+// OS que o Técnico declarou como tendo nota e ninguém conferiu ainda.
+//
+// DescricaoServicoTerceiro segue restrita a 'terceiros' (ck_custo_por_tipo),
+// sem binding pelo mesmo motivo de sempre: quem sabe o tipo da OS é o service.
 type LancamentoCustoManutencaoPayload struct {
-	CustoHoraTecnico *float64 `json:"custoHoraTecnico" binding:"omitempty,gte=0"`
-	CustoManutencao  float64  `json:"custoManutencao" binding:"gte=0"`
+	Itens []ItemCustoPayload `json:"itens" binding:"required,min=1,dive"`
 	// Repetido aqui, e não só no encerramento, porque o Administrador PODE
 	// corrigir a declaração do Técnico: sem isso, um Técnico que esqueceu de
 	// marcar deixaria a OS sem onde lançar a nota que o Administrador tem na
 	// mão. Mesmo motivo de não ter binding: `false` é resposta válida.
-	TemNotaFiscal            bool    `json:"temNotaFiscal"`
-	NumeroNotaFiscal         *string `json:"numeroNotaFiscal,omitempty"`
-	SerieNotaFiscal          *string `json:"serieNotaFiscal,omitempty"`
-	DescricaoServicoTerceiro *string `json:"descricaoServicoTerceiro,omitempty"`
+	TemNotaFiscal            bool                `json:"temNotaFiscal"`
+	NotasFiscais             []NotaFiscalPayload `json:"notasFiscais" binding:"omitempty,dive"`
+	DescricaoServicoTerceiro *string             `json:"descricaoServicoTerceiro,omitempty"`
 }
 
 // OrdemServico espelha OrdemServico do front (ordemServico.ts) e serve os DOIS
@@ -239,7 +313,16 @@ func floatOuNil(f pgtype.Float8) *float64 {
 // encerramento quando o Técnico encerrou, custo quando alguém lançou. O sinal
 // é uma coluna NOT NULL da tabela filha vindo não-nula -- com LEFT JOIN é
 // exatamente isso que distingue "linha existe" de "linha não existe".
-func MontarOrdemServico(os repository.ListarOrdensServicoRow, pausas []repository.OsPausa) OrdemServico {
+// Itens e notas entram pelo mesmo caminho das pausas e pelo mesmo motivo:
+// desde a migration 000012 as duas são 1:N e um JOIN duplicaria a OS por
+// linha. O service busca as três em lote e agrupa por ordem_servico_id antes
+// de chamar aqui.
+func MontarOrdemServico(
+	os repository.ListarOrdensServicoRow,
+	pausas []repository.OsPausa,
+	itens []repository.ObterItensDeCustoDasOrdensServicoRow,
+	notas []repository.ObterNotasFiscaisDasOrdensServicoRow,
+) OrdemServico {
 
 	ordem := OrdemServico{
 		Id:                      os.ID,
@@ -301,15 +384,41 @@ func MontarOrdemServico(os repository.ListarOrdensServicoRow, pausas []repositor
 		if horaTecnico != nil {
 			total += *horaTecnico
 		}
+		// Slices não-nil mesmo vazias: o front tipa `T[]` e faz `.map` direto --
+		// `null` quebraria a tela. Mesma regra das listagens do resto da API.
+		itensCusto := make([]ItemCustoOrdemServico, 0, len(itens))
+		for _, i := range itens {
+			itensCusto = append(itensCusto, ItemCustoOrdemServico{
+				Id:        i.ID,
+				Descricao: i.Descricao,
+				// custo_manutencao é NOT NULL em os_custo_item; pgtype.Float8
+				// aqui é só consequência do override do sqlc.yaml, `.Valid` é
+				// sempre true. O de hora técnica, esse sim, é nulo de verdade:
+				// fora de 'maquinario' a coluna é proibida, e dentro dele a
+				// tarefa pode não ter cobrado mão de obra.
+				CustoManutencao:  i.CustoManutencao.Float64,
+				CustoHoraTecnico: floatOuNil(i.CustoHoraTecnico),
+			})
+		}
+
+		notasFiscais := make([]NotaFiscalOrdemServico, 0, len(notas))
+		for _, n := range notas {
+			notasFiscais = append(notasFiscais, NotaFiscalOrdemServico{
+				Id:     n.ID,
+				Numero: n.Numero,
+				Serie:  n.Serie,
+			})
+		}
+
 		ordem.Custo = &CustoOrdemServico{
 			CustoHoraTecnico: horaTecnico,
 			CustoManutencao:  os.CustoManutencao.Float64,
 			CustoTotal:       total,
+			Itens:            itensCusto,
 			// *bool na linha porque os_custo entra por LEFT JOIN; nil só
 			// acontece em OS sem custo, e aí nem chegamos aqui.
 			TemNotaFiscal:            os.TemNotaFiscal != nil && *os.TemNotaFiscal,
-			NumeroNotaFiscal:         os.NumeroNotaFiscal,
-			SerieNotaFiscal:          os.SerieNotaFiscal,
+			NotasFiscais:             notasFiscais,
 			DescricaoServicoTerceiro: os.DescricaoServicoTerceiro,
 			LancadoPorNome:           textoOuVazio(os.LancadoPorNome),
 			LancadoEm:                dataBrOuNil(os.LancadoEm),

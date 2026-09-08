@@ -25,28 +25,83 @@ responde só zeros" em "Indicadores de máquina" abaixo deixou de valer).
 nasce em `Encerrar`, junto do `os_encerramento` (o Técnico já lança os dois custos ao
 fechar a OS). O Administrador só ajusta depois, tipicamente conferindo o Custo de
 Manutenção contra a nota fiscal de uma OS terceirizada. Por isso o service exige a OS já
-`Concluída` (senão não existe `os_custo` pra atualizar) e repete `ck_custo_por_tipo` em
-Go — `custoHoraTecnico` só em `maquinario`, `descricaoServicoTerceiro` só em `terceiros` —
-pelo mesmo motivo de `Encerrar`: sem isso, o erro que sobe é o `CHECK` do banco
-estourando, genérico, em vez de dizer qual campo está errado. **`numeroNotaFiscal` e
-`serieNotaFiscal` ficaram de fora dessa restrição na migration `000010`**: valem em
-qualquer tipo (maquinário troca peça comprada com nota, reparo consome material com
-nota), e o Administrador precisa registrar o documento que embasa o custo em todas.
+`Concluída` (senão não existe `os_custo` pra atualizar) e repete os CHECKs em Go pelo
+mesmo motivo de `Encerrar`: sem isso, o erro que sobe é o `CHECK` do banco estourando,
+genérico, em vez de dizer qual campo está errado. Sobraram dois — hora técnica só em
+`maquinario` (agora checada **por tarefa**, dentro de `gravarItensDeCusto`) e
+`descricaoServicoTerceiro` só em `terceiros`. **`numeroNotaFiscal` e `serieNotaFiscal`
+saíram dessa restrição na migration `000010`** e, na `000012`, saíram de `os_custo`
+inteiras: valem em qualquer tipo (maquinário troca peça comprada com nota, reparo consome
+material com nota) e agora são **várias** por OS — ver "Custo itemizado" abaixo.
 
 **Quem decide se há nota é o Técnico, no encerramento** (`temNotaFiscal` no
 `EncerramentoOrdemServicoPayload`, migration `000011`): foi ele que executou e sabe se
 houve compra ou se foi só mão de obra. É essa declaração — e não o tipo da OS — que faz
 a tela do Administrador pedir número e série. `CorrigirCusto` aceita o mesmo campo, de
 propósito: se o Técnico esquecer de marcar, o Administrador corrige na hora de lançar,
-senão a nota que ele tem na mão não teria onde entrar. Desmarcar limpa número e série na
-mesma escrita — o service manda `nil` nos dois, senão `ck_custo_nota_fiscal` barraria.
+senão a nota que ele tem na mão não teria onde entrar. Desmarcar **apaga as notas** na
+mesma escrita — `gravarNotasFiscais` roda o `DELETE` e não reinsere nada, que é a direção
+que `trg_nota_fiscal_declarada` não cobre de propósito.
 
 ⚠️ **Custo `0` é valor legítimo em todo o fluxo** (serviço sem peça, conserto em
 garantia): os bindings são `gte=0`, nunca `required` — que rejeitaria zero em campo
-numérico — e `ck_custo_nao_negativo` permite. Uma OS de custo zero conta como
+numérico — e `ck_custo_item_valores` permite. Uma OS de custo zero conta como
 `finalizada` normalmente: o que importa é a linha de `os_custo` existir, não o valor ser
 positivo. `TestEncerrar/encerra com custo zero` e `TestCorrigirCusto/custo zero é aceito
 e volta como zero` existem para travar isso.
+
+## Custo itemizado por tarefa e notas fiscais em lista (migration `000012`)
+
+O caso que quebrou o modelo antigo é trivial e comum: uma serra fita em que o rolamento
+E a fita quebraram. Com `custo_manutencao` sendo uma coluna escalar, o Técnico somava as
+duas peças de cabeça e digitava o total; o Administrador abria Custos Pendentes, via um
+número único e não tinha contra o que conferir. E com `numero_nota_fiscal`/
+`serie_nota_fiscal` sendo um par escalar, a segunda nota — duas compras em lojas
+diferentes — não tinha onde entrar.
+
+Duas tabelas filhas de `ordem_servico`, **sem vínculo entre elas**: `os_custo_item` (o
+que o Técnico lança no encerramento) e `os_nota_fiscal` (o que o Administrador registra
+na conferência). Não há FK ligando item a nota, e isso é decisão: uma nota pode cobrir as
+duas peças e uma peça pode não ter nota nenhuma (estoque próprio), então qualquer
+amarração 1:1 estaria errada metade das vezes. Se a conciliação item a item for pedida um
+dia, ela entra como `os_custo_item.nota_fiscal_id` nullable, sem mexer no que existe.
+
+⚠️ **A linha de custo é uma TAREFA, com os dois valores dela** — descrição, custo de
+manutenção e custo de hora técnica na mesma linha. A primeira versão foi uma linha por
+VALOR, com um ENUM `categoria_custo` dizendo de qual das duas grandezas ela era, e foi
+descartada na tela: para lançar duas peças de uma OS de maquinário o Técnico tinha que
+criar uma terceira linha só para a mão de obra, escolhendo a categoria num select, e o
+formulário o **bloqueava** até ele fazer isso. Duas peças não são duas mãos de obra; duas
+tarefas é que são.
+
+⚠️ **Não existe mais "maquinário exige hora técnica".** A regra vinha de `custoHoraTecnico`
+ser um campo escalar obrigatório; com uma linha por tarefa ela obrigava a inventar uma
+tarefa só para carregar a mão de obra numa OS que trocou duas peças e não cobrou hora
+nenhuma. Sem hora lançada o agregado é **zero** em maquinário (a coluna existe sempre lá) e
+**NULL** nos outros dois tipos, que é o que `ck_custo_por_tipo` exige. `TestEncerrar` e
+`TestCorrigirCusto` têm o subteste "maquinário sem hora técnica soma zero, não é erro".
+
+- **`os_custo` não sumiu, e continua guardando os dois agregados** — eles são a soma da
+  coluna correspondente dos itens, escrita pelo service na mesma transação. Isso contraria
+  a seção 3.2 da modelagem e a exceção está justificada na própria migration: as duas
+  colunas são lidas por `vw_os_finalizada`, `ListarOrdensServico` e
+  `ListarHistoricoOsDaMaquina`, e derivá-las na leitura seria reescrever tudo isso para
+  não mudar nada na tela. A trava contra divergência é o servidor **nunca** aceitar o
+  total do cliente: o payload não carrega total, o service soma o que gravou, e
+  `TestCorrigirCusto/duas notas na mesma OS persistem as duas` confere a soma no fim.
+- **`tem_nota_fiscal` sobreviveu** e não virou "a lista está vazia": lista vazia com a
+  declaração marcada é estado legítimo e frequente — é a própria fila de conferência do
+  Administrador (`000011` existe justamente para separar os dois casos).
+- **`uq_nota_fiscal_os` usa `NULLS NOT DISTINCT`** (Postgres 15+) porque série é opcional
+  e, no `UNIQUE` comum, NULL nunca colide com NULL: a mesma nota sem série entraria
+  quantas vezes o Administrador clicasse em salvar. Violação vira **409**, e o `case` de
+  `ErrDadoDuplicado` no `switch` de `Custo` foi adicionado junto — até a `000011` esta
+  rota era um `UPDATE` 1:1, sem como colidir, e sem esse ramo o Administrador levava 500.
+- ⚠️ **Isso amplia o ponto 2 da seção 6 da modelagem** ("histórico de lançamento de
+  custo"): antes o Administrador sobrescrevia um número, agora substitui a itemização
+  inteira que o Técnico escreveu. Há um marcador `ponytail:` em `CorrigirCusto` apontando
+  para cá. O caminho, quando doer, é `os_custo_historico` em append-only — não um merge
+  incremental.
 
 `AtualizarCusto` grava `os_custo.custo_revisado_em = now()` de quebra: toda passagem do
 Administrador por aqui É a conferência. `GET /ordens-servico` projeta a coluna como
