@@ -45,8 +45,12 @@ type FiltrosOrdemServico struct {
 	Tipo       *string
 	Finalizada *bool
 	LojaId     *int64
-	TecnicoId  *int64
-	Busca      *string
+	// SetorId recorta pelo setor da SOLICITAÇÃO de origem -- a OS não tem setor
+	// próprio (ver a nota da query). Continua sendo filtro do cliente, então
+	// só estreita: setor fora do escopo de quem chama devolve vazio.
+	SetorId   *int64
+	TecnicoId *int64
+	Busca     *string
 }
 
 // ListarOrdensServico é GET /ordens-servico -- um endpoint para os três
@@ -68,6 +72,7 @@ func (s *OrdemServicoService) ListarOrdensServico(ctx context.Context, tenantId,
 		Tipo:            (*repository.TipoOs)(filtros.Tipo),
 		Finalizada:      filtros.Finalizada,
 		LojaID:          filtros.LojaId,
+		SetorID:         filtros.SetorId,
 		TecnicoID:       filtros.TecnicoId,
 		Busca:           filtros.Busca,
 		EscopoUsuarioID: escopoDe(usuarioId, perfil),
@@ -106,8 +111,29 @@ func montarOrdensServicoEmLote(ctx context.Context, repo *repository.Queries, li
 		pausasPorOS[p.OrdemServicoID] = append(pausasPorOS[p.OrdemServicoID], p)
 	}
 
+	// Itens e notas (migration 000012) seguem exatamente o desenho das pausas:
+	// duas idas a mais para a página inteira, nunca uma por OS. Três queries
+	// fixas independem do tamanho da página; N+1 não.
+	itens, err := repo.ObterItensDeCustoDasOrdensServico(ctx, ids)
+	if err != nil {
+		return nil, helper.TraduzErroPostgres(err)
+	}
+	itensPorOS := make(map[int64][]repository.ObterItensDeCustoDasOrdensServicoRow, len(linhas))
+	for _, i := range itens {
+		itensPorOS[i.OrdemServicoID] = append(itensPorOS[i.OrdemServicoID], i)
+	}
+
+	notas, err := repo.ObterNotasFiscaisDasOrdensServico(ctx, ids)
+	if err != nil {
+		return nil, helper.TraduzErroPostgres(err)
+	}
+	notasPorOS := make(map[int64][]repository.ObterNotasFiscaisDasOrdensServicoRow, len(linhas))
+	for _, n := range notas {
+		notasPorOS[n.OrdemServicoID] = append(notasPorOS[n.OrdemServicoID], n)
+	}
+
 	for _, l := range linhas {
-		dados = append(dados, model.MontarOrdemServico(l, pausasPorOS[l.ID]))
+		dados = append(dados, model.MontarOrdemServico(l, pausasPorOS[l.ID], itensPorOS[l.ID], notasPorOS[l.ID]))
 	}
 
 	return dados, nil
@@ -458,16 +484,6 @@ func (s *OrdemServicoService) Encerrar(ctx context.Context, tenantId, atorId, or
 		return model.OrdemServico{}, fmt.Errorf("%w: ordem de serviço já está %s", helper.ErrConflitoIntegridade, atual.Status)
 	}
 
-	// ck_custo_por_tipo espelhado aqui: sem isto o CHECK do banco ainda
-	// barra, mas a mensagem vira "regra de validação do banco violada"
-	// genérica em vez de dizer qual campo está errado.
-	if atual.Tipo == repository.TipoOsMaquinario && payload.CustoHoraTecnico == nil {
-		return model.OrdemServico{}, fmt.Errorf("%w: custoHoraTecnico é obrigatório em OS de maquinário", helper.ErrValidacao)
-	}
-	if atual.Tipo != repository.TipoOsMaquinario && payload.CustoHoraTecnico != nil {
-		return model.OrdemServico{}, fmt.Errorf("%w: custoHoraTecnico só existe em OS de maquinário", helper.ErrValidacao)
-	}
-
 	encerrada, err := repo.EncerrarOrdemServico(ctx, repository.EncerrarOrdemServicoParams{
 		ID:       ordemServicoId,
 		TenantID: tenantId,
@@ -492,18 +508,30 @@ func (s *OrdemServicoService) Encerrar(ctx context.Context, tenantId, atorId, or
 		return model.OrdemServico{}, helper.TraduzErroPostgres(err)
 	}
 
-	var custoHoraTecnico pgtype.Float8
-	if payload.CustoHoraTecnico != nil {
-		custoHoraTecnico = pgtype.Float8{Float64: *payload.CustoHoraTecnico, Valid: true}
+	// Os itens gravam ANTES de os_custo porque é deles que saem os agregados
+	// que os_custo guarda. Sem DELETE antes: a OS acabou de sair de
+	// 'Em Andamento' e nunca teve custo -- CriarCusto logo abaixo falharia em
+	// uq_custo_os se tivesse. Quem substitui conjunto é CorrigirCusto.
+	//
+	// A validação de tipo que ficava aqui (custo hora só em maquinário) mudou
+	// de lugar junto com o campo: agora é item a item, dentro do helper.
+	agregados, err := gravarItensDeCusto(ctx, repo, tenantId, ordemServicoId, encerrada.Tipo, payload.Itens)
+	if err != nil {
+		return model.OrdemServico{}, err
 	}
 
 	if _, err := repo.CriarCusto(ctx, repository.CriarCustoParams{
-		TenantID:         tenantId,
-		OrdemServicoID:   ordemServicoId,
-		Tipo:             encerrada.Tipo,
-		CustoHoraTecnico: custoHoraTecnico,
-		CustoManutencao:  pgtype.Float8{Float64: payload.CustoManutencao, Valid: true},
+		TenantID:       tenantId,
+		OrdemServicoID: ordemServicoId,
+		Tipo:           encerrada.Tipo,
+		// Somados dos itens que acabaram de ser gravados, nunca vindos do
+		// cliente -- é a trava contra o agregado divergir da lista.
+		CustoHoraTecnico: agregados.HoraTecnico,
+		CustoManutencao:  pgtype.Float8{Float64: agregados.Manutencao, Valid: true},
 		LancadoPorID:     atorId,
+		// As notas ficam pro Administrador; aqui o Técnico só declara SE houve
+		// nota. Ver trg_nota_fiscal_declarada e a nota em CriarCusto.
+		TemNotaFiscal: payload.TemNotaFiscal,
 	}); err != nil {
 		return model.OrdemServico{}, helper.TraduzErroPostgres(err)
 	}
@@ -557,34 +585,58 @@ func (s *OrdemServicoService) CorrigirCusto(ctx context.Context, tenantId, atorI
 		return model.OrdemServico{}, fmt.Errorf("%w: ordem de serviço ainda não foi encerrada", helper.ErrConflitoIntegridade)
 	}
 
-	// ck_custo_por_tipo espelhado aqui, mesmo raciocínio de Encerrar: sem
-	// isto o CHECK do banco ainda barra, mas com "regra de validação do
-	// banco violada" genérica em vez de dizer qual campo está errado. Usa
-	// atual.Tipo (não muda depois de Concluída -- ver a nota da query).
-	if atual.Tipo == repository.TipoOsMaquinario && payload.CustoHoraTecnico == nil {
-		return model.OrdemServico{}, fmt.Errorf("%w: custoHoraTecnico é obrigatório em OS de maquinário", helper.ErrValidacao)
-	}
-	if atual.Tipo != repository.TipoOsMaquinario && payload.CustoHoraTecnico != nil {
-		return model.OrdemServico{}, fmt.Errorf("%w: custoHoraTecnico só existe em OS de maquinário", helper.ErrValidacao)
-	}
-	if atual.Tipo != repository.TipoOsTerceiros &&
-		(payload.NumeroNotaFiscal != nil || payload.SerieNotaFiscal != nil || payload.DescricaoServicoTerceiro != nil) {
-		return model.OrdemServico{}, fmt.Errorf("%w: dados de nota fiscal só existem em OS executada por terceiro", helper.ErrValidacao)
+	// O modal do front nasce com defaultValues "" neste campo e o React Hook
+	// Form manda a string vazia mesmo quando ele nem é renderizado -- ver
+	// textoOuNil. Sem aparar aqui, "" conta como "veio dado" na checagem de
+	// tipo abaixo e ainda iria pro banco no lugar de NULL.
+	descricaoServicoTerceiro := textoOuNil(payload.DescricaoServicoTerceiro)
+
+	// A metade de ck_custo_por_tipo que fala de nota fiscal saiu na migration
+	// 000010 e a de hora técnica virou regra por ITEM na 000012 (checada dentro
+	// de gravarItensDeCusto). Sobrou esta: a descrição continua presa a
+	// 'terceiros' -- ela conta o que a EMPRESA EXTERNA fez, e o que o Técnico
+	// fez já mora em os_encerramento.solucao. Usa atual.Tipo, que não muda
+	// depois de Concluída -- ver a nota da query.
+	if atual.Tipo != repository.TipoOsTerceiros && descricaoServicoTerceiro != nil {
+		return model.OrdemServico{}, fmt.Errorf("%w: descrição do serviço só existe em OS executada por terceiro", helper.ErrValidacao)
 	}
 
-	var custoHoraTecnico pgtype.Float8
-	if payload.CustoHoraTecnico != nil {
-		custoHoraTecnico = pgtype.Float8{Float64: *payload.CustoHoraTecnico, Valid: true}
+	// Substituição do conjunto: apaga o que o Técnico lançou e regrava o que o
+	// Administrador devolveu. O modal chega pré-preenchido com a lista atual,
+	// então o que volta É a lista inteira, corrigida -- mesmo padrão do escopo
+	// em AtualizarUsuario e das preventivas em AtualizarMaquina.
+	//
+	// ⚠️ ponytail: a itemização original do Técnico se perde aqui, junto com o
+	// valor que ele lançou. É o ponto 2 da seção 6 de docs/modelagem-banco-dados.md
+	// ("histórico de lançamento de custo"), que esta mudança AMPLIA em vez de
+	// resolver. Quando doer, o caminho é os_custo_historico em append-only, com
+	// a linha vigente sendo a mais recente -- não um merge incremental aqui.
+	if err := repo.DeletarItensDeCustoDaOrdemServico(ctx, repository.DeletarItensDeCustoDaOrdemServicoParams{
+		TenantID:       tenantId,
+		OrdemServicoID: ordemServicoId,
+	}); err != nil {
+		return model.OrdemServico{}, helper.TraduzErroPostgres(err)
 	}
 
+	agregados, err := gravarItensDeCusto(ctx, repo, tenantId, ordemServicoId, atual.Tipo, payload.Itens)
+	if err != nil {
+		return model.OrdemServico{}, err
+	}
+
+	// Depois dos itens e ANTES do AtualizarCusto de propósito não: a ordem
+	// entre notas e agregados é indiferente (tabelas distintas), mas as notas
+	// dependem de tem_nota_fiscal, que só é gravado abaixo. O trigger lê o
+	// valor ATUAL da coluna, então uma OS que o Administrador está marcando
+	// agora ainda tem `false` gravado -- por isso gravarNotasFiscais confere o
+	// payload em Go e é chamado depois do UPDATE.
 	if _, err := repo.AtualizarCusto(ctx, repository.AtualizarCustoParams{
-		TenantID:                 tenantId,
-		OrdemServicoID:           ordemServicoId,
-		CustoHoraTecnico:         custoHoraTecnico,
-		CustoManutencao:          pgtype.Float8{Float64: payload.CustoManutencao, Valid: true},
-		NumeroNotaFiscal:         payload.NumeroNotaFiscal,
-		SerieNotaFiscal:          payload.SerieNotaFiscal,
-		DescricaoServicoTerceiro: payload.DescricaoServicoTerceiro,
+		TenantID:       tenantId,
+		OrdemServicoID: ordemServicoId,
+		// Somados dos itens recém-gravados, nunca vindos do cliente.
+		CustoHoraTecnico:         agregados.HoraTecnico,
+		CustoManutencao:          pgtype.Float8{Float64: agregados.Manutencao, Valid: true},
+		TemNotaFiscal:            payload.TemNotaFiscal,
+		DescricaoServicoTerceiro: descricaoServicoTerceiro,
 		LancadoPorID:             atorId,
 	}); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -596,6 +648,13 @@ func (s *OrdemServicoService) CorrigirCusto(ctx context.Context, tenantId, atorI
 			return model.OrdemServico{}, fmt.Errorf("%w: custo desta ordem de serviço ainda não foi lançado", helper.ErrConflitoIntegridade)
 		}
 		return model.OrdemServico{}, helper.TraduzErroPostgres(err)
+	}
+
+	// Depois do UPDATE acima porque trg_nota_fiscal_declarada lê o valor
+	// GRAVADO de tem_nota_fiscal: chamado antes, o trigger recusaria a nota de
+	// uma OS que o Administrador está justamente marcando nesta requisição.
+	if err := gravarNotasFiscais(ctx, repo, tenantId, ordemServicoId, payload.TemNotaFiscal, payload.NotasFiscais); err != nil {
+		return model.OrdemServico{}, err
 	}
 
 	ordem, err := montarOrdemServicoUnica(ctx, repo, tenantId, ordemServicoId)

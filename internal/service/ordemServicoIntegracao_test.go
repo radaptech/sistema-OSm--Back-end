@@ -13,6 +13,31 @@ import (
 	"github.com/radaptech/sistema-OSm--Back-end/internal/model"
 )
 
+// itensMaquinario e itensSemHoraTecnica montam a lista de TAREFAS da migration
+// 000012 sem repetir a struct em cada subteste. A diferença entre os dois é a
+// única regra que o tipo da OS impõe: fora de 'maquinario' a hora técnica é
+// proibida (ck_custo_item_hora_tecnico), então a tarefa vem só com material.
+//
+// A descrição é obrigatória (ck_custo_item_descricao) e nunca é o assunto dos
+// testes que usam estes helpers -- quem testa a descrição em si passa a lista
+// na mão.
+func itensMaquinario(horaTecnico, manutencao float64) []model.ItemCustoPayload {
+	return []model.ItemCustoPayload{
+		{Descricao: "Troca da peça", CustoManutencao: manutencao, CustoHoraTecnico: &horaTecnico},
+	}
+}
+
+func itensSemHoraTecnica(manutencao float64) []model.ItemCustoPayload {
+	return []model.ItemCustoPayload{
+		{Descricao: "Material", CustoManutencao: manutencao},
+	}
+}
+
+// ptrFloat existe porque ItemCustoPayload.CustoHoraTecnico é *float64 (nulo
+// distingue "não cobrou hora" de "cobrou zero") e Go não deixa tomar endereço
+// de literal.
+func ptrFloat(v float64) *float64 { return &v }
+
 // TestListarOrdensServico cobre a query de GET /ordens-servico antes de
 // existir service em cima dela: o recorte por escopo (que é o WHERE, não o
 // RBAC -- a rota é aberta a gestor/técnico/administrador) e os filtros que os
@@ -676,6 +701,32 @@ func TestListarOrdensServico(t *testing.T) {
 			if len(porId[id].Pausas) != 0 {
 				t.Errorf("OS %d não tem pausa, veio %+v", id, porId[id].Pausas)
 			}
+		}
+	})
+
+	// ?setorId= é filtro do CLIENTE (OS Finalizadas / Custos Pendentes), então
+	// só estreita: nunca devolve OS de setor que o escopo de quem chama não
+	// alcança. O setor sai da solicitação de origem, não da OS.
+	t.Run("filtro por setor estreita, nunca amplia", func(t *testing.T) {
+		ordens := listarPeloService(t, admin, "administrador", FiltrosOrdemServico{SetorId: &setorB})
+		if len(ordens) != 1 || ordens[0].Id != osSerra.Id {
+			t.Errorf("?setorId=B devia trazer só a Serra, veio %d OS", len(ordens))
+		}
+
+		// Combinado com a loja: setorC é de lojaB, então cruzar com lojaA não
+		// pode "puxar" a OS da outra loja de volta.
+		vazio := listarPeloService(t, admin, "administrador", FiltrosOrdemServico{
+			LojaId: &lojaA, SetorId: &setorC,
+		})
+		if len(vazio) != 0 {
+			t.Errorf("setor de outra loja devia dar vazio, veio %d OS", len(vazio))
+		}
+
+		// O gestor parcial só enxerga setorB. Pedir setorA não amplia o escopo
+		// dele -- é o ponto do "filtro estreita, nunca amplia".
+		fora := listarPeloService(t, gestorParcial, "gestor", FiltrosOrdemServico{SetorId: &setorA})
+		if len(fora) != 0 {
+			t.Errorf("gestor pedindo setor fora do escopo devia dar vazio, veio %d OS", len(fora))
 		}
 	})
 
@@ -1378,14 +1429,12 @@ func TestEncerrar(t *testing.T) {
 	}
 
 	payloadPadrao := func() model.EncerramentoOrdemServicoPayload {
-		custoHora := 45.0
 		return model.EncerramentoOrdemServicoPayload{
 			TipoDefeito:       "Corretiva",
 			DefeitoConstatado: "Resistência queimada",
 			CausaRaiz:         "Desgaste natural",
 			Solucao:           "Troca da resistência",
-			CustoHoraTecnico:  &custoHora,
-			CustoManutencao:   120.5,
+			Itens:             itensMaquinario(45, 120.5),
 		}
 	}
 
@@ -1428,17 +1477,31 @@ func TestEncerrar(t *testing.T) {
 		}
 	})
 
-	t.Run("maquinário sem custoHoraTecnico é erro de validação", func(t *testing.T) {
-		os := osEmAndamento("PAT-ENC-3", "Sem custo hora")
+	// A regra "maquinário exige hora técnica" saiu na 000012: ela vinha de o
+	// campo ser um escalar obrigatório e, com uma linha por TAREFA, obrigava o
+	// Técnico a inventar uma tarefa só para carregar a mão de obra. Sem nenhuma
+	// hora lançada o agregado é ZERO, não nulo -- em maquinário a coluna existe
+	// sempre.
+	t.Run("maquinário sem hora técnica soma zero, não é erro", func(t *testing.T) {
+		os := osEmAndamento("PAT-ENC-3", "Só peça, sem mão de obra")
 		payload := payloadPadrao()
-		payload.CustoHoraTecnico = nil
-		_, err := svcOS.Encerrar(ctx, tenantID, tecnicoDono.Id, os.Id, payload)
-		if !errors.Is(err, helper.ErrValidacao) {
-			t.Fatalf("erro = %v, esperado ErrValidacao", err)
+		payload.Itens = itensSemHoraTecnica(120.5)
+		encerrada, err := svcOS.Encerrar(ctx, tenantID, tecnicoDono.Id, os.Id, payload)
+		if err != nil {
+			t.Fatalf("tarefa sem hora técnica devia ser aceita em maquinário: %v", err)
+		}
+		if encerrada.Custo == nil {
+			t.Fatal("custo veio nulo")
+		}
+		if encerrada.Custo.CustoHoraTecnico == nil || *encerrada.Custo.CustoHoraTecnico != 0 {
+			t.Errorf("custoHoraTecnico = %v, esperado 0 (a coluna existe em maquinário)", encerrada.Custo.CustoHoraTecnico)
+		}
+		if encerrada.Custo.CustoTotal != 120.5 {
+			t.Errorf("custoTotal = %v, esperado 120.5", encerrada.Custo.CustoTotal)
 		}
 	})
 
-	t.Run("reparo com custoHoraTecnico é erro de validação", func(t *testing.T) {
+	t.Run("reparo com item de hora técnica é erro de validação", func(t *testing.T) {
 		sol, err := svcSolicitacao.CadastrarSolicitacaoReparo(ctx, tenantID, solicitante.Id, model.NovaSolicitacaoReparoPayload{
 			Item: "Lâmpada queimada", Descricao: "Corredor",
 			FotoChave: "tenant/1/reparo.jpg", FotoMime: "image/jpeg", FotoTamanho: 1,
@@ -1513,6 +1576,64 @@ func TestEncerrar(t *testing.T) {
 		_, err := svcOS.Encerrar(ctx, tenantID, tecnicoDono.Id, 999999999, payloadPadrao())
 		if !errors.Is(err, helper.ErrNaoEncontrado) {
 			t.Fatalf("erro = %v, esperado ErrNaoEncontrado", err)
+		}
+	})
+
+	// A declaração de nota fiscal é do Técnico, no encerramento (migration
+	// 000011): é ela que decide se a tela do Administrador vai pedir número e
+	// série depois. O padrão é "não teve" -- serviço só de mão de obra.
+	t.Run("declaração de nota fiscal viaja do encerramento", func(t *testing.T) {
+		semNota := osEmAndamento("PAT-ENC-NF1", "Só mão de obra")
+		encerrada, err := svcOS.Encerrar(ctx, tenantID, tecnicoDono.Id, semNota.Id, payloadPadrao())
+		if err != nil {
+			t.Fatalf("erro ao encerrar: %v", err)
+		}
+		if encerrada.Custo == nil || encerrada.Custo.TemNotaFiscal {
+			t.Errorf("payload sem declaração devia gravar temNotaFiscal false, veio %+v", encerrada.Custo)
+		}
+
+		comNota := osEmAndamento("PAT-ENC-NF2", "Trocou peça comprada")
+		payloadComNota := payloadPadrao()
+		payloadComNota.TemNotaFiscal = true
+		encerradaComNota, err := svcOS.Encerrar(ctx, tenantID, tecnicoDono.Id, comNota.Id, payloadComNota)
+		if err != nil {
+			t.Fatalf("erro ao encerrar: %v", err)
+		}
+		if encerradaComNota.Custo == nil || !encerradaComNota.Custo.TemNotaFiscal {
+			t.Errorf("temNotaFiscal devia ser true, veio %+v", encerradaComNota.Custo)
+		}
+		// O Técnico declara, mas quem preenche é o Administrador depois: a
+		// lista nasce vazia mesmo com a declaração marcada. É esse par
+		// (declarou=true, lista vazia) que forma a fila de conferência.
+		if len(encerradaComNota.Custo.NotasFiscais) != 0 {
+			t.Errorf("nota não é do encerramento, veio %+v", encerradaComNota.Custo.NotasFiscais)
+		}
+	})
+
+	// 0 é valor de negócio legítimo já no encerramento: serviço sem peça,
+	// conserto em garantia. `gte=0`, nunca `required` -- ver o payload.
+	t.Run("encerra com custo zero", func(t *testing.T) {
+		os := osEmAndamento("PAT-ENC-ZERO", "Sem custo nenhum")
+		payload := payloadPadrao()
+		payload.Itens = itensMaquinario(0, 0)
+		encerrada, err := svcOS.Encerrar(ctx, tenantID, tecnicoDono.Id, os.Id, payload)
+		if err != nil {
+			t.Fatalf("custo zero devia ser aceito no encerramento: %v", err)
+		}
+		if encerrada.Custo == nil {
+			t.Fatal("custo veio nulo")
+		}
+		if encerrada.Custo.CustoHoraTecnico == nil || *encerrada.Custo.CustoHoraTecnico != 0 {
+			t.Errorf("custoHoraTecnico = %v, esperado 0", encerrada.Custo.CustoHoraTecnico)
+		}
+		if encerrada.Custo.CustoManutencao != 0 || encerrada.Custo.CustoTotal != 0 {
+			t.Errorf("custoManutencao/custoTotal = %v/%v, esperado 0/0",
+				encerrada.Custo.CustoManutencao, encerrada.Custo.CustoTotal)
+		}
+		// A OS com custo zero continua finalizada: o custo FOI lançado, só vale
+		// zero -- é `os_custo` existir que conta, não o valor ser positivo.
+		if !encerrada.Finalizada {
+			t.Error("finalizada = false; custo zero é custo lançado")
 		}
 	})
 }
@@ -1617,7 +1738,7 @@ func TestCorrigirCusto(t *testing.T) {
 		return encerrar(abrirOSMaquinario(patrimonio, descricao), model.EncerramentoOrdemServicoPayload{
 			TipoDefeito: "Corretiva", DefeitoConstatado: "Resistência queimada",
 			CausaRaiz: "Desgaste natural", Solucao: "Troca da resistência",
-			CustoHoraTecnico: &custoHoraOriginal, CustoManutencao: 120.5,
+			Itens: itensMaquinario(custoHoraOriginal, 120.5),
 		})
 	}
 
@@ -1639,7 +1760,7 @@ func TestCorrigirCusto(t *testing.T) {
 		return encerrar(os, model.EncerramentoOrdemServicoPayload{
 			TipoDefeito: "Corretiva", DefeitoConstatado: "Lâmpada queimada",
 			CausaRaiz: "Fim de vida útil", Solucao: "Substituição",
-			CustoManutencao: 30,
+			Itens: itensSemHoraTecnica(30),
 		})
 	}
 
@@ -1653,7 +1774,7 @@ func TestCorrigirCusto(t *testing.T) {
 		return encerrar(acionada, model.EncerramentoOrdemServicoPayload{
 			TipoDefeito: "Corretiva", DefeitoConstatado: "Compressor travado",
 			CausaRaiz: "Falta de manutenção", Solucao: "Serviço da empresa externa",
-			CustoManutencao: 800,
+			Itens: itensSemHoraTecnica(800),
 		})
 	}
 
@@ -1662,9 +1783,8 @@ func TestCorrigirCusto(t *testing.T) {
 		if os.Custo == nil || os.Custo.RevisadoEm != nil {
 			t.Fatalf("custo recém-lançado pelo Técnico devia ter revisadoEm nil, veio %+v", os.Custo)
 		}
-		novoCustoHora := 60.0
 		corrigida, err := svcOS.CorrigirCusto(ctx, tenantID, adminCorretor.Id, os.Id, model.LancamentoCustoManutencaoPayload{
-			CustoHoraTecnico: &novoCustoHora, CustoManutencao: 200,
+			Itens: itensMaquinario(60, 200),
 		})
 		if err != nil {
 			t.Fatalf("erro ao corrigir custo: %v", err)
@@ -1692,49 +1812,168 @@ func TestCorrigirCusto(t *testing.T) {
 	t.Run("OS ainda não encerrada não pode ter custo corrigido", func(t *testing.T) {
 		os := abrirOSMaquinario("PAT-CUSTO-2", "Ainda aberta")
 		_, err := svcOS.CorrigirCusto(ctx, tenantID, adminCorretor.Id, os.Id, model.LancamentoCustoManutencaoPayload{
-			CustoHoraTecnico: &custoHoraOriginal, CustoManutencao: 100,
+			Itens: itensMaquinario(custoHoraOriginal, 100),
 		})
 		if !errors.Is(err, helper.ErrConflitoIntegridade) {
 			t.Fatalf("erro = %v, esperado ErrConflitoIntegridade", err)
 		}
 	})
 
-	t.Run("maquinário sem custoHoraTecnico é erro de validação", func(t *testing.T) {
-		os := osConcluidaMaquinario("PAT-CUSTO-3", "Sem custo hora")
-		_, err := svcOS.CorrigirCusto(ctx, tenantID, adminCorretor.Id, os.Id, model.LancamentoCustoManutencaoPayload{
-			CustoManutencao: 100,
+	// Espelho do mesmo caso em TestEncerrar: sem hora lançada o agregado é zero
+	// em maquinário, não erro. Ver a nota lá.
+	t.Run("maquinário sem hora técnica soma zero, não é erro", func(t *testing.T) {
+		os := osConcluidaMaquinario("PAT-CUSTO-3", "Só peça")
+		corrigida, err := svcOS.CorrigirCusto(ctx, tenantID, adminCorretor.Id, os.Id, model.LancamentoCustoManutencaoPayload{
+			Itens: itensSemHoraTecnica(100),
 		})
-		if !errors.Is(err, helper.ErrValidacao) {
-			t.Fatalf("erro = %v, esperado ErrValidacao", err)
+		if err != nil {
+			t.Fatalf("tarefa sem hora técnica devia ser aceita: %v", err)
+		}
+		if corrigida.Custo.CustoHoraTecnico == nil || *corrigida.Custo.CustoHoraTecnico != 0 {
+			t.Errorf("custoHoraTecnico = %v, esperado 0", corrigida.Custo.CustoHoraTecnico)
 		}
 	})
 
-	t.Run("reparo com custoHoraTecnico é erro de validação", func(t *testing.T) {
+	t.Run("reparo com item de hora técnica é erro de validação", func(t *testing.T) {
 		os := osConcluidaReparo("PAT-CUSTO-4")
 		_, err := svcOS.CorrigirCusto(ctx, tenantID, adminCorretor.Id, os.Id, model.LancamentoCustoManutencaoPayload{
-			CustoHoraTecnico: &custoHoraOriginal, CustoManutencao: 50,
+			Itens: itensMaquinario(custoHoraOriginal, 50),
 		})
 		if !errors.Is(err, helper.ErrValidacao) {
 			t.Fatalf("erro = %v, esperado ErrValidacao", err)
 		}
 	})
 
-	t.Run("nota fiscal fora de terceiros é erro de validação", func(t *testing.T) {
+	// Migration 000010: nota fiscal deixou de ser exclusividade de 'terceiros'
+	// -- reparo consome material comprado com nota, e o Administrador precisa
+	// registrar o documento que embasa o custo.
+	t.Run("nota fiscal fora de terceiros é aceita e persiste", func(t *testing.T) {
 		os := osConcluidaReparo("PAT-CUSTO-5")
-		numero := "NF-001"
+		corrigida, err := svcOS.CorrigirCusto(ctx, tenantID, adminCorretor.Id, os.Id, model.LancamentoCustoManutencaoPayload{
+			Itens: itensSemHoraTecnica(50), TemNotaFiscal: true,
+			NotasFiscais: []model.NotaFiscalPayload{{Numero: "NF-001", Serie: "3"}},
+		})
+		if err != nil {
+			t.Fatalf("nota fiscal em OS de reparo devia ser aceita: %v", err)
+		}
+		if len(corrigida.Custo.NotasFiscais) != 1 {
+			t.Fatalf("notasFiscais = %+v, esperado 1 nota", corrigida.Custo.NotasFiscais)
+		}
+		nota := corrigida.Custo.NotasFiscais[0]
+		if nota.Numero != "NF-001" {
+			t.Errorf("numero = %q, esperado NF-001", nota.Numero)
+		}
+		if nota.Serie == nil || *nota.Serie != "3" {
+			t.Errorf("serie = %v, esperado 3", nota.Serie)
+		}
+	})
+
+	// A razão de a lista existir (migration 000012): duas peças compradas em
+	// lojas diferentes chegam com dois documentos, e o par escalar antigo só
+	// comportava o primeiro.
+	t.Run("duas notas na mesma OS persistem as duas", func(t *testing.T) {
+		os := osConcluidaMaquinario("PAT-CUSTO-5D", "Rolamento e fita")
+		corrigida, err := svcOS.CorrigirCusto(ctx, tenantID, adminCorretor.Id, os.Id, model.LancamentoCustoManutencaoPayload{
+			Itens: []model.ItemCustoPayload{
+				{Descricao: "Troca do rolamento", CustoManutencao: 180, CustoHoraTecnico: ptrFloat(50)},
+				{Descricao: "Troca da fita", CustoManutencao: 240, CustoHoraTecnico: ptrFloat(40)},
+			},
+			TemNotaFiscal: true,
+			NotasFiscais: []model.NotaFiscalPayload{
+				{Numero: "NF-4471", Serie: "1"},
+				{Numero: "NF-9002"},
+			},
+		})
+		if err != nil {
+			t.Fatalf("duas notas deviam ser aceitas: %v", err)
+		}
+		if len(corrigida.Custo.NotasFiscais) != 2 {
+			t.Fatalf("notasFiscais = %+v, esperado 2", corrigida.Custo.NotasFiscais)
+		}
+		// Série ausente vira NULL, não string vazia -- é o NULLIF da query.
+		if corrigida.Custo.NotasFiscais[1].Serie != nil {
+			t.Errorf("série ausente devia vir nil, veio %v", *corrigida.Custo.NotasFiscais[1].Serie)
+		}
+		// Os agregados são a SOMA dos itens, e é o servidor quem soma: o
+		// payload não carrega total nenhum. É a trava contra os_custo divergir
+		// de os_custo_item.
+		if len(corrigida.Custo.Itens) != 2 {
+			t.Fatalf("itens = %+v, esperado 2 tarefas", corrigida.Custo.Itens)
+		}
+		// Cada tarefa carrega os dois valores dela, e é isso que deixa o
+		// Administrador conferir "o rolamento custou 180" contra a nota certa.
+		if corrigida.Custo.Itens[0].CustoManutencao != 180 ||
+			corrigida.Custo.Itens[0].CustoHoraTecnico == nil ||
+			*corrigida.Custo.Itens[0].CustoHoraTecnico != 50 {
+			t.Errorf("primeira tarefa = %+v, esperado 180 de peça e 50 de mão de obra", corrigida.Custo.Itens[0])
+		}
+		if corrigida.Custo.CustoManutencao != 420 {
+			t.Errorf("custoManutencao = %v, esperado 420 (180+240)", corrigida.Custo.CustoManutencao)
+		}
+		if corrigida.Custo.CustoHoraTecnico == nil || *corrigida.Custo.CustoHoraTecnico != 90 {
+			t.Errorf("custoHoraTecnico = %v, esperado 90 (50+40)", corrigida.Custo.CustoHoraTecnico)
+		}
+		if corrigida.Custo.CustoTotal != 510 {
+			t.Errorf("custoTotal = %v, esperado 510", corrigida.Custo.CustoTotal)
+		}
+	})
+
+	// uq_nota_fiscal_os com NULLS NOT DISTINCT: o clique duplo no formulário
+	// bate na constraint em vez de gravar o mesmo documento duas vezes.
+	t.Run("nota repetida na mesma OS é duplicidade", func(t *testing.T) {
+		os := osConcluidaReparo("PAT-CUSTO-5E")
 		_, err := svcOS.CorrigirCusto(ctx, tenantID, adminCorretor.Id, os.Id, model.LancamentoCustoManutencaoPayload{
-			CustoManutencao: 50, NumeroNotaFiscal: &numero,
+			Itens: itensSemHoraTecnica(50), TemNotaFiscal: true,
+			NotasFiscais: []model.NotaFiscalPayload{
+				{Numero: "NF-IGUAL"},
+				{Numero: "NF-IGUAL"},
+			},
+		})
+		if !errors.Is(err, helper.ErrDadoDuplicado) {
+			t.Fatalf("erro = %v, esperado ErrDadoDuplicado", err)
+		}
+	})
+
+	// A descrição, essa sim, continua presa a 'terceiros': ela conta o que a
+	// empresa externa fez -- ver o CHECK que sobrou em ck_custo_por_tipo.
+	t.Run("descrição de serviço de terceiro fora de terceiros é erro de validação", func(t *testing.T) {
+		os := osConcluidaMaquinario("PAT-CUSTO-5C", "Descrição indevida")
+		descricao := "Serviço executado pela empresa"
+		_, err := svcOS.CorrigirCusto(ctx, tenantID, adminCorretor.Id, os.Id, model.LancamentoCustoManutencaoPayload{
+			Itens:                    itensMaquinario(custoHoraOriginal, 100),
+			DescricaoServicoTerceiro: &descricao,
 		})
 		if !errors.Is(err, helper.ErrValidacao) {
 			t.Fatalf("erro = %v, esperado ErrValidacao", err)
+		}
+	})
+
+	// Com a lista, o "campo em branco" do formulário virou lista vazia -- o
+	// modal só manda uma linha de nota quando o Administrador clica no "+".
+	// A descrição de terceiro continua sendo campo de texto e continua
+	// chegando como espaços do React Hook Form.
+	t.Run("lista de notas vazia e descrição em branco passam (defaultValues do front)", func(t *testing.T) {
+		os := osConcluidaReparo("PAT-CUSTO-5B")
+		vazio := "   "
+		corrigida, err := svcOS.CorrigirCusto(ctx, tenantID, adminCorretor.Id, os.Id, model.LancamentoCustoManutencaoPayload{
+			Itens:                    itensSemHoraTecnica(50),
+			DescricaoServicoTerceiro: &vazio,
+		})
+		if err != nil {
+			t.Fatalf("lista vazia e descrição em branco não deviam barrar OS de reparo: %v", err)
+		}
+		// Slice não-nil mesmo vazia: o front faz .map direto.
+		if corrigida.Custo.NotasFiscais == nil {
+			t.Error("notasFiscais devia ser lista vazia, não null -- o front faz .map")
 		}
 	})
 
 	t.Run("corrige nota fiscal com sucesso numa OS de terceiros", func(t *testing.T) {
 		os := osConcluidaTerceiros("PAT-CUSTO-6", "Serviço de terceiro")
-		numero, serie, descricao := "NF-42", "1", "Troca do compressor"
+		descricao := "Troca do compressor"
 		corrigida, err := svcOS.CorrigirCusto(ctx, tenantID, adminCorretor.Id, os.Id, model.LancamentoCustoManutencaoPayload{
-			CustoManutencao: 950, NumeroNotaFiscal: &numero, SerieNotaFiscal: &serie,
+			Itens: itensSemHoraTecnica(950), TemNotaFiscal: true,
+			NotasFiscais:             []model.NotaFiscalPayload{{Numero: "NF-42", Serie: "1"}},
 			DescricaoServicoTerceiro: &descricao,
 		})
 		if err != nil {
@@ -1743,8 +1982,8 @@ func TestCorrigirCusto(t *testing.T) {
 		if corrigida.Custo.CustoManutencao != 950 {
 			t.Errorf("custoManutencao = %v, esperado 950", corrigida.Custo.CustoManutencao)
 		}
-		if corrigida.Custo.NumeroNotaFiscal == nil || *corrigida.Custo.NumeroNotaFiscal != "NF-42" {
-			t.Errorf("numeroNotaFiscal = %v, esperado NF-42", corrigida.Custo.NumeroNotaFiscal)
+		if len(corrigida.Custo.NotasFiscais) != 1 || corrigida.Custo.NotasFiscais[0].Numero != "NF-42" {
+			t.Errorf("notasFiscais = %+v, esperado uma NF-42", corrigida.Custo.NotasFiscais)
 		}
 		if corrigida.Custo.DescricaoServicoTerceiro == nil || *corrigida.Custo.DescricaoServicoTerceiro != "Troca do compressor" {
 			t.Errorf("descricaoServicoTerceiro = %v, esperado %q", corrigida.Custo.DescricaoServicoTerceiro, "Troca do compressor")
@@ -1753,10 +1992,90 @@ func TestCorrigirCusto(t *testing.T) {
 
 	t.Run("id inexistente é não encontrado", func(t *testing.T) {
 		_, err := svcOS.CorrigirCusto(ctx, tenantID, adminCorretor.Id, 999999999, model.LancamentoCustoManutencaoPayload{
-			CustoHoraTecnico: &custoHoraOriginal, CustoManutencao: 100,
+			Itens: itensMaquinario(custoHoraOriginal, 100),
 		})
 		if !errors.Is(err, helper.ErrNaoEncontrado) {
 			t.Fatalf("erro = %v, esperado ErrNaoEncontrado", err)
+		}
+	})
+
+	// A declaração do Técnico é o que decide se a tela do Administrador pede
+	// número e série -- ck_custo_nota_fiscal, migration 000011.
+	t.Run("número de nota sem declarar a nota é erro de validação", func(t *testing.T) {
+		os := osConcluidaReparo("PAT-CUSTO-7")
+		_, err := svcOS.CorrigirCusto(ctx, tenantID, adminCorretor.Id, os.Id, model.LancamentoCustoManutencaoPayload{
+			Itens: itensSemHoraTecnica(50), TemNotaFiscal: false,
+			NotasFiscais: []model.NotaFiscalPayload{{Numero: "NF-999"}},
+		})
+		if !errors.Is(err, helper.ErrValidacao) {
+			t.Fatalf("erro = %v, esperado ErrValidacao", err)
+		}
+	})
+
+	// Técnico esquecer de marcar não pode deixar a OS sem onde lançar a nota:
+	// o Administrador sobrescreve a declaração no mesmo POST.
+	t.Run("Administrador marca a nota que o Técnico não declarou", func(t *testing.T) {
+		os := osConcluidaReparo("PAT-CUSTO-8")
+		if os.Custo.TemNotaFiscal {
+			t.Fatal("encerramento sem declaração devia nascer com temNotaFiscal false")
+		}
+		corrigida, err := svcOS.CorrigirCusto(ctx, tenantID, adminCorretor.Id, os.Id, model.LancamentoCustoManutencaoPayload{
+			Itens: itensSemHoraTecnica(50), TemNotaFiscal: true,
+			NotasFiscais: []model.NotaFiscalPayload{{Numero: "NF-777"}},
+		})
+		if err != nil {
+			t.Fatalf("Administrador devia poder marcar a nota: %v", err)
+		}
+		if !corrigida.Custo.TemNotaFiscal {
+			t.Error("temNotaFiscal devia ter virado true")
+		}
+	})
+
+	// Desmarcar limpa o que já estava gravado -- senão ck_custo_nota_fiscal
+	// barraria o UPDATE e o Administrador levaria um 500 genérico.
+	t.Run("Administrador desmarcando a nota apaga as notas gravadas", func(t *testing.T) {
+		os := osConcluidaReparo("PAT-CUSTO-9")
+		if _, err := svcOS.CorrigirCusto(ctx, tenantID, adminCorretor.Id, os.Id, model.LancamentoCustoManutencaoPayload{
+			Itens: itensSemHoraTecnica(50), TemNotaFiscal: true,
+			NotasFiscais: []model.NotaFiscalPayload{{Numero: "NF-555", Serie: "2"}},
+		}); err != nil {
+			t.Fatalf("erro ao lançar a nota: %v", err)
+		}
+
+		limpa, err := svcOS.CorrigirCusto(ctx, tenantID, adminCorretor.Id, os.Id, model.LancamentoCustoManutencaoPayload{
+			Itens: itensSemHoraTecnica(50), TemNotaFiscal: false,
+		})
+		if err != nil {
+			t.Fatalf("erro ao desmarcar a nota: %v", err)
+		}
+		if limpa.Custo.TemNotaFiscal {
+			t.Error("temNotaFiscal devia ter virado false")
+		}
+		// Direção que trg_nota_fiscal_declarada não cobre de propósito: quem
+		// apaga é gravarNotasFiscais, na mesma escrita (ver migration 000012).
+		if len(limpa.Custo.NotasFiscais) != 0 {
+			t.Errorf("notas deviam ter sido apagadas, veio %+v", limpa.Custo.NotasFiscais)
+		}
+	})
+
+	// 0 é valor de negócio legítimo (serviço sem peça, conserto em garantia) --
+	// ck_custo_nao_negativo permite e o binding é `gte=0`, não `required`. Sem
+	// este teste nada impede alguém de trocar por `required` e transformar uma
+	// OS sem custo em "campo obrigatório não preenchido".
+	t.Run("custo zero é aceito e volta como zero", func(t *testing.T) {
+		os := osConcluidaMaquinario("PAT-CUSTO-10", "Conserto em garantia")
+		corrigida, err := svcOS.CorrigirCusto(ctx, tenantID, adminCorretor.Id, os.Id, model.LancamentoCustoManutencaoPayload{
+			Itens: itensMaquinario(0, 0),
+		})
+		if err != nil {
+			t.Fatalf("custo zero devia ser aceito: %v", err)
+		}
+		if corrigida.Custo.CustoHoraTecnico == nil || *corrigida.Custo.CustoHoraTecnico != 0 {
+			t.Errorf("custoHoraTecnico = %v, esperado 0", corrigida.Custo.CustoHoraTecnico)
+		}
+		if corrigida.Custo.CustoManutencao != 0 || corrigida.Custo.CustoTotal != 0 {
+			t.Errorf("custoManutencao/custoTotal = %v/%v, esperado 0/0",
+				corrigida.Custo.CustoManutencao, corrigida.Custo.CustoTotal)
 		}
 	})
 }

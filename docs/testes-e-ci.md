@@ -91,6 +91,14 @@ suspeitosamente rápido (provavelmente é `t.Skip` por falta de Postgres).
     ciclo reabrindo depois que o Gestor converte a pendente.
     **Mutação conferida**: tirar `m.ativa` da query quebra 4 subtestes; tirar o
     `NOT EXISTS` **não quebra nenhum**, e isso é esperado — ver a seção do job.
+  - Desde a migration `000012` os testes de custo mandam uma lista de **tarefas**
+    (`itensMaquinario`/`itensSemHoraTecnica`, helpers no topo do arquivo de integração), não
+    dois valores escalares. O que eles trancam e não é óbvio: os agregados de `os_custo`
+    saírem da SOMA das tarefas gravadas e não do payload, a hora técnica ser recusada por
+    tarefa fora de maquinário, duas notas na mesma OS persistirem as duas, a nota repetida
+    virar `ErrDadoDuplicado`, e maquinário sem hora lançada somar **zero em vez de dar
+    erro** — essa última existe porque a regra oposta valeu até a `000012` e é o tipo de
+    coisa que alguém "conserta" de volta sem querer.
   - `ordemServicoIntegracao_test.go` — sete funções de teste, uma por endpoint do ciclo
     de vida da OS: `TestListarOrdensServico` (`GET /ordens-servico`), `TestIniciar`,
     `TestPausar`, `TestRetomar`, `TestAcionarTerceiro`, `TestEncerrar` e

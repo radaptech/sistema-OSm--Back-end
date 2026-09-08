@@ -552,12 +552,22 @@ type OsCusto struct {
 	Tipo                     TipoOs
 	CustoHoraTecnico         pgtype.Float8
 	CustoManutencao          pgtype.Float8
-	NumeroNotaFiscal         *string
-	SerieNotaFiscal          *string
 	DescricaoServicoTerceiro *string
 	LancadoPorID             int64
 	LancadoEm                pgtype.Timestamptz
 	CustoRevisadoEm          pgtype.Timestamptz
+	TemNotaFiscal            bool
+}
+
+type OsCustoItem struct {
+	ID               int64
+	TenantID         int64
+	OrdemServicoID   int64
+	Tipo             TipoOs
+	Descricao        string
+	CustoManutencao  pgtype.Float8
+	CustoHoraTecnico pgtype.Float8
+	CriadoEm         pgtype.Timestamptz
 }
 
 type OsEncerramento struct {
@@ -572,6 +582,15 @@ type OsEncerramento struct {
 	CausaRaiz         string
 	Solucao           string
 	CriadoEm          pgtype.Timestamptz
+}
+
+type OsNotaFiscal struct {
+	ID             int64
+	TenantID       int64
+	OrdemServicoID int64
+	Numero         string
+	Serie          *string
+	CriadoEm       pgtype.Timestamptz
 }
 
 type OsPausa struct {

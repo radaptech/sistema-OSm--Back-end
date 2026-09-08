@@ -150,6 +150,11 @@ func (o *OrdemServicoController) Listar() gin.HandlerFunc {
 			return
 		}
 
+		setorId, ok := idDeQuery(ctx, "setorId")
+		if !ok {
+			return
+		}
+
 		tecnicoId, ok := idDeQuery(ctx, "tecnicoId")
 		if !ok {
 			return
@@ -165,6 +170,7 @@ func (o *OrdemServicoController) Listar() gin.HandlerFunc {
 			Tipo:       tipo,
 			Finalizada: finalizada,
 			LojaId:     lojaId,
+			SetorId:    setorId,
 			TecnicoId:  tecnicoId,
 			Busca:      busca,
 		})
@@ -480,6 +486,14 @@ func (o *OrdemServicoController) Custo() gin.HandlerFunc {
 				ctx.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			case errors.Is(err, helper.ErrNaoEncontrado):
 				ctx.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+			// uq_nota_fiscal_os (migration 000012): o Administrador digitou a
+			// mesma nota duas vezes na lista. Só passou a ser alcançável quando
+			// a nota virou tabela -- até a 000011 esta rota era um UPDATE 1:1 em
+			// os_custo, que não tem como colidir, e por isso o caso não existia
+			// aqui. Sem ele o erro cai no default e vira 500 numa tela que só
+			// queria avisar "essa nota você já lançou".
+			case errors.Is(err, helper.ErrDadoDuplicado):
+				ctx.JSON(http.StatusConflict, gin.H{"error": err.Error()})
 			case errors.Is(err, helper.ErrConflitoIntegridade):
 				ctx.JSON(http.StatusUnprocessableEntity, gin.H{"error": err.Error()})
 			default:

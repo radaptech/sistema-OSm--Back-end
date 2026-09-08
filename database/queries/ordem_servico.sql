@@ -167,11 +167,15 @@ RETURNING *;
 -- Nasce na mesma transação do encerramento (docs/modelagem, 2.3 revisão 4:
 -- "os dois momentos deixaram de ser sequenciais"), lancado_por_id = o
 -- próprio Técnico -- o Administrador só CORRIGE depois, em
--- POST /ordens-servico/:id/custo (fase 2, fora daqui), inclusive as três
--- colunas de nota fiscal, que por isso nem entram neste INSERT (ficam
--- NULL, satisfeito por ck_custo_por_tipo quando tipo <> 'terceiros' --
--- e quando É 'terceiros', são opcionais mesmo até o Administrador
--- conferir contra a nota).
+-- POST /ordens-servico/:id/custo (fora daqui), inclusive o NÚMERO e a SÉRIE
+-- da nota, que por isso não entram neste INSERT e ficam NULL.
+--
+-- tem_nota_fiscal, esse sim, entra: é declaração do TÉCNICO, não do
+-- Administrador. Só quem executou sabe se houve compra (peça, material,
+-- fatura da empresa) ou se foi só mão de obra -- e é essa resposta que
+-- decide se os campos de NF aparecem na tela do Administrador depois. Com
+-- `false` aqui, ck_custo_nota_fiscal exige os dois campos NULL, que é
+-- exatamente o que este INSERT deixa.
 --
 -- custo_hora_tecnico é quem o service decide se manda ou NULL
 -- (pgtype.Float8{Valid: false}): só existe em 'maquinario'
@@ -183,10 +187,11 @@ RETURNING *;
 -- sqlc.yaml, que por isso continua morto de propósito).
 INSERT INTO os_custo (
     tenant_id, ordem_servico_id, tipo,
-    custo_hora_tecnico, custo_manutencao, lancado_por_id
+    custo_hora_tecnico, custo_manutencao, lancado_por_id, tem_nota_fiscal
 ) VALUES (
     sqlc.arg(tenant_id), sqlc.arg(ordem_servico_id), sqlc.arg(tipo),
-    sqlc.arg(custo_hora_tecnico), sqlc.arg(custo_manutencao), sqlc.arg(lancado_por_id)
+    sqlc.arg(custo_hora_tecnico), sqlc.arg(custo_manutencao), sqlc.arg(lancado_por_id),
+    sqlc.arg(tem_nota_fiscal)
 )
 RETURNING *;
 
@@ -208,6 +213,12 @@ RETURNING *;
 -- Sem WHERE por tipo: os_custo.tipo é fixo desde o INSERT (CriarCusto) e não
 -- muda depois de Concluída, então não há o que recomparar contra a OS.
 --
+-- tem_nota_fiscal é sobrescrito aqui de propósito, apesar de nascer como
+-- declaração do Técnico: se ele esquecer de marcar, o Administrador ficaria
+-- sem onde lançar a nota que tem na mão -- e a tela dele traz o mesmo
+-- controle. Desmarcar limpa número e série no mesmo UPDATE (o service manda
+-- nil nos dois), senão ck_custo_nota_fiscal barra a escrita.
+--
 -- custo_revisado_em = now() na mesma tacada: toda passagem do Administrador
 -- por esta query É a conferência contra a nota, então é aqui que a marca
 -- nasce. É o que move a OS de "Pendentes" para "Revisadas" em Custos
@@ -216,9 +227,8 @@ RETURNING *;
 UPDATE os_custo
 SET custo_hora_tecnico = sqlc.narg(custo_hora_tecnico),
     custo_manutencao = sqlc.arg(custo_manutencao),
-    numero_nota_fiscal = sqlc.narg(numero_nota_fiscal),
-    serie_nota_fiscal = sqlc.narg(serie_nota_fiscal),
     descricao_servico_terceiro = sqlc.narg(descricao_servico_terceiro),
+    tem_nota_fiscal = sqlc.arg(tem_nota_fiscal),
     lancado_por_id = sqlc.arg(lancado_por_id),
     lancado_em = now(),
     custo_revisado_em = now()
@@ -231,6 +241,8 @@ RETURNING *;
 --   Gestor  (PainelGestor)                 -> sem filtro, recorta pelo escopo
 --   Técnico (PainelTecnico)                -> ?tecnicoId=
 --   Admin   (CustosPendentes/OSFinalizadas)-> ?status=Concluída / ?finalizada=true
+-- Por cima disso as três telas estreitam com ?busca=, ?tipo=, ?lojaId= e
+-- ?setorId= -- filtros do cliente, sempre opcionais e sempre cumulativos.
 -- Array simples, sem paginação: o front tipa `OrdemServico[]` e pagina no
 -- cliente, mesmo padrão de ListarSolicitacoes/ListarMaquinas. `pagina` existe
 -- em ParametrosListagemOrdensServico mas nunca chega a uma query -- ignorar é
@@ -316,9 +328,8 @@ SELECT
     h.horas_parada,
     c.custo_hora_tecnico,
     c.custo_manutencao,
-    c.numero_nota_fiscal,
-    c.serie_nota_fiscal,
     c.descricao_servico_terceiro,
+    c.tem_nota_fiscal,
     c.lancado_em,
     c.custo_revisado_em,
     lanc.nome AS lancado_por_nome
@@ -352,6 +363,12 @@ WHERE os.tenant_id = sqlc.arg(tenant_id)
   AND (sqlc.narg(status)::text[] IS NULL OR os.status = ANY(sqlc.narg(status)::text[]::status_os[]))
   AND (sqlc.narg(tipo)::tipo_os IS NULL OR os.tipo = sqlc.narg(tipo))
   AND (sqlc.narg(loja_id)::bigint IS NULL OR sc.loja_id = sqlc.narg(loja_id))
+  -- setor_id sai da SOLICITAÇÃO (s.setor_id), não de ordem_servico -- a OS não
+  -- tem setor próprio, e nem deveria (ver a nota do escopo lá embaixo). Mesma
+  -- coluna que o EXISTS de escopo compara, então filtro e escopo falam da
+  -- mesma coisa: o cliente estreita dentro do que o escopo já permitiu, nunca
+  -- amplia -- mandar o setor de outra loja devolve vazio, não a lista dela.
+  AND (sqlc.narg(setor_id)::bigint IS NULL OR s.setor_id = sqlc.narg(setor_id))
   AND (sqlc.narg(tecnico_id)::bigint IS NULL OR os.tecnico_id = sqlc.narg(tecnico_id))
   AND (
     sqlc.narg(busca)::text IS NULL
@@ -440,3 +457,98 @@ WHERE os.tenant_id = sqlc.arg(tenant_id)
 -- Ascendente porque MTBF é a média do intervalo entre aberturas consecutivas:
 -- ordenado aqui, o Go só percorre. Trocar para DESC quebra o indicador calado.
 ORDER BY os.aberta_em;
+
+-- name: CriarItemDeCusto :exec
+-- Uma TAREFA da OS, com o custo de material e o de mão de obra dela (migration
+-- 000012). Chamada em laço por gravarItensDeCusto, sempre depois de
+-- DeletarItensDeCustoDaOrdemServico na mesma transação -- substitui o conjunto
+-- inteiro, não faz merge incremental, mesmo padrão de gravarPreventivas e
+-- gravarEscopo.
+--
+-- Uma linha por chamada, e não um INSERT em lote com unnest, por dois motivos.
+-- O que decide: o sqlc não resolve `unnest(a, b, c)` de múltiplos argumentos e
+-- para com "function unnest(unknown, unknown, unknown) does not exist", mesmo
+-- com os casts explícitos nos parâmetros. O que confirma: gravarPreventivas já
+-- grava em laço dentro da transação, e a lista aqui tem o tamanho de um
+-- formulário, não de uma importação.
+--
+-- custo_hora_tecnico é `narg` porque é nulo em duas situações diferentes e as
+-- duas são legítimas: fora de 'maquinario' a coluna é PROIBIDA
+-- (ck_custo_item_hora_tecnico), e dentro dele a tarefa pode simplesmente não
+-- ter cobrado mão de obra. Quem distingue é o service.
+--
+-- btrim na descrição espelha ck_custo_item_descricao. O service já recusa o
+-- vazio antes, com mensagem própria; aqui é só para não gravar a margem que o
+-- usuário digitou sem querer.
+INSERT INTO os_custo_item (
+    tenant_id, ordem_servico_id, tipo, descricao, custo_manutencao, custo_hora_tecnico
+) VALUES (
+    sqlc.arg(tenant_id), sqlc.arg(ordem_servico_id), sqlc.arg(tipo),
+    btrim(sqlc.arg(descricao)), sqlc.arg(custo_manutencao), sqlc.narg(custo_hora_tecnico)
+);
+
+-- name: DeletarItensDeCustoDaOrdemServico :exec
+-- DELETE de verdade, não soft delete, e é a única exceção do projeto junto com
+-- a irmã de nota fiscal. A regra "exclusão é sempre soft delete" existe para
+-- não perder histórico de entidade que alguém consultou; item de custo não é
+-- entidade, é uma linha de composição de um valor que está sendo reescrito
+-- inteiro na mesma transação. Um `ativo` aqui obrigaria toda soma a filtrar
+-- por ele e deixaria a listagem mostrando peça que o Administrador tirou.
+DELETE FROM os_custo_item
+WHERE tenant_id = sqlc.arg(tenant_id) AND ordem_servico_id = sqlc.arg(ordem_servico_id);
+
+-- name: ObterItensDeCustoDasOrdensServico :many
+-- Itens de uma página inteira de OS numa ida só, mesmo desenho de
+-- ObterPausasDasOrdensServico: 1:N no JOIN duplicaria a OS por item, e uma
+-- query por OS seria N+1.
+--
+-- Sem tenant_id no WHERE pelo mesmo motivo da query de pausas, apesar de a
+-- coluna existir aqui: os ids sempre vêm de ListarOrdensServico, que já
+-- recortou por tenant E por escopo. Nunca chame com ids de outra origem.
+--
+-- ORDER BY id: é a ordem em que o Técnico digitou, e é ela que a tela repete.
+-- Ordenar por valor embaralharia a lista a cada leitura.
+--
+-- ⚠️ As duas colunas de dinheiro saem CRUAS, sem `::float8`: o override do
+-- sqlc.yaml casa por NOME DE COLUNA, e o cast quebraria o vínculo -- mesma
+-- armadilha documentada em ListarOrdensServico.
+SELECT id, ordem_servico_id, descricao, custo_manutencao, custo_hora_tecnico
+FROM os_custo_item
+WHERE ordem_servico_id = ANY(sqlc.arg(ordens_servico_ids)::bigint[])
+ORDER BY ordem_servico_id, id;
+
+-- name: CriarNotaFiscal :exec
+-- Espelho de CriarItemDeCusto para os documentos que o Administrador registra
+-- na conferência (migration 000012). Mesma substituição de conjunto, sempre
+-- depois de DeletarNotasFiscaisDaOrdemServico, e em laço pelo mesmo motivo.
+--
+-- ⚠️ NULLIF na série porque ela é opcional e o React Hook Form manda string
+-- vazia no campo que ninguém preencheu -- mesmo papel do textoOuNil do
+-- service. Sem ele o banco guardaria '' numa coluna nullable, e aí
+-- uq_nota_fiscal_os passaria a tratar "sem série" e "série vazia" como dois
+-- documentos diferentes, deixando a duplicata entrar.
+--
+-- O trigger trg_nota_fiscal_declarada barra a escrita se a OS não estiver com
+-- tem_nota_fiscal. O service confere antes para a mensagem sair nomeando o
+-- campo, mesmo padrão dos CHECKs espelhados em Go.
+INSERT INTO os_nota_fiscal (tenant_id, ordem_servico_id, numero, serie)
+VALUES (
+    sqlc.arg(tenant_id), sqlc.arg(ordem_servico_id),
+    btrim(sqlc.arg(numero)), NULLIF(btrim(sqlc.arg(serie)), '')
+);
+
+-- name: DeletarNotasFiscaisDaOrdemServico :exec
+-- Mesmo raciocínio do DELETE de itens acima. Serve dois casos: a substituição
+-- do conjunto em CorrigirCusto e o Administrador DESMARCANDO tem_nota_fiscal,
+-- que tem que apagar as notas na mesma escrita -- é a direção que o trigger
+-- não cobre de propósito (ver a nota na migration 000012).
+DELETE FROM os_nota_fiscal
+WHERE tenant_id = sqlc.arg(tenant_id) AND ordem_servico_id = sqlc.arg(ordem_servico_id);
+
+-- name: ObterNotasFiscaisDasOrdensServico :many
+-- Espelho de ObterItensDeCustoDasOrdensServico; ver as notas de lá sobre a
+-- ausência de tenant_id e sobre a ordenação.
+SELECT id, ordem_servico_id, numero, serie
+FROM os_nota_fiscal
+WHERE ordem_servico_id = ANY(sqlc.arg(ordens_servico_ids)::bigint[])
+ORDER BY ordem_servico_id, id;

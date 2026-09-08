@@ -754,7 +754,7 @@ func TestOrdemServicoAcionarTerceiroAtorIdEEmpresa(t *testing.T) {
 	}
 }
 
-const dadosEncerramentoValidos = `{"tipoDefeito":"Corretiva","defeitoConstatado":"Resistência queimada","causaRaiz":"Desgaste natural","solucao":"Troca da resistência","custoHoraTecnico":45,"custoManutencao":120.5}`
+const dadosEncerramentoValidos = `{"tipoDefeito":"Corretiva","defeitoConstatado":"Resistência queimada","causaRaiz":"Desgaste natural","solucao":"Troca da resistência","itens":[{"descricao":"Troca do rolamento","custoManutencao":120.5,"custoHoraTecnico":45}]}`
 
 func TestOrdemServicoEncerrarStatus(t *testing.T) {
 
@@ -812,12 +812,21 @@ func TestOrdemServicoEncerrarAtorIdEPayload(t *testing.T) {
 	if recebido.TipoDefeito != "Corretiva" || recebido.Solucao != "Troca da resistência" {
 		t.Errorf("payload = %+v, não bateu com o corpo enviado", recebido)
 	}
-	if recebido.CustoHoraTecnico == nil || *recebido.CustoHoraTecnico != 45 {
-		t.Errorf("custoHoraTecnico = %v, esperado 45", recebido.CustoHoraTecnico)
+	// A lista chega inteira e na ordem enviada -- é ela que o service soma.
+	if len(recebido.Itens) != 1 {
+		t.Fatalf("itens = %+v, esperado 1 tarefa", recebido.Itens)
+	}
+	tarefa := recebido.Itens[0]
+	if tarefa.Descricao != "Troca do rolamento" || tarefa.CustoManutencao != 120.5 {
+		t.Errorf("tarefa = %+v, esperado Troca do rolamento com 120.5 de peça", tarefa)
+	}
+	// Ponteiro, e não valor: nulo distingue "não cobrou hora" de "cobrou zero".
+	if tarefa.CustoHoraTecnico == nil || *tarefa.CustoHoraTecnico != 45 {
+		t.Errorf("custoHoraTecnico = %v, esperado 45", tarefa.CustoHoraTecnico)
 	}
 }
 
-const dadosCustoValidos = `{"custoHoraTecnico":45,"custoManutencao":120.5}`
+const dadosCustoValidos = `{"itens":[{"descricao":"Troca do rolamento","custoManutencao":120.5,"custoHoraTecnico":45}]}`
 
 func TestOrdemServicoCustoStatus(t *testing.T) {
 
@@ -829,10 +838,18 @@ func TestOrdemServicoCustoStatus(t *testing.T) {
 	}{
 		{"sucesso", dadosCustoValidos, nil, http.StatusOK},
 		{"corpo malformado", `{`, nil, http.StatusBadRequest},
-		{"custoManutencao negativo", `{"custoHoraTecnico":45,"custoManutencao":-10}`, nil, http.StatusBadRequest},
+		{"custo de manutenção negativo", `{"itens":[{"descricao":"Peça","custoManutencao":-10}]}`, nil, http.StatusBadRequest},
+		{"custo hora do técnico negativo", `{"itens":[{"descricao":"Peça","custoManutencao":10,"custoHoraTecnico":-1}]}`, nil, http.StatusBadRequest},
+		{"tarefa sem descrição", `{"itens":[{"custoManutencao":10}]}`, nil, http.StatusBadRequest},
+		{"lista de tarefas vazia", `{"itens":[]}`, nil, http.StatusBadRequest},
 		{"regra de tipo violada (validação do service)", dadosCustoValidos, helper.ErrValidacao, http.StatusBadRequest},
 		{"não encontrada", dadosCustoValidos, helper.ErrNaoEncontrado, http.StatusNotFound},
 		{"conflito de estado (OS ainda não encerrada)", dadosCustoValidos, helper.ErrConflitoIntegridade, http.StatusUnprocessableEntity},
+		// uq_nota_fiscal_os: a mesma nota lançada duas vezes na lista. Só virou
+		// alcançável na migration 000012 -- antes esta rota era um UPDATE 1:1 em
+		// os_custo, sem como colidir --, e sem este caso no switch do controller
+		// o Administrador levava 500 no lugar de "essa nota você já lançou".
+		{"nota fiscal repetida", dadosCustoValidos, helper.ErrDadoDuplicado, http.StatusConflict},
 		{"erro genérico", dadosCustoValidos, errors.New("erro de banco"), http.StatusInternalServerError},
 	}
 
@@ -873,10 +890,10 @@ func TestOrdemServicoCustoAtorIdEPayload(t *testing.T) {
 	if ordemServicoId != 42 {
 		t.Errorf("ordemServicoId = %d, esperado 42 (do :id da rota)", ordemServicoId)
 	}
-	if recebido.CustoManutencao != 120.5 {
-		t.Errorf("custoManutencao = %v, esperado 120.5", recebido.CustoManutencao)
+	if len(recebido.Itens) != 1 {
+		t.Fatalf("itens = %+v, esperado 1 tarefa", recebido.Itens)
 	}
-	if recebido.CustoHoraTecnico == nil || *recebido.CustoHoraTecnico != 45 {
-		t.Errorf("custoHoraTecnico = %v, esperado 45", recebido.CustoHoraTecnico)
+	if recebido.Itens[0].CustoManutencao != 120.5 {
+		t.Errorf("custoManutencao da tarefa = %v, esperado 120.5", recebido.Itens[0].CustoManutencao)
 	}
 }
