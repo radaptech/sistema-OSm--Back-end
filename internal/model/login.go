@@ -4,10 +4,19 @@ import "encoding/json"
 
 // Login é o corpo de POST /autenticacao/login -- espelha CredenciaisLogin em
 // front-end/src/tipos/autenticacao.ts.
+//
+// ⚠️ NÃO existe campo `perfil`, e a ausência é deliberada. Ele existiu até aqui,
+// e o service o comparava com usuario.perfil devolvendo ErrCredenciaisInvalidas
+// quando não batia -- ou seja, ele nunca autorizou nada: quem manda no token e
+// na sessão é sempre a linha do banco. O que ele fazia, na prática, era
+// transformar "escolhi a aba errada" em "e-mail ou senha inválidos", que é a
+// mensagem genérica de propósito e não tinha como explicar o erro real.
+//
+// Campo extra no corpo é ignorado pelo binding, então um front antigo mandando
+// `perfil` continua logando normalmente -- por isso o back pode subir antes.
 type Login struct {
-	Perfil string `json:"perfil" binding:"required,oneof=solicitante tecnico gestor administrador"`
-	Email  string `json:"email" binding:"required,email"`
-	Senha  string `json:"senha" binding:"required,min=6"`
+	Email string `json:"email" binding:"required,email"`
+	Senha string `json:"senha" binding:"required,min=6"`
 }
 
 // SetoresIds representa o `number[] | 'todos'` de EscopoAcessoGestor.setoresIds

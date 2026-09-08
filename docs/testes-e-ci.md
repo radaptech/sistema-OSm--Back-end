@@ -64,6 +64,10 @@ suspeitosamente rápido (provavelmente é `t.Skip` por falta de Postgres).
 - Dois níveis em `internal/service/`:
   - `loginService_test.go` — unitário, sem banco: tabela cobrindo `validarEscopo` +
     `escopoDoPerfil` nos 4 perfis.
+  - ⚠️ `TestLogin/perfil da sessao vem do banco, nao do corpo` é o teste que **substituiu**
+    a comparação de perfil removida do login (ver "Autenticação" em `docs/api-e-rotas.md`).
+    Com o campo fora do corpo, a linha do banco virou a única fonte do perfil — sem este
+    teste, trocar `montarSessao` por um perfil fixo passaria batido em toda a suíte.
   - `loginIntegracao_test.go`, `lojaIntegracao_test.go`, `setorIntegracao_test.go`,
     `maquinarioIntegracao_test.go`, `preventivaIntegracao_test.go`,
     `escopoListagemIntegracao_test.go`, `solicitacaoOsIntegracao_test.go` —

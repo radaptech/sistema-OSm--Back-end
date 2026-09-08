@@ -160,12 +160,10 @@ func (s *UsuarioService) Login(ctx context.Context, loginModel model.Login, tena
 		return "", model.SessaoUsuario{}, helper.ErrCredenciaisInvalidas
 	}
 
-	// O perfil vem do formulário de login, então é palpite do cliente: se não
-	// bate com o do banco, é credencial errada -- nunca promove ninguém.
-	if string(user.Perfil) != loginModel.Perfil {
-		return "", model.SessaoUsuario{}, helper.ErrCredenciaisInvalidas
-	}
-
+	// Sem cheque de perfil: ele saiu do corpo do login (ver model.Login). O
+	// perfil autoritativo é o da linha do banco, e é ele que vai para o token e
+	// para a sessão logo abaixo -- comparar com um palpite do cliente só
+	// transformava "escolhi a aba errada" em "credenciais inválidas".
 	sessao, err := s.montarSessao(ctx, repo, user, tenantId)
 	if err != nil {
 		return "", model.SessaoUsuario{}, err

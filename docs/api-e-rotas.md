@@ -30,12 +30,22 @@ Leia antes de registrar rota nova, mexer em middleware ou montar corpo de respos
 - `service.UsuarioService.Login(ctx, model.Login, tenantId)` devolve `(token, sessão,
   erro)` — o service já assina o JWT, o controller só precisa pôr no cookie. Sem
   transação de propósito: são leituras + o `UPDATE` de `ultimo_acesso`.
-- **E-mail inexistente, senha errada, usuário inativo e perfil trocado devolvem todos
+- **E-mail inexistente, senha errada e usuário inativo devolvem todos
   `helper.ErrCredenciaisInvalidas`**, a mesma mensagem — senão o login vira um oráculo
-  de quais e-mails existem no tenant. O `perfil` vem do formulário, então é palpite do
-  cliente: quando não bate com o do banco é credencial inválida, **nunca** promoção.
-  (`ObterUsuarioPorEmail` já filtra `AND ativo`, então usuário desativado cai sozinho no
-  mesmo `ErrNoRows`.)
+  de quais e-mails existem no tenant. (`ObterUsuarioPorEmail` já filtra `AND ativo`, então
+  usuário desativado cai sozinho no mesmo `ErrNoRows`.)
+- ⚠️ **`model.Login` NÃO tem campo `perfil`, e a ausência é deliberada.** Ele existiu, o
+  service o comparava com `usuario.perfil` e devolvia `ErrCredenciaisInvalidas` quando não
+  batia. Ou seja: nunca autorizou nada — quem manda no token e na `SessaoUsuario` é sempre
+  a linha do banco. O que o campo fazia, na prática, era transformar "o usuário clicou na
+  aba errada da tela de login" em "e-mail ou senha inválidos", que é a mensagem genérica
+  de propósito e por isso não tinha como explicar o erro real. O seletor de perfil saiu da
+  tela junto (`front-end`, item 1); ele continua existindo em **CadastrarUsuario**, onde
+  decide de verdade o que o usuário será.
+  Campo extra no corpo é ignorado pelo binding, então um front antigo mandando `perfil`
+  continua logando — o back pode subir antes, ao contrário da mudança de custo da
+  migration `000012`. `TestLogin/perfil da sessao vem do banco, nao do corpo` é o teste
+  que substituiu a comparação removida.
 - `SessaoUsuario` é montada por perfil em `montarSessao`: administrador não tem nada
   (a ausência de escopo É o acesso total), técnico leva `tecnicoId` = o próprio
   `usuario.id` (`fk_os_tecnico` aponta pra `usuario`; não existe tabela `tecnico`),

@@ -21,6 +21,7 @@ API Go/Gin, multi-tenant por subdomínio, consumida pelo front em `../sistema-OS
 - **Erros**: `errors.Is(err, pgx.ErrNoRows)` **antes** de `TraduzErroPostgres` (senão id inexistente vira 500); sentinela na frente do `%w` (`fmt.Errorf("%w: detalhe", helper.ErrX)`).
 - **Exclusão é sempre soft delete**, sem reativação pela API; coluna `ativa` (loja/máquina/preventiva) ou `ativo` (usuário/setor); query de desativar é `:execrows` e `linhas == 0` → `ErrNaoEncontrado`. Exceção: `os_custo_item` e `os_nota_fiscal` apagam de verdade — são composição de um valor reescrito inteiro, não entidade.
 - **Custo da OS é uma lista de TAREFAS** (`os_custo_item`, migration `000012`), cada uma com material e mão de obra; os agregados de `os_custo` são a soma que **o servidor** calcula, nunca um total vindo do cliente.
+- **Login não tem `perfil` no corpo** — quem diz o perfil é a linha do banco, e é ela que vai pro token e pra sessão.
 - **Transição de estado é `POST` em sub-recurso** (`/iniciar`, `/rejeitar`), nunca `PATCH` de `status`.
 - **Não simplifique constraint/trigger/view** sem ler o porquê em `docs/modelagem-banco-dados.md`.
 
