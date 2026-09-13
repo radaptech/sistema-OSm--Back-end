@@ -34,7 +34,7 @@ SET perfil = $3,
     email = $6,
     telefone = $7
 WHERE id = $1 AND tenant_id = $2
-RETURNING id, tenant_id, perfil, area_tecnico_id, nome, email, senha_hash, telefone, ativo, ultimo_acesso, criado_em
+RETURNING id, tenant_id, perfil, area_tecnico_id, nome, email, senha_hash, telefone, ativo, ultimo_acesso, criado_em, token_recuperacao_hash, token_recuperacao_expira_em
 `
 
 type AtualizarUsuarioParams struct {
@@ -73,6 +73,8 @@ func (q *Queries) AtualizarUsuario(ctx context.Context, arg AtualizarUsuarioPara
 		&i.Ativo,
 		&i.UltimoAcesso,
 		&i.CriadoEm,
+		&i.TokenRecuperacaoHash,
+		&i.TokenRecuperacaoExpiraEm,
 	)
 	return i, err
 }
@@ -119,7 +121,7 @@ const criarUsuario = `-- name: CriarUsuario :one
 
 INSERT INTO usuario (tenant_id, perfil, area_tecnico_id, nome, email, senha_hash, telefone)
 VALUES ($1, $2, $3, $4, $5, $6, $7)
-RETURNING id, tenant_id, perfil, area_tecnico_id, nome, email, senha_hash, telefone, ativo, ultimo_acesso, criado_em
+RETURNING id, tenant_id, perfil, area_tecnico_id, nome, email, senha_hash, telefone, ativo, ultimo_acesso, criado_em, token_recuperacao_hash, token_recuperacao_expira_em
 `
 
 type CriarUsuarioParams struct {
@@ -158,6 +160,8 @@ func (q *Queries) CriarUsuario(ctx context.Context, arg CriarUsuarioParams) (Usu
 		&i.Ativo,
 		&i.UltimoAcesso,
 		&i.CriadoEm,
+		&i.TokenRecuperacaoHash,
+		&i.TokenRecuperacaoExpiraEm,
 	)
 	return i, err
 }
@@ -302,7 +306,7 @@ func (q *Queries) ListarTecnicos(ctx context.Context, arg ListarTecnicosParams) 
 }
 
 const listarUsuarios = `-- name: ListarUsuarios :many
-SELECT id, tenant_id, perfil, area_tecnico_id, nome, email, senha_hash, telefone, ativo, ultimo_acesso, criado_em FROM usuario
+SELECT id, tenant_id, perfil, area_tecnico_id, nome, email, senha_hash, telefone, ativo, ultimo_acesso, criado_em, token_recuperacao_hash, token_recuperacao_expira_em FROM usuario
 WHERE tenant_id = $1
   AND ativo
   AND ($4::perfil_usuario IS NULL OR perfil = $4)
@@ -369,6 +373,8 @@ func (q *Queries) ListarUsuarios(ctx context.Context, arg ListarUsuariosParams) 
 			&i.Ativo,
 			&i.UltimoAcesso,
 			&i.CriadoEm,
+			&i.TokenRecuperacaoHash,
+			&i.TokenRecuperacaoExpiraEm,
 		); err != nil {
 			return nil, err
 		}
@@ -453,7 +459,7 @@ func (q *Queries) ObterGestoresDoSetor(ctx context.Context, arg ObterGestoresDoS
 }
 
 const obterUsuarioPorEmail = `-- name: ObterUsuarioPorEmail :one
-SELECT id, tenant_id, perfil, area_tecnico_id, nome, email, senha_hash, telefone, ativo, ultimo_acesso, criado_em FROM usuario
+SELECT id, tenant_id, perfil, area_tecnico_id, nome, email, senha_hash, telefone, ativo, ultimo_acesso, criado_em, token_recuperacao_hash, token_recuperacao_expira_em FROM usuario
 WHERE tenant_id = $1 AND email = $2 AND ativo
 `
 
@@ -478,12 +484,14 @@ func (q *Queries) ObterUsuarioPorEmail(ctx context.Context, arg ObterUsuarioPorE
 		&i.Ativo,
 		&i.UltimoAcesso,
 		&i.CriadoEm,
+		&i.TokenRecuperacaoHash,
+		&i.TokenRecuperacaoExpiraEm,
 	)
 	return i, err
 }
 
 const obterUsuarioPorID = `-- name: ObterUsuarioPorID :one
-SELECT id, tenant_id, perfil, area_tecnico_id, nome, email, senha_hash, telefone, ativo, ultimo_acesso, criado_em FROM usuario
+SELECT id, tenant_id, perfil, area_tecnico_id, nome, email, senha_hash, telefone, ativo, ultimo_acesso, criado_em, token_recuperacao_hash, token_recuperacao_expira_em FROM usuario
 WHERE id = $1 AND tenant_id = $2
 `
 
@@ -507,8 +515,37 @@ func (q *Queries) ObterUsuarioPorID(ctx context.Context, arg ObterUsuarioPorIDPa
 		&i.Ativo,
 		&i.UltimoAcesso,
 		&i.CriadoEm,
+		&i.TokenRecuperacaoHash,
+		&i.TokenRecuperacaoExpiraEm,
 	)
 	return i, err
+}
+
+const redefinirSenhaPorToken = `-- name: RedefinirSenhaPorToken :execrows
+UPDATE usuario
+SET senha_hash = $1,
+    token_recuperacao_hash = NULL,
+    token_recuperacao_expira_em = NULL
+WHERE tenant_id = $2
+  AND token_recuperacao_hash = $3::text
+  AND token_recuperacao_expira_em > now()
+  AND ativo
+`
+
+type RedefinirSenhaPorTokenParams struct {
+	SenhaHash string
+	TenantID  int64
+	TokenHash string
+}
+
+// Troca a senha e queima o token no mesmo UPDATE: dois cliques no mesmo link não passam os dois.
+// 0 linhas = token inexistente, expirado, de outro tenant ou de usuário desativado -- o cliente não distingue.
+func (q *Queries) RedefinirSenhaPorToken(ctx context.Context, arg RedefinirSenhaPorTokenParams) (int64, error) {
+	result, err := q.db.Exec(ctx, redefinirSenhaPorToken, arg.SenhaHash, arg.TenantID, arg.TokenHash)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const registrarUltimoAcesso = `-- name: RegistrarUltimoAcesso :exec
@@ -525,4 +562,28 @@ type RegistrarUltimoAcessoParams struct {
 func (q *Queries) RegistrarUltimoAcesso(ctx context.Context, arg RegistrarUltimoAcessoParams) error {
 	_, err := q.db.Exec(ctx, registrarUltimoAcesso, arg.ID, arg.TenantID)
 	return err
+}
+
+const salvarTokenRecuperacaoSenha = `-- name: SalvarTokenRecuperacaoSenha :one
+UPDATE usuario
+SET token_recuperacao_hash = $1::text,
+    token_recuperacao_expira_em = now() + interval '30 minutes'
+WHERE tenant_id = $2 AND email = $3 AND ativo
+RETURNING email
+`
+
+type SalvarTokenRecuperacaoSenhaParams struct {
+	TokenHash string
+	TenantID  int64
+	Email     string
+}
+
+// Validade calculada com o now() do banco, o mesmo relógio que RedefinirSenhaPorToken compara.
+// Um pedido novo sobrescreve o anterior: só o último link enviado vale.
+// Os 30 minutos estão escritos no texto do e-mail (EmailService.go): mudou aqui, muda lá.
+func (q *Queries) SalvarTokenRecuperacaoSenha(ctx context.Context, arg SalvarTokenRecuperacaoSenhaParams) (string, error) {
+	row := q.db.QueryRow(ctx, salvarTokenRecuperacaoSenha, arg.TokenHash, arg.TenantID, arg.Email)
+	var email string
+	err := row.Scan(&email)
+	return email, err
 }

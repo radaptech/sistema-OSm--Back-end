@@ -19,6 +19,17 @@ type Login struct {
 	Senha string `json:"senha" binding:"required,min=6"`
 }
 
+// SolicitarRecuperacaoSenha é o corpo de POST /autenticacao/esqueci-senha.
+type SolicitarRecuperacaoSenha struct {
+	Email string `json:"email" binding:"required,email"`
+}
+
+// RedefinirSenha é o corpo de POST /autenticacao/redefinir-senha; `min=6` é a mesma regra do login.
+type RedefinirSenha struct {
+	Token string `json:"token" binding:"required"`
+	Senha string `json:"senha" binding:"required,min=6"`
+}
+
 // SetoresIds representa o `number[] | 'todos'` de EscopoAcessoGestor.setoresIds
 // no front: AcessoTotal vira a string "todos" no JSON, senão vira o array de
 // ids (nunca null -- lista vazia quando o escopo ainda não tem setor).
