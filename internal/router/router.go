@@ -24,6 +24,7 @@ type Container struct {
 	Terceir *controller.EmpresaTerceirizadaController
 	Solicit *controller.SolicitacaoController
 	OrdemOS *controller.OrdemServicoController
+	Recuper *controller.RecuperacaoSenhaController
 }
 
 func NewContainer(db *pgxpool.Pool) *Container {
@@ -36,6 +37,11 @@ func NewContainer(db *pgxpool.Pool) *Container {
 	serviceTerceirizada := service.NewRepoEmpresaTerceirizada(db)
 	serviceSolicitacao := service.NewRepoSolicitacao(db)
 	serviceOrdemServico := service.NewRepoOrdemServico(db)
+	// Sem RESEND_API_KEY o pedido responde 200 e só o envio falha, no log -- igual o notificador sem Evolution API.
+	serviceRecuperacao := service.NewRepoRecuperacaoSenha(db, service.NewEmailService(
+		os.Getenv("RESEND_API_KEY"),
+		os.Getenv("URL_FRONTEND_FORMATO"),
+	))
 
 	// Notificador é opcional (campo público, não parâmetro de construtor -- ver
 	// o comentário em SolicitacaoService/PreventivaService): URL vazia faz
@@ -69,6 +75,7 @@ func NewContainer(db *pgxpool.Pool) *Container {
 		Terceir: controller.NewEmpresaTerceirizadaController(serviceTerceirizada),
 		Solicit: controller.NewSolicitacaoController(serviceSolicitacao, bucketOsServico, bucketPequenosReparos, bucketMaquinas),
 		OrdemOS: controller.NewOrdemServicoController(serviceOrdemServico),
+		Recuper: controller.NewRecuperacaoSenhaController(serviceRecuperacao),
 		queries: repository.New(db),
 	}
 }
@@ -92,6 +99,9 @@ func ConfigurarRotas(r *gin.Engine, c *Container) {
 	autenticacao.POST("/login", middleware.LimitarPorIP(rate.Every(12*time.Second), 5), middleware.TenantMiddleware(c.queries), c.Login.Login())
 	autenticacao.POST("/logout", c.Login.Logout())
 	autenticacao.GET("/sessao", middleware.AutenticacaoJwt(), c.Login.Sessao())
+	// Mais apertado que o login: cada pedido aceito dispara um e-mail real para a caixa de alguém.
+	autenticacao.POST("/esqueci-senha", middleware.LimitarPorIP(rate.Every(time.Minute), 3), middleware.TenantMiddleware(c.queries), c.Recuper.EsqueciSenha())
+	autenticacao.POST("/redefinir-senha", middleware.LimitarPorIP(rate.Every(12*time.Second), 5), middleware.TenantMiddleware(c.queries), c.Recuper.RedefinirSenha())
 
 	usuarios := api.Group("/usuarios", middleware.AutenticacaoJwt())
 	usuarios.POST("", middleware.Permitir("administrador"), c.Login.Registrar())

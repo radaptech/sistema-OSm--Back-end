@@ -657,17 +657,19 @@ type SolicitacaoO struct {
 }
 
 type Usuario struct {
-	ID            int64
-	TenantID      int64
-	Perfil        PerfilUsuario
-	AreaTecnicoID *int16
-	Nome          string
-	Email         string
-	SenhaHash     string
-	Telefone      *string
-	Ativo         bool
-	UltimoAcesso  pgtype.Timestamptz
-	CriadoEm      pgtype.Timestamptz
+	ID                       int64
+	TenantID                 int64
+	Perfil                   PerfilUsuario
+	AreaTecnicoID            *int16
+	Nome                     string
+	Email                    string
+	SenhaHash                string
+	Telefone                 *string
+	Ativo                    bool
+	UltimoAcesso             pgtype.Timestamptz
+	CriadoEm                 pgtype.Timestamptz
+	TokenRecuperacaoHash     *string
+	TokenRecuperacaoExpiraEm pgtype.Timestamptz
 }
 
 type UsuarioEscopo struct {
