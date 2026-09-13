@@ -32,6 +32,8 @@ var (
 	// olhar o texto do erro.
 	ErrValidacao = errors.New("dados inválidos")
 	ErrToken     = errors.New("")
+	// Mensagem única para token inexistente, expirado ou já usado: o cliente só precisa saber que tem de pedir outro link.
+	ErrTokenRecuperacaoInvalido = errors.New("link de recuperação inválido ou expirado, solicite um novo")
 )
 
 // Códigos de Erro Oficiais do PostgreSQL

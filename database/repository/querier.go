@@ -1040,6 +1040,9 @@ type Querier interface {
 	// que lê o estado antes de chamar esta query (ObterOrdemServicoPorID) e
 	// repassa esse valor pra CriarPausa.status_anterior logo abaixo.
 	PausarOrdemServico(ctx context.Context, arg PausarOrdemServicoParams) (OrdemServico, error)
+	// Troca a senha e queima o token no mesmo UPDATE: dois cliques no mesmo link não passam os dois.
+	// 0 linhas = token inexistente, expirado, de outro tenant ou de usuário desativado -- o cliente não distingue.
+	RedefinirSenhaPorToken(ctx context.Context, arg RedefinirSenhaPorTokenParams) (int64, error)
 	RegistrarUltimoAcesso(ctx context.Context, arg RegistrarUltimoAcessoParams) error
 	// ck_rejeicao exige os três juntos (motivo, autor, instante) -- por isso
 	// entram juntos aqui, nunca um UPDATE incremental. Mesmo filtro
@@ -1054,6 +1057,10 @@ type Querier interface {
 	// coluna (ver CriarPausa acima), um SET com sqlc.arg cru fica ambíguo pro
 	// sqlc -- mesma cautela de sqlc.narg(tipo)::tipo_os em ListarOrdensServico.
 	RetomarOrdemServico(ctx context.Context, arg RetomarOrdemServicoParams) (OrdemServico, error)
+	// Validade calculada com o now() do banco, o mesmo relógio que RedefinirSenhaPorToken compara.
+	// Um pedido novo sobrescreve o anterior: só o último link enviado vale.
+	// Os 30 minutos estão escritos no texto do e-mail (EmailService.go): mudou aqui, muda lá.
+	SalvarTokenRecuperacaoSenha(ctx context.Context, arg SalvarTokenRecuperacaoSenhaParams) (string, error)
 }
 
 var _ Querier = (*Queries)(nil)

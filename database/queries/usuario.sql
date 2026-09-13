@@ -82,6 +82,28 @@ UPDATE usuario
 SET senha_hash = $3
 WHERE id = $1 AND tenant_id = $2;
 
+-- name: SalvarTokenRecuperacaoSenha :one
+-- Validade calculada com o now() do banco, o mesmo relógio que RedefinirSenhaPorToken compara.
+-- Um pedido novo sobrescreve o anterior: só o último link enviado vale.
+-- Os 30 minutos estão escritos no texto do e-mail (EmailService.go): mudou aqui, muda lá.
+UPDATE usuario
+SET token_recuperacao_hash = sqlc.arg(token_hash)::text,
+    token_recuperacao_expira_em = now() + interval '30 minutes'
+WHERE tenant_id = sqlc.arg(tenant_id) AND email = sqlc.arg(email) AND ativo
+RETURNING email;
+
+-- name: RedefinirSenhaPorToken :execrows
+-- Troca a senha e queima o token no mesmo UPDATE: dois cliques no mesmo link não passam os dois.
+-- 0 linhas = token inexistente, expirado, de outro tenant ou de usuário desativado -- o cliente não distingue.
+UPDATE usuario
+SET senha_hash = sqlc.arg(senha_hash),
+    token_recuperacao_hash = NULL,
+    token_recuperacao_expira_em = NULL
+WHERE tenant_id = sqlc.arg(tenant_id)
+  AND token_recuperacao_hash = sqlc.arg(token_hash)::text
+  AND token_recuperacao_expira_em > now()
+  AND ativo;
+
 -- name: RegistrarUltimoAcesso :exec
 UPDATE usuario
 SET ultimo_acesso = now()

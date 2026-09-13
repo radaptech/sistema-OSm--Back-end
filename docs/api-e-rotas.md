@@ -84,6 +84,7 @@ Leia antes de registrar rota nova, mexer em middleware ou montar corpo de respos
   | `GET /api` (healthcheck) | pública |
   | `POST /autenticacao/login` | pública (rate limit + `TenantMiddleware`) |
   | `POST /autenticacao/logout` | pública, ver abaixo |
+  | `POST /autenticacao/esqueci-senha`, `/redefinir-senha` | pública (rate limit + `TenantMiddleware`, como o login) |
   | `GET /autenticacao/sessao` | autenticada |
   | `GET·POST /usuarios`, `GET·PUT·DELETE /usuarios/:id` | administrador |
   | `GET /empresas` | administrador |

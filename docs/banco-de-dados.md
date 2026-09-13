@@ -25,7 +25,8 @@ O modelo de dados em si (o porquê de cada constraint) está em
   humana, `000006` seed de `area_tecnico`, `000007` urgência vira ENUM, `000008`
   preventiva vai direto para o técnico, `000009` custo revisado pelo Administrador,
   `000010` nota fiscal em qualquer tipo, `000011` nota fiscal declarada no encerramento,
-  `000012` custo itemizado por tarefa e notas fiscais em lista.
+  `000012` custo itemizado por tarefa e notas fiscais em lista, `000013` token de
+  recuperação de senha (só o SHA-256 + validade, na própria `usuario`).
 - ⚠️ **Tabela e tipo dividem namespace no Postgres** — trocar uma tabela por um ENUM
   homônimo exige dropar a tabela **antes** de criar o tipo (foi o caso de `000004`).
 
