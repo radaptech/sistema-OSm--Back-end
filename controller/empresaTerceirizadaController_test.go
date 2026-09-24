@@ -9,9 +9,9 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
+	"github.com/radaptech/ginmw"
 	"github.com/radaptech/sistema-OSm--Back-end/internal/helper"
 	"github.com/radaptech/sistema-OSm--Back-end/internal/model"
-	"github.com/radaptech/sistema-OSm--Back-end/middleware"
 )
 
 type terceirizadaFake struct {
@@ -71,7 +71,7 @@ func requisicaoTerceirizada(metodo, id, corpo string) (*httptest.ResponseRecorde
 	if id != "" {
 		ctx.Params = gin.Params{{Key: "id", Value: id}}
 	}
-	ctx.Set(middleware.UserTenantId, int64(7))
+	ctx.Set(ginmw.TenantIDKey, int64(7))
 	return w, ctx
 }
 
