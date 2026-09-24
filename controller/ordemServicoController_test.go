@@ -15,7 +15,7 @@ import (
 	"github.com/radaptech/sistema-OSm--Back-end/internal/helper"
 	"github.com/radaptech/sistema-OSm--Back-end/internal/model"
 	"github.com/radaptech/sistema-OSm--Back-end/internal/service"
-	"github.com/radaptech/sistema-OSm--Back-end/middleware"
+	"github.com/radaptech/ginmw"
 )
 
 // ordemServicoFake grava o que recebeu, não só o erro que devolve -- mesmo
@@ -206,9 +206,9 @@ func contextoOS(filtros url.Values) (*gin.Context, *httptest.ResponseRecorder) {
 		alvo += "?" + q
 	}
 	ctx.Request = httptest.NewRequest(http.MethodGet, alvo, nil)
-	ctx.Set(middleware.UserTenantId, int64(7))
-	ctx.Set(middleware.UserId, int64(5))
-	ctx.Set(middleware.UserPerfil, "gestor")
+	ctx.Set(ginmw.TenantIDKey, int64(7))
+	ctx.Set(ginmw.UserIDKey, int64(5))
+	ctx.Set(ginmw.RoleKey, "gestor")
 	return ctx, rec
 }
 
@@ -363,9 +363,9 @@ func TestOrdemServicoSemClaimDaSessao(t *testing.T) {
 		nome    string
 		remover string
 	}{
-		{"sem tenant", middleware.UserTenantId},
-		{"sem usuário", middleware.UserId},
-		{"sem perfil", middleware.UserPerfil},
+		{"sem tenant", ginmw.TenantIDKey},
+		{"sem usuário", ginmw.UserIDKey},
+		{"sem perfil", ginmw.RoleKey},
 	}
 
 	for _, caso := range casos {
@@ -374,11 +374,11 @@ func TestOrdemServicoSemClaimDaSessao(t *testing.T) {
 			rec := httptest.NewRecorder()
 			ctx, _ := gin.CreateTestContext(rec)
 			ctx.Request = httptest.NewRequest(http.MethodGet, "/ordens-servico", nil)
-			for _, chave := range []string{middleware.UserTenantId, middleware.UserId, middleware.UserPerfil} {
+			for _, chave := range []string{ginmw.TenantIDKey, ginmw.UserIDKey, ginmw.RoleKey} {
 				if chave == caso.remover {
 					continue
 				}
-				if chave == middleware.UserPerfil {
+				if chave == ginmw.RoleKey {
 					ctx.Set(chave, "gestor")
 				} else {
 					ctx.Set(chave, int64(7))
@@ -420,9 +420,9 @@ func contextoIndicadores(id string) (*gin.Context, *httptest.ResponseRecorder) {
 	ctx, _ := gin.CreateTestContext(rec)
 	ctx.Request = httptest.NewRequest(http.MethodGet, "/indicadores/maquinas/"+id, nil)
 	ctx.Params = gin.Params{{Key: "id", Value: id}}
-	ctx.Set(middleware.UserTenantId, int64(7))
-	ctx.Set(middleware.UserId, int64(5))
-	ctx.Set(middleware.UserPerfil, "gestor")
+	ctx.Set(ginmw.TenantIDKey, int64(7))
+	ctx.Set(ginmw.UserIDKey, int64(5))
+	ctx.Set(ginmw.RoleKey, "gestor")
 	return ctx, rec
 }
 
@@ -530,9 +530,9 @@ func contextoOSAcao(id, corpo string) (*gin.Context, *httptest.ResponseRecorder)
 		ctx.Request.Header.Set("Content-Type", "application/json")
 	}
 	ctx.Params = gin.Params{{Key: "id", Value: id}}
-	ctx.Set(middleware.UserTenantId, int64(7))
-	ctx.Set(middleware.UserId, int64(5))
-	ctx.Set(middleware.UserPerfil, "tecnico")
+	ctx.Set(ginmw.TenantIDKey, int64(7))
+	ctx.Set(ginmw.UserIDKey, int64(5))
+	ctx.Set(ginmw.RoleKey, "tecnico")
 	return ctx, rec
 }
 

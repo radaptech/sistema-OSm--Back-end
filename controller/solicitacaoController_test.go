@@ -14,7 +14,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/radaptech/sistema-OSm--Back-end/internal/helper"
 	"github.com/radaptech/sistema-OSm--Back-end/internal/model"
-	"github.com/radaptech/sistema-OSm--Back-end/middleware"
+	"github.com/radaptech/ginmw"
 )
 
 // solicitacaoFake grava o que recebeu, não só o erro que devolve -- mesmo
@@ -181,9 +181,9 @@ func requisicaoSolicitacao(metodo, path, dados string, arquivos ...arquivoMultip
 	ctx, _ := gin.CreateTestContext(w)
 	ctx.Request = httptest.NewRequest(metodo, path, &corpo)
 	ctx.Request.Header.Set("Content-Type", form.FormDataContentType())
-	ctx.Set(middleware.UserTenantId, int64(7))
-	ctx.Set(middleware.UserId, int64(1))
-	ctx.Set(middleware.UserPerfil, "solicitante")
+	ctx.Set(ginmw.TenantIDKey, int64(7))
+	ctx.Set(ginmw.UserIDKey, int64(1))
+	ctx.Set(ginmw.RoleKey, "solicitante")
 	return w, ctx
 }
 
@@ -201,9 +201,9 @@ func requisicaoJSON(metodo, path, id, corpo string) (*httptest.ResponseRecorder,
 	if id != "" {
 		ctx.Params = gin.Params{{Key: "id", Value: id}}
 	}
-	ctx.Set(middleware.UserTenantId, int64(7))
-	ctx.Set(middleware.UserId, int64(1))
-	ctx.Set(middleware.UserPerfil, "gestor")
+	ctx.Set(ginmw.TenantIDKey, int64(7))
+	ctx.Set(ginmw.UserIDKey, int64(1))
+	ctx.Set(ginmw.RoleKey, "gestor")
 	return w, ctx
 }
 
@@ -433,8 +433,8 @@ func TestSolicitacaoAtorVemDoToken(t *testing.T) {
 	t.Run("obter", func(t *testing.T) {
 		var recebido string
 		w, ctx := requisicaoJSON(http.MethodGet, "/solicitacoes/1", "1", "")
-		ctx.Set(middleware.UserId, int64(42))
-		ctx.Set(middleware.UserPerfil, "solicitante")
+		ctx.Set(ginmw.UserIDKey, int64(42))
+		ctx.Set(ginmw.RoleKey, "solicitante")
 
 		novoController(solicitacaoFake{ator: &recebido}).Obter()(ctx)
 
@@ -446,8 +446,8 @@ func TestSolicitacaoAtorVemDoToken(t *testing.T) {
 	t.Run("listar", func(t *testing.T) {
 		var recebido string
 		w, ctx := requisicaoJSON(http.MethodGet, "/solicitacoes", "", "")
-		ctx.Set(middleware.UserId, int64(42))
-		ctx.Set(middleware.UserPerfil, "gestor")
+		ctx.Set(ginmw.UserIDKey, int64(42))
+		ctx.Set(ginmw.RoleKey, "gestor")
 
 		novoController(solicitacaoFake{ator: &recebido}).Listar()(ctx)
 
@@ -459,7 +459,7 @@ func TestSolicitacaoAtorVemDoToken(t *testing.T) {
 	t.Run("minhas", func(t *testing.T) {
 		var recebido string
 		w, ctx := requisicaoJSON(http.MethodGet, "/solicitacoes/minhas", "", "")
-		ctx.Set(middleware.UserId, int64(42))
+		ctx.Set(ginmw.UserIDKey, int64(42))
 
 		novoController(solicitacaoFake{ator: &recebido}).Minhas()(ctx)
 
@@ -471,8 +471,8 @@ func TestSolicitacaoAtorVemDoToken(t *testing.T) {
 	t.Run("abrir-os", func(t *testing.T) {
 		var recebido string
 		w, ctx := requisicaoJSON(http.MethodPost, "/solicitacoes/1/abrir-os", "1", `{"urgencia":"Alta","tecnicoId":5}`)
-		ctx.Set(middleware.UserId, int64(42))
-		ctx.Set(middleware.UserPerfil, "gestor")
+		ctx.Set(ginmw.UserIDKey, int64(42))
+		ctx.Set(ginmw.RoleKey, "gestor")
 
 		novoController(solicitacaoFake{ator: &recebido}).AbrirOS()(ctx)
 
@@ -486,7 +486,7 @@ func TestSolicitacaoAtorVemDoToken(t *testing.T) {
 		w := httptest.NewRecorder()
 		ctx, _ := gin.CreateTestContext(w)
 		ctx.Request = httptest.NewRequest(http.MethodGet, "/solicitacoes", nil)
-		ctx.Set(middleware.UserTenantId, int64(7))
+		ctx.Set(ginmw.TenantIDKey, int64(7))
 
 		novoController(solicitacaoFake{ator: &recebido}).Listar()(ctx)
 

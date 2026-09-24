@@ -11,7 +11,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/radaptech/sistema-OSm--Back-end/internal/helper"
-	"github.com/radaptech/sistema-OSm--Back-end/middleware"
+	"github.com/radaptech/ginmw"
 )
 
 // recuperacaoFake grava o que recebeu: tenant ou subdomínio vindo do lugar errado não muda o status.
@@ -39,7 +39,7 @@ func requisicaoRecuperacao(handler func(*RecuperacaoSenhaController) gin.Handler
 	ctx.Request = httptest.NewRequest(http.MethodPost, "/autenticacao/x", strings.NewReader(corpo))
 	ctx.Request.Header.Set("Content-Type", "application/json")
 	ctx.Request.Header.Set("X-tenant-ID", " acme ")
-	ctx.Set(middleware.TenantId, int64(7))
+	ctx.Set(ginmw.TenantIDHeaderKey, int64(7))
 	handler(NewRecuperacaoSenhaController(fake))(ctx)
 	return w
 }

@@ -11,7 +11,7 @@ import (
 	"github.com/radaptech/sistema-OSm--Back-end/bucketR2"
 	"github.com/radaptech/sistema-OSm--Back-end/config"
 	r "github.com/radaptech/sistema-OSm--Back-end/internal/router"
-	"github.com/radaptech/sistema-OSm--Back-end/middleware"
+	"github.com/radaptech/ginmw"
 )
 
 func main() {
@@ -44,8 +44,8 @@ func main() {
 		log.Fatal(err)
 	}
 
-	router.Use(middleware.CorsConfig())
-	router.Use(middleware.Timeout(30 * time.Second))
+	router.Use(ginmw.CORS("radaptech.com.br"))
+	router.Use(ginmw.Timeout(30 * time.Second))
 	c := r.NewContainer(db)
 	r.ConfigurarRotas(router, c)
 
@@ -111,7 +111,7 @@ func porta() string {
 //
 // O padrão do Gin é confiar em TODO mundo, e aí o X-Forwarded-For vira campo livre do
 // cliente -- um header diferente a cada request ganha um bucket novo e o
-// middleware.LimitarPorIP do login deixa de limitar qualquer coisa.
+// ginmw.RateLimit do login deixa de limitar qualquer coisa.
 //
 // Liste só o endereço do proxy, não a faixa inteira: o Gin caminha o
 // X-Forwarded-For da direita pra esquerda e para no primeiro IP não-confiável, então

@@ -11,7 +11,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/radaptech/sistema-OSm--Back-end/internal/helper"
 	"github.com/radaptech/sistema-OSm--Back-end/internal/model"
-	"github.com/radaptech/sistema-OSm--Back-end/middleware"
+	"github.com/radaptech/ginmw"
 )
 
 // serviceFake devolve sempre o mesmo erro -- é o único eixo que o teste varia.
@@ -118,7 +118,7 @@ func TestRegistrarMapeiaErroParaStatus(t *testing.T) {
 			ctx, _ := gin.CreateTestContext(w)
 			ctx.Request = httptest.NewRequest(http.MethodPost, "/usuarios", strings.NewReader(corpo))
 			ctx.Request.Header.Set("Content-Type", "application/json")
-			ctx.Set(middleware.UserTenantId, int64(7))
+			ctx.Set(ginmw.TenantIDKey, int64(7))
 
 			NewLoginController(serviceFake{err: c.err}).Registrar()(ctx)
 
@@ -160,7 +160,7 @@ func TestLogin(t *testing.T) {
 			ctx.Request = httptest.NewRequest(http.MethodPost, "/autenticacao/login", strings.NewReader(corpo))
 			ctx.Request.Header.Set("Content-Type", "application/json")
 			// Tenant do header: no login ainda não existe token.
-			ctx.Set(middleware.TenantId, int64(7))
+			ctx.Set(ginmw.TenantIDHeaderKey, int64(7))
 
 			NewLoginController(serviceFake{err: c.err}).Login()(ctx)
 
@@ -212,8 +212,8 @@ func TestSessao(t *testing.T) {
 			w := httptest.NewRecorder()
 			ctx, _ := gin.CreateTestContext(w)
 			ctx.Request = httptest.NewRequest(http.MethodGet, "/autenticacao/sessao", nil)
-			ctx.Set(middleware.UserId, int64(1))
-			ctx.Set(middleware.UserTenantId, int64(7))
+			ctx.Set(ginmw.UserIDKey, int64(1))
+			ctx.Set(ginmw.TenantIDKey, int64(7))
 
 			NewLoginController(serviceFake{err: c.err}).Sessao()(ctx)
 
@@ -342,7 +342,7 @@ func TestListarUsuariosFiltros(t *testing.T) {
 			ctx.Request = httptest.NewRequest(http.MethodGet, "/usuarios"+c.query, nil)
 			// Tenant do token: rota autenticada. Se o handler ler o header,
 			// não acha nada aqui e responde 500 -- é o que trava a regressão.
-			ctx.Set(middleware.UserTenantId, int64(7))
+			ctx.Set(ginmw.TenantIDKey, int64(7))
 
 			NewLoginController(serviceFake{recebido: &recebido}).ListarUsuarios()(ctx)
 
@@ -366,7 +366,7 @@ func TestListarUsuariosFiltros(t *testing.T) {
 		w := httptest.NewRecorder()
 		ctx, _ := gin.CreateTestContext(w)
 		ctx.Request = httptest.NewRequest(http.MethodGet, "/usuarios", nil)
-		ctx.Set(middleware.UserTenantId, int64(7))
+		ctx.Set(ginmw.TenantIDKey, int64(7))
 
 		erroCru := fmt.Errorf(`ERROR: relation "usuario_escopo" does not exist (SQLSTATE 42P01)`)
 		NewLoginController(serviceFake{err: erroCru}).ListarUsuarios()(ctx)
@@ -424,8 +424,8 @@ func requisicaoComId(metodo, id, corpo string) (*httptest.ResponseRecorder, *gin
 	ctx.Request = httptest.NewRequest(metodo, "/usuarios/"+id, strings.NewReader(corpo))
 	ctx.Request.Header.Set("Content-Type", "application/json")
 	ctx.Params = gin.Params{{Key: "id", Value: id}}
-	ctx.Set(middleware.UserTenantId, int64(7))
-	ctx.Set(middleware.UserId, int64(42))
+	ctx.Set(ginmw.TenantIDKey, int64(7))
+	ctx.Set(ginmw.UserIDKey, int64(42))
 	return w, ctx
 }
 
@@ -530,7 +530,7 @@ func TestDesativarMapeiaErroParaStatus(t *testing.T) {
 		ctx, _ := gin.CreateTestContext(w)
 		ctx.Request = httptest.NewRequest(http.MethodDelete, "/usuarios/3", nil)
 		ctx.Params = gin.Params{{Key: "id", Value: "3"}}
-		ctx.Set(middleware.UserTenantId, int64(7)) // tenant sim, usuário não
+		ctx.Set(ginmw.TenantIDKey, int64(7)) // tenant sim, usuário não
 
 		NewLoginController(serviceFake{}).Desativar()(ctx)
 
@@ -589,9 +589,9 @@ func TestListarTecnicos(t *testing.T) {
 		w := httptest.NewRecorder()
 		ctx, _ := gin.CreateTestContext(w)
 		ctx.Request = httptest.NewRequest(http.MethodGet, "/tecnicos"+query, nil)
-		ctx.Set(middleware.UserTenantId, int64(7))
-		ctx.Set(middleware.UserId, int64(42))
-		ctx.Set(middleware.UserPerfil, "gestor")
+		ctx.Set(ginmw.TenantIDKey, int64(7))
+		ctx.Set(ginmw.UserIDKey, int64(42))
+		ctx.Set(ginmw.RoleKey, "gestor")
 		return w, ctx
 	}
 
