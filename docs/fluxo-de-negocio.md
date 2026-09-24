@@ -115,8 +115,16 @@ nasce da aprovação do Gestor, nunca de um `POST /ordens-servico`) e a **leitur
 mesmo de essas linhas existirem.
 
 Prontos e testados, fora da lista: os **indicadores de máquina**, o **job de preventiva
-vencida** (falta só o Cron Job no Railway) e a **notificação por WhatsApp** (falta só o
-chip dedicado) — cada um com seção própria abaixo.
+vencida** (falta só o Cron Job no Railway), a **notificação por WhatsApp** (falta só o
+chip dedicado) — cada um com seção própria abaixo — e a **recuperação de senha por
+e-mail** (migration `000013`; falta só `RESEND_API_KEY`/`URL_FRONTEND_FORMATO` em produção
+e o domínio verificado no Resend — ver "Recuperação de senha" em `docs/api-e-rotas.md`).
+
+**O que ainda não existe, de propósito ou por falta de pedido:** `GET /tecnicos/:id` (o
+front não chama), aviso ao Técnico quando o **Gestor** abre uma OS para ele (só a OS de
+preventiva avisa), histórico de lançamento de custo e `os_evento` (pontos 2 e 4 da seção 6
+da modelagem), revogação de token (`token_version`, ver "Revogação" em
+`docs/api-e-rotas.md`) e rotação de backup antigo no R2.
 
 Listagem nova que precise recortar por escopo usa `atorDaRota` no controller +
 `escopoDe(usuarioId, perfil)` no service, com o `EXISTS` no `WHERE` — ver "Escopo no
@@ -307,10 +315,10 @@ verdade por trás.
 ## Notificação de solicitação por WhatsApp (feito — infra, código e wiring; falta o chip)
 
 Gestor não fica com o app aberto o tempo todo — o sistema avisa por WhatsApp sempre que
-uma Solicitação nasce `Pendente` (as duas criações humanas e o job de preventiva
-vencida), pro Gestor saber sem precisar checar o painel. Mesmo raciocínio serve o
-Técnico mais adiante (aviso de OS atribuída), quando a fase 2 existir — hoje é só
-Gestor.
+uma Solicitação humana nasce `Pendente` (as duas criações do Solicitante), pro Gestor
+saber sem precisar checar o painel. Desde a `000008` a preventiva vencida não passa mais
+pelo Gestor, e quem recebe o aviso é o **Técnico** designado (`NotificarOSPreventiva`, ver
+a seção do job). A OS aberta pelo Gestor (`AbrirOS`) ainda **não** avisa o Técnico.
 
 **Decisão: Evolution API self-hosted, não a Cloud API oficial da Meta.** Não é o caminho
 "correto" — é WhatsApp Web por baixo (lib Baileys, engenharia reversa), viola os termos
@@ -351,7 +359,8 @@ memória).
   `Notificador NotificadorInterface` (não parâmetro de construtor — mudar a assinatura
   quebraria todo teste que já chama `NewRepoX(pool)` direto). `nil` (o zero value, o que
   todo teste existente continua recebendo) significa "não notifica". Plugado nos 3
-  pontos que criam uma solicitação `Pendente`, sempre em goroutine com
+  pontos que criam uma solicitação (as duas humanas avisam o Gestor; a de preventiva, o
+  Técnico), sempre em goroutine com
   `context.Background()` + timeout de 15s (nunca o `ctx` da request, que morre quando a
   resposta é escrita): `CadastrarSolicitacaoMaquinario`, `CadastrarSolicitacaoReparo`
   (`Alvo` sai de `alvoDaSolicitacao`) e `abrirSolicitacaoDaPreventiva` (relê a máquina

@@ -76,6 +76,33 @@ Leia antes de registrar rota nova, mexer em middleware ou montar corpo de respos
   na `usuario`, o JWT carrega o valor e o middleware compara — dá pra juntar na mesma
   query que o RBAC de escopo vai precisar fazer.
 
+## Recuperação de senha (`esqueci-senha` / `redefinir-senha`)
+- **Públicas, com o tenant do header**, como o login: ainda não existe token de sessão. O
+  `TenantMiddleware` resolve o subdomínio, e isso também impede um link vazado de valer no
+  subdomínio de outra empresa (`RedefinirSenhaPorToken` filtra `tenant_id`).
+- `POST /autenticacao/esqueci-senha` `{email}` → **sempre 200 com a mesma mensagem**, exista
+  o e-mail ou não (mesmo motivo de `ErrCredenciaisInvalidas`: senão vira oráculo de e-mails).
+  O envio roda em **goroutine** com `context.Background()` + 15s pelo mesmo motivo — esperar
+  o Resend deixaria o e-mail cadastrado centenas de ms mais lento. Falha de envio só no `log`.
+- O token é `rand.Text()` (130 bits); o banco guarda só o **SHA-256** (sem salt: não é
+  senha de humano) e a validade de **30 minutos**, calculada com o `now()` do banco — o
+  mesmo relógio que a troca compara. ⚠️ Os 30 minutos também estão escritos no texto do
+  e-mail (`EmailService.go`): mudou na query, muda lá.
+- `POST /autenticacao/redefinir-senha` `{token, senha}` (`min=6`, mesma regra do login) troca
+  a senha **e queima o token no mesmo `UPDATE`** — dois cliques no mesmo link não passam os
+  dois. Pedido novo sobrescreve o anterior (só o último link vale). Usuário desativado não
+  pede nem redefine.
+- **Token ruim é 400** (`ErrTokenRecuperacaoInvalido`, mensagem única para inexistente,
+  expirado ou usado), **nunca 401** — 401 fora do `/login` desloga o front.
+- Rate limit **mais apertado** em `esqueci-senha` (`rate.Every(time.Minute), 3`): cada pedido
+  aceito dispara um e-mail real. `redefinir-senha` usa o mesmo do login.
+- O link sai de `URL_FRONTEND_FORMATO` (com um `%s` onde entra o subdomínio; default
+  `http://%s.localhost:8090`) + `/redefinir-senha?token=...`, que é a rota da tela
+  `RedefinirSenha` no front. Remetente fixo `contato@radaptech.com.br` — o domínio precisa
+  estar verificado no Resend, senão todo envio falha (calado para o usuário, visível no log).
+- ⚠️ Redefinir a senha **não derruba sessão já aberta** (ver "Revogação" acima): o JWT
+  emitido antes continua valendo até o `exp`.
+
 ## Rotas e rate limit
 - Tudo em `internal/router/router.go`, sob o grupo `/api`. Registradas hoje:
 
