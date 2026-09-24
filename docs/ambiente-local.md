@@ -7,8 +7,11 @@ Leia quando algo não subir, a porta não conectar ou o teste de integração pu
 ---
 
 ## Ambiente local
-- `.env` na raiz: `DB_SERVER`, `DB_USER`, `DB_PORT`, `DATABASE`, `DB_PASSWORD`
-  (`DB_SSLMODE` opcional, default `disable`) e `JWT_SECRET`. `TRUSTED_PROXIES` **não**
+- `.env` na raiz (modelo em `.env-example`): `DB_SERVER`, `DB_USER`, `DB_PORT`, `DATABASE`,
+  `DB_PASSWORD` (`DB_SSLMODE` opcional, default `disable`) e `JWT_SECRET` — os únicos
+  obrigatórios. Opcionais, e sem eles só o recurso correspondente falha: `R2_*` (upload e
+  foto), `EVOLUTION_*` (WhatsApp), `RESEND_API_KEY` + `URL_FRONTEND_FORMATO` (e-mail de
+  recuperação de senha; sem a chave o pedido responde 200 e o envio falha no log). `TRUSTED_PROXIES` **não**
   fica no `.env`: vem do `environment` do compose em dev (é endereço de infra, muda com
   a topologia) e do ambiente do Railway em produção.
 - Dentro da rede Docker do projeto, o Postgres resolve por `DB_SERVER=postgres`,
@@ -19,19 +22,16 @@ Leia quando algo não subir, a porta não conectar ou o teste de integração pu
   aplicações não dividem a mesma porta do host, então este compose sai da frente e usa
   a 5431. Não "conserte" isso publicando na 5432 — os dois bancos brigam e o que subir
   depois não sobe.
-- ⚠️ **O que está furado é o lado direito do mapeamento, não o esquerdo.** O compose diz
-  `5431:5431`, mas dentro do container o Postgres escuta **só na 5432** (imagem
-  `postgres:16-alpine` sem `-p` no command; confira com
-  `docker exec postgres_container-sistema-OS psql -U postgres -tAc "show port"`). Ou
-  seja: a porta publicada não tem ninguém do outro lado e `localhost:5431` **não conecta
-  do host** — dá `connection reset by peer`, porque o proxy do Docker aceita e não acha
-  upstream. O conserto mantém a sua escolha de porta: **`5431:5432`** (host 5431, livre
-  do conflito; container 5432, onde o Postgres está).
-- Enquanto o mapeamento não for corrigido, os testes de integração precisam falar direto
-  com o IP do container:
+- ⚠️ **O mapeamento é `5431:5432`, e o lado direito importa.** Dentro do container o
+  Postgres escuta **só na 5432** (imagem `postgres:16-alpine` sem `-p`). O compose já disse
+  `5431:5431`: a porta publicada não tinha ninguém do outro lado e `localhost:5431` dava
+  `connection reset by peer`. Com `5431:5432` o default de `TEST_DB_DSN` conecta do host.
+  (A correção está no `docker-compose.yml` do repo `sistema-os-infra` — confira se foi
+  commitada antes de estranhar um clone novo.)
+- Sintoma de o banco não estar alcançável: `go test ./...` **verde sem ter rodado a
+  integração** (`t.Skip` silencioso) — exatamente o que o job de CI existe pra evitar.
+  Alternativa sem depender da porta publicada: o IP do container,
   `TEST_DB_DSN='postgres://postgres:postgres@172.29.0.3:5432/postgres?sslmode=disable'`.
-  Sintoma de esquecer: `go test ./...` **verde sem ter rodado a integração** (`t.Skip`
-  silencioso) — exatamente o que o job de CI existe pra evitar.
 - O compose (`../docker-compose.yml`, um nível acima deste repo) sobe **front + api atrás
   de um traefik**: `http://<tenant>.localhost:8090` serve o Vite, e `/api` cai na api.
   Dashboard do traefik em `:8091`, pgadmin em `:5051`. **`api` e `front` não publicam
