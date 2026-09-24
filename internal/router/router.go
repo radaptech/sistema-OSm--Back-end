@@ -9,11 +9,11 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/radaptech/ginmw"
 	"github.com/radaptech/sistema-OSm--Back-end/controller"
 	"github.com/radaptech/sistema-OSm--Back-end/database/repository"
 	"github.com/radaptech/sistema-OSm--Back-end/internal/service"
 	"golang.org/x/time/rate"
-	"github.com/radaptech/ginmw"
 )
 
 type Container struct {

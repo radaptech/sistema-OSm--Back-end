@@ -26,9 +26,9 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/gin-gonic/gin/binding"
+	"github.com/radaptech/ginmw"
 	bucketr2 "github.com/radaptech/sistema-OSm--Back-end/bucketR2"
 	"github.com/radaptech/sistema-OSm--Back-end/internal/helper"
-	"github.com/radaptech/ginmw"
 )
 
 // idDaRota lê o :id da URL. Erro aqui é 400 e não 404 de propósito: "/abc" não

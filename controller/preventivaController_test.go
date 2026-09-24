@@ -10,10 +10,10 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/radaptech/ginmw"
 	"github.com/radaptech/sistema-OSm--Back-end/config"
 	"github.com/radaptech/sistema-OSm--Back-end/internal/helper"
 	"github.com/radaptech/sistema-OSm--Back-end/internal/model"
-	"github.com/radaptech/ginmw"
 )
 
 type preventivaFake struct {

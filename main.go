@@ -8,10 +8,10 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/radaptech/ginmw"
 	"github.com/radaptech/sistema-OSm--Back-end/bucketR2"
 	"github.com/radaptech/sistema-OSm--Back-end/config"
 	r "github.com/radaptech/sistema-OSm--Back-end/internal/router"
-	"github.com/radaptech/ginmw"
 )
 
 func main() {

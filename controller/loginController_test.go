@@ -9,9 +9,9 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
+	"github.com/radaptech/ginmw"
 	"github.com/radaptech/sistema-OSm--Back-end/internal/helper"
 	"github.com/radaptech/sistema-OSm--Back-end/internal/model"
-	"github.com/radaptech/ginmw"
 )
 
 // serviceFake devolve sempre o mesmo erro -- é o único eixo que o teste varia.
