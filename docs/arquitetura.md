@@ -20,6 +20,9 @@ estiver em dúvida sobre onde uma regra deve morar.
   `HashPassword`/`HashCompare`, `argon2id.DefaultParams`). `bcrypt` foi removido —
   `provisionamento.go` também passou a usar `auth.HashPassword`; não reintroduza bcrypt
   em nenhum caminho de senha nova.
+- **Resend** (`resend-go/v2`) para o e-mail de recuperação de senha
+  (`internal/service/EmailService.go`) e **Evolution API** (HTTP cru, sem SDK) para o
+  WhatsApp — os dois opcionais: sem a chave, a rota responde e só o envio falha no log.
 - Infra alvo: **Railway** (app, plano Hobby), **Supabase** (Postgres) e **Cloudflare R2**
   (bucket de fotos/vídeos, S3-compatível). O Postgres **não** é do plugin do Railway e
   **não** é conexão direta: é o Supabase atrás do **Session Pooler** (Supavisor), host
@@ -44,11 +47,11 @@ estiver em dúvida sobre onde uma regra deve morar.
   `pgadmin_container-sistema-OS`).
 
 ## Documentos de referência (leia antes de implementar endpoint novo)
-- `docs/modelagem-banco-dados.md` — modelo de dados completo, revisão 4.1, com todo o
+- `docs/modelagem-banco-dados.md` — modelo de dados completo, revisão 4.4, com todo o
   raciocínio de cada constraint/trigger/view.
 - `docs/der-banco-dados.mmd` (+ `.svg`/`.png` gerados) — diagrama ER.
 - Artefatos publicados (fonte de verdade do contrato HTTP — pedir link se precisar):
-  DER revisado, Contrato de API v1.2 (53 endpoints), RBAC, PRD, Roteiro do Back-end
+  DER revisado (rev. 4.4), Contrato de API v1.3 (55 endpoints, 52 implementados), RBAC, PRD, Roteiro do Back-end
   (16 fases). Ver `../sistema-OSm--Front-end/CLAUDE.md` para a lógica de negócio do ponto de vista
   do front (é o documento mais detalhado de regras de negócio do projeto).
 
@@ -84,6 +87,10 @@ que o front espera (camelCase, datas `dd/mm/yyyy HH:MM:SS`, ver `config/dataBr.g
   o front converte pra `dd/mm/yyyy`), e sem o fallback o cadastro falhava no binding,
   antes de chegar no service. Marshal sempre emite com hora; o front lê os dois
   (`converterDataBackend`).
+  ⚠️ **Toda data entra e sai em `America/Sao_Paulo`, fixo no código, não no `TZ` do host**:
+  o pgx devolve `timestamptz` no fuso local do processo, e container é UTC (OS aberta
+  21:56 aparecia 00:56 do dia seguinte). `tzdata` vai embutido no binário porque a imagem
+  de produção é alpine sem `/usr/share/zoneinfo`. `config/dataBr_test.go` tranca ida e volta.
 - `auth/` — `jwt.go` (`GerarJwt`, claims `sub`/`tenantId`/`perfil`/`exp`/`iat`,
   HS256), `passHash.go` (`HashPassword`/`HashCompare`, argon2id).
 - `middleware/` — `middJwt.go` (`AutenticacaoJwt`, lê cookie `token` ou
@@ -97,10 +104,14 @@ que o front espera (camelCase, datas `dd/mm/yyyy HH:MM:SS`, ver `config/dataBr.g
   (`Permitir(perfis ...string)`, o RBAC — 403, nunca 401), `cors.go` (`CorsConfig`,
   libera `localhost`/`*.localhost` e `radaptech.com.br`/subdomínios,
   `AllowCredentials: true` pro cookie ir junto), `rateLimit.go` (`LimitarPorIP` —
-  ver "Rotas e rate limit").
+  ver "Rotas e rate limit"), `timeout.go` (`Timeout(30s)`, global em `main.go`: dá prazo
+  a todo request para o pgx descartar conexão zumbi do pooler em segundos em vez dos ~15min
+  do kernel — já prendeu três logins por 15m40s; e troca o 500 de um request que estourou
+  o prazo por **504**, sem editar cada `default:` dos controllers).
 - `internal/model/` — structs de request/response, com `json` (camelCase, espelhando os
   tipos do front) e `binding` (validação do `go-playground/validator` via Gin) nas tags.
-  `login.go` (`Login`, `SessaoUsuario`, `EscopoAcessoGestor`), `usuarios.go`
+  `login.go` (`Login`, `SessaoUsuario`, `EscopoAcessoGestor`, e os corpos da recuperação
+  de senha, `SolicitarRecuperacaoSenha`/`RedefinirSenha`), `usuarios.go`
   (`NovoUsuarioPayload`, `AtualizarUsuarioPayload`, `Usuario`), `loja.go` (`Loja`,
   `Empresa`, `NovaLojaPayload`), `setor.go` (`Setor`, `NovoSetorPayload`),
   `maquinario.go` (`MaquinarioInsert`, `AtualizarMaquina`, `Maquinario` +
@@ -110,8 +121,11 @@ que o front espera (camelCase, datas `dd/mm/yyyy HH:MM:SS`, ver `config/dataBr.g
   `solicitacao.go` (as duas criações — `NovaSolicitacaoMaquinarioPayload`,
   `NovaSolicitacaoReparoPayload` —, `AberturaOrdemServicoPayload`,
   `RejeicaoSolicitacaoPayload`, `SolicitacaoOS` + `MontarSolicitacao`,
-  `AnexoSolicitacao`, `ResumoSolicitacoes`, `OrdemServico` (parcial, ver seção
-  "Solicitações" abaixo) + `MontarOrdemServico`).
+  `AnexoSolicitacao`, `ResumoSolicitacoes`), `ordemServico.go` (`OrdemServico` +
+  `MontarOrdemServico`/`MontarOrdemServicoDaAbertura`, os payloads do ciclo de vida e do
+  custo — `EncerramentoOrdemServicoPayload`, `ItemCustoPayload`, `NotaFiscalPayload`,
+  `LancamentoCustoManutencaoPayload`...), `indicadorMaquina.go`
+  (`MontarIndicadoresMaquina`, a agregação em Go) e `empresaTerceirizada.go`.
   **Toda struct de resposta precisa do `id` e das tags camelCase**: sem tag o Go
   serializa `Nome` e o front lê `undefined`, e sem `id` a listagem não serve pra nada
   (é o `value` do select, o `/:id` do botão editar e o que vai pro escopo). Já
@@ -226,14 +240,24 @@ que o front espera (camelCase, datas `dd/mm/yyyy HH:MM:SS`, ver `config/dataBr.g
     impacto/anexo de uma página inteira numa ida só, sem N+1) e `concluirSolicitacao` é a
     cauda comum às duas criações + `Rejeitar` (relê, comita, monta — mesmo motivo de
     `CadastrarMaquina` relendo por `ObterMaquinaPorID`).
-  - `ordemServico.go` — `OrdemServicoService`, só leitura por enquanto
-    (`ListarOrdensServico` + `montarOrdensServicoEmLote`). A OS não nasce aqui: quem a
-    cria é `SolicitacaoService.AbrirOS`. Único service do pacote que recebe os filtros
+  - `ordemServico.go` — `OrdemServicoService`: a listagem (`ListarOrdensServico` +
+    `montarOrdensServicoEmLote`), o ciclo de vida do Técnico (`Iniciar`, `Pausar`,
+    `Retomar`, `AcionarTerceiro`, `Encerrar`), a correção do Administrador
+    (`CorrigirCusto`) e `ObterIndicadoresDaMaquina`. A OS não nasce aqui: quem a
+    cria é `SolicitacaoService.AbrirOS` (ou o job de preventiva).
+    `ordemServicoCusto.go` guarda `gravarItensDeCusto`/`gravarNotasFiscais`, funções livres
+    sobre `*repository.Queries` compartilhadas por `Encerrar` e `CorrigirCusto` dentro da
+    transação de cada um (mesmo padrão de `gravarPreventivas`). Único service do pacote que recebe os filtros
     numa **struct** (`FiltrosOrdemServico`) em vez de parâmetros soltos — são seis, e
     dois deles são `*int64` vizinhos (`LojaId`/`TecnicoId`): trocá-los de lugar numa
     assinatura posicional compila e devolve a lista errada, calado.
   - `notificacaoService.go` — `NotificacaoService`, o cliente da Evolution API (WhatsApp).
-    Ver "Solicitações" abaixo, tem seção própria.
+    Ver "Notificação" em `docs/fluxo-de-negocio.md`.
+  - `recuperacaoSenhaService.go` + `EmailService.go` — `esqueci-senha`/`redefinir-senha`.
+    O service depende de `EnviadorEmailRecuperacao` (interface, pro teste trocar o Resend
+    por um fake, mesmo motivo de `NotificadorInterface`); `NewEmailService` recebe
+    `RESEND_API_KEY`/`URL_FRONTEND_FORMATO` prontos — quem lê `os.Getenv` é `router.go`.
+    Ver "Recuperação de senha" em `docs/api-e-rotas.md`.
 - `controller/` — `loginController.go`: `LoginController` recebe um
   `LoginServiceInterface` (a interface existe pro teste do handler poder trocar o
   service — `UsuarioService` guarda `*pgxpool.Pool` concreto, não dá pra mockar de
@@ -242,8 +266,9 @@ que o front espera (camelCase, datas `dd/mm/yyyy HH:MM:SS`, ver `config/dataBr.g
   passam pela mesma função porque o `Set-Cookie` de remoção só apaga se casar com o de
   criação (nome, path, `Secure`, `SameSite`). Mais `Obter`/`ListarUsuarios`/
   `Atualizar`/`Desativar`.
-  `lojaController.go`, `setorController.go`, `maquinasController.go` e
-  `preventivaController.go` seguem o mesmo molde (uma interface própria por service,
+  `lojaController.go`, `setorController.go`, `maquinasController.go`,
+  `preventivaController.go`, `empresaTerceirizadaController.go`,
+  `ordemServicoController.go` e `recuperacaoSenhaController.go` seguem o mesmo molde (uma interface própria por service,
   pro fake do teste). `solicitacaoController.go` também, mais 3 buckets do R2 (anexo de
   maquinário, de pequeno reparo, e a foto de cadastro da máquina pra resolver
   `maquinaFotoUrl`) — ver "Solicitações" abaixo.
@@ -293,10 +318,7 @@ que o front espera (camelCase, datas `dd/mm/yyyy HH:MM:SS`, ver `config/dataBr.g
   abaixo.
 - `bucketR2/` — cliente do Cloudflare R2 (`s3.Client` via SDK da AWS, `BaseEndpoint`
   apontado pro R2). `InitR2_cloudflare` monta `s3Client` e `presignClient` (vars de
-  pacote, um de cada, montados uma vez no boot — não recriar por request). `UploadFoto(
-  fotoUrl, bucket string) gin.HandlerFunc` faz upload multipart com `MaxBytesReader` +
-  `ParseMultipartForm` (10MB, `tamanhoMaximoFoto`), key prefixada por tenant
-  (`tenant/{id}/...`, lida de `middleware.GetTenantIDToken` — **500**, não 401, se a claim
+  pacote, um de cada, montados uma vez no boot — não recriar por request).
   `UploadFoto(ctx, tenantID, bucket, header) (string, error)` sobe o arquivo e devolve a
   **key** — recebe o `*multipart.FileHeader` e **não** um `gin.Context`: quem decide status
   HTTP, se a foto é obrigatória e o que fazer quando o resto falha é o handler do domínio.

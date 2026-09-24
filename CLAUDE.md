@@ -7,7 +7,7 @@ API Go/Gin, multi-tenant por subdomínio, consumida pelo front em `../sistema-OS
 | | |
 |---|---|
 | build / lint | `go build ./...` · `gofmt -l .` · `go vet ./...` |
-| testes | `TEST_DB_DSN='postgres://postgres:postgres@<ip-do-container>:5432/postgres?sslmode=disable' go test -race ./...` |
+| testes | `go test -race ./...` com o compose de pé (default `localhost:5431`); fora disso, `TEST_DB_DSN=...` — verde rápido demais = `t.Skip` |
 | dev | `docker compose up -d` (um nível acima) → `http://<tenant>.localhost:8090` |
 | sqlc / migration | `sqlc generate` (nunca edite `database/repository/` na mão) · `make migration nome` |
 | jobs de CLI | `make provisionar-admin ARGS="..."` · `make backup-banco` · `make preventivas-vencidas` |
@@ -38,4 +38,4 @@ API Go/Gin, multi-tenant por subdomínio, consumida pelo front em `../sistema-OS
 | [docs/ambiente-local.md](docs/ambiente-local.md) | algo não sobe, porta não conecta, teste de integração pula sozinho |
 | [docs/modelagem-banco-dados.md](docs/modelagem-banco-dados.md) | **fonte da verdade** do modelo de dados: o porquê de cada constraint |
 | `../sistema-OSm--Front-end/CLAUDE.md` | regra de negócio pelo lado do front (o doc mais detalhado do projeto) |
-| Contrato de API v1.2, RBAC, PRD | artefatos publicados — **peça o link** antes de implementar endpoint novo, para bater o JSON campo a campo |
+| Contrato de API v1.3, RBAC, PRD, DER | artefatos publicados — **peça o link** antes de implementar endpoint novo, para bater o JSON campo a campo |

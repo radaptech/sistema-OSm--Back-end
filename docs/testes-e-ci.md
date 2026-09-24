@@ -46,15 +46,25 @@ suspeitosamente rápido (provavelmente é `t.Skip` por falta de Postgres).
     validação de payload multipart e JSON, `?lojaId=`/`?status=`/`?tipo=`, e a chave crua
     do R2 nunca vazando na resposta (mesmo teste de `maquinasController_test.go`, agora
     pra anexo).
-  - **Todos têm o teste "ator vem do token"**: `usuario.id`/`perfil` chegando da query em
+  - `controller/recuperacaoSenhaController_test.go` — `esqueci-senha` respondendo 200 com a
+    mesma mensagem e `redefinir-senha` mapeando `ErrTokenRecuperacaoInvalido` → **400**
+    (nunca 401, que deslogaria o front), o corpo inválido barrado no binding e o erro
+    interno sem vazar no corpo da resposta.
+  - **Todos os de listagem têm o teste "ator vem do token"**: `usuario.id`/`perfil` chegando da query em
     vez do JWT não muda status nenhum — a listagem responde 200 com dados demais.
   - `middleware/perfil_test.go` — `Permitir` com um perfil, vários, nenhum, e o caso de
     falha fechada (contexto sem perfil **nega**, protege contra montar o middleware na
     ordem errada).
+  - `middleware/timeout_test.go` — o prazo chegando no `ctx` do handler e o 500 de um
+    request que estourou o prazo virando **504** (só ele: 500 dentro do prazo continua 500).
   - `middleware/tenantId_test.go` — só os ramos que abortam antes de tocar no banco
     (header ausente/em branco → 400, `www`/`api` → 403), por isso passa `nil` como
     `*repository.Queries`. O `TestGetTenantID` existe porque o cast já esteve em `int32`
     e nunca casava com o `bigint` de `empresa.id` — falhava calado devolvendo `false`.
+- `config/dataBr_test.go` — `DataBr` serializa em Brasília mesmo recebendo UTC, o round
+  trip texto → `time` → texto fecha, e a data sem hora não escorrega um dia.
+- `internal/model/` — `indicadorMaquina_test.go` (a matemática dos indicadores, sem banco)
+  e `ordemServico_test.go` (serialização da OS, `custoTotal`, pausas, itens e notas).
 - `main_test.go` (`package main`) — `despacharSubcomando`. Substitui o mapa `subcomandos`
   por fakes e testa **o roteamento, nunca a execução** (os subcomandos reais conectam no
   banco e chamam `log.Fatal`). Cobre os nomes exatos continuarem existindo (o Railway Cron
@@ -88,13 +98,22 @@ suspeitosamente rápido (provavelmente é `t.Skip` por falta de Postgres).
     cinco perfis mais os dois casos de contorno (`?lojaId=`/`?setorId=` fora do escopo
     devolvem vazio). Falha aqui é silenciosa em produção — responde 200 com máquina demais
     e nenhuma tela reclama.
-  - `preventivaJobIntegracao_test.go` — o job de preventiva vencida, em 6 subtestes que
+  - `preventivaJobIntegracao_test.go` — o job de preventiva vencida, em 8 subtestes que
     compartilham estado e rodam em ordem ("não duplica" só faz sentido depois de "abre").
-    Cobre a forma da solicitação automática (`ck_origem`/`ck_solicitacao_alvo`, o trigger
-    DEFERRABLE da foto, zero anexos), o `proxima_data` indo pra hoje+25 e não hoje+30, e o
-    ciclo reabrindo depois que o Gestor converte a pendente.
-    **Mutação conferida**: tirar `m.ativa` da query quebra 4 subtestes; tirar o
-    `NOT EXISTS` **não quebra nenhum**, e isso é esperado — ver a seção do job.
+    Cobre a solicitação nascendo `Convertida` com a OS junto (`ck_origem`/
+    `ck_solicitacao_alvo`, o trigger DEFERRABLE da foto, zero anexos), a OS no técnico da
+    preventiva com urgência `Baixa` e `aberta_por_id` nulo, o `proxima_data` indo pra
+    hoje+25 e não hoje+30, o ciclo seguinte abrindo outra OS, e a preventiva sem técnico
+    (ou com técnico que deixou de ser técnico) falhando alto em vez de sumir do laço.
+    `m.ativa` na query está trancado por teste; o `NOT EXISTS` que existia antes da `000008`
+    saiu — quem impede o ciclo duplicado é o `FOR UPDATE` (ver a seção do job).
+  - `recuperacaoSenhaIntegracao_test.go` — 8 subtestes contra Postgres com um enviador fake:
+    e-mail inexistente/de outro tenant respondem igual e não enviam, o banco guarda o hash e
+    não o token, pedido novo invalida o link anterior, token não vale em outro tenant nem
+    expirado, redefinir queima o token, usuário desativado não pede nem redefine. Tirar o
+    cheque de validade ou a limpeza do token quebra o subteste certo.
+  - `indicadorIntegracao_test.go` — a query dos indicadores: OS aberta não entra, os dois
+    relógios, o mês em BRT, escopo → 404, administrador sem escopo.
   - Desde a migration `000012` os testes de custo mandam uma lista de **tarefas**
     (`itensMaquinario`/`itensSemHoraTecnica`, helpers no topo do arquivo de integração), não
     dois valores escalares. O que eles trancam e não é óbvio: os agregados de `os_custo`
@@ -137,9 +156,9 @@ suspeitosamente rápido (provavelmente é `t.Skip` por falta de Postgres).
     preenchido e o rollback do `defer` apagava tudo — o teste passava olhando só o retorno.
     Mesmo motivo do subteste "preventiva inválida desfaz a máquina junto", que confirma
     que a máquina **não** ficou no banco.
-- O DSN vem de `TEST_DB_DSN`. O default (`localhost:5431`) **não conecta hoje** — a porta
-  do host está certa (a 5432 é do projeto vizinho), mas o compose mapeia pra 5431 dentro
-  do container, onde o Postgres não escuta; ver "Ambiente local". Use o IP do container:
+- O DSN vem de `TEST_DB_DSN`; o default é `localhost:5431`, a porta que o compose publica
+  (`5431:5432`, ver "Ambiente local"). Com o compose de pé, `go test -race ./...` basta. De
+  dentro da rede Docker, ou com o mapeamento antigo, use o IP do container:
   `TEST_DB_DSN='postgres://postgres:postgres@172.29.0.3:5432/postgres?sslmode=disable' go test -race ./...`.
 - **A ordem dos dois `t.Cleanup` em `bancoDeTeste` é proposital** (`t.Cleanup` roda em
   LIFO: o `migrate` fecha antes do `pool`). Invertida, `pool.Close()` espera para sempre

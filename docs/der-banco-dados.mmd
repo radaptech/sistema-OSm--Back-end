@@ -1,7 +1,15 @@
 erDiagram
     %% ==========================================================
-    %% Solicitacao OS -- DER revisado (revisao 4)
+    %% Solicitacao OS -- DER revisado (revisao 4.4, migrations ate 000013)
     %% Fonte: /src/tipos, /src/servicos e as regras ja implementadas nas telas.
+    %% ---
+    %% Depois da revisao 4 (detalhe em modelagem-banco-dados.md):
+    %%   000003 anexo guarda chave do R2, nao URL (foto_chave, chave)
+    %%   000004/000007 criticidade e urgencia viram ENUM (as tabelas sairam)
+    %%   000008 (4.2) preventiva.tecnico_id; aberta_por_id nullable
+    %%   000009 os_custo.custo_revisado_em; 000011 os_custo.tem_nota_fiscal
+    %%   000012 (4.3) os_custo_item (tarefas) e os_nota_fiscal (N notas)
+    %%   000013 (4.4) token de recuperacao de senha em usuario
     %% ---
     %% Revisao 4: terceirizar deixou de ser um tipo de pedido e virou um
     %% desfecho da OS, decidido pelo Tecnico no meio da execucao. Efeitos:
@@ -34,9 +42,11 @@ erDiagram
     %%   status_os          Aberta | Em Andamento | Pausada | Concluida
     %%   marcador_impacto   Afeta Producao
     %%   tipo_anexo         foto | video
+    %%   nivel_criticidade  Baixa | Media | Alta   (000004)
+    %%   nivel_urgencia     Baixa | Media | Alta   (000007)
     %% ---
-    %% Continuam como tabela de dominio (vocabulario do cliente, cadastravel):
-    %%   area_tecnico, nivel_criticidade, nivel_urgencia
+    %% Continua como tabela de dominio (vocabulario do cliente, cadastravel):
+    %%   area_tecnico (semeada por trigger em todo tenant novo, 000006)
     %% ==========================================================
 
     %% ==========================================================
@@ -113,10 +123,12 @@ erDiagram
         smallint area_tecnico_id FK "NULL exceto tecnico"
         text nome
         citext email "unico por tenant"
-        text senha_hash "bcrypt ou argon2, nunca texto puro"
+        text senha_hash "argon2id, nunca texto puro"
         text telefone
         boolean ativo
         timestamptz ultimo_acesso
+        text token_recuperacao_hash "SHA-256 do link, nunca o token"
+        timestamptz token_recuperacao_expira_em "nasce e morre junto com o hash"
         timestamptz criado_em
     }
 
@@ -139,28 +151,21 @@ erDiagram
     %% evitando um par (loja, setor) que possa se contradizer.
     %% ==========================================================
     setor ||--o{ maquina : "abriga"
-    nivel_criticidade ||--o{ maquina : "classifica"
     maquina ||--o{ preventiva : "possui"
-
-    nivel_criticidade {
-        smallint id PK
-        bigint tenant_id FK "empresa.id"
-        text nome "Baixa Media Alta"
-        smallint ordem
-    }
+    usuario ||--o{ preventiva : "tecnico designado"
 
     maquina {
         bigint id PK
         bigint tenant_id FK "empresa.id"
         bigint setor_id FK "loja derivada via setor"
-        smallint criticidade_id FK
+        nivel_criticidade criticidade "ENUM Baixa Media Alta"
         text numero_patrimonio "unico por tenant"
         text numero_serie "unico por tenant quando informado"
         text nome
         text descricao
         text marca
         text modelo
-        text foto_url
+        text foto_chave "chave no R2, URL assinada na leitura"
         boolean ativa
         timestamptz criado_em
     }
@@ -169,6 +174,7 @@ erDiagram
         bigint id PK
         bigint tenant_id FK "empresa.id"
         bigint maquina_id FK
+        bigint tecnico_id FK "quem recebe a OS quando vence"
         text descricao
         integer intervalo_dias "CHECK maior que zero"
         date proxima_data
@@ -225,7 +231,7 @@ erDiagram
         bigint id PK
         bigint solicitacao_id FK
         tipo_anexo tipo "ENUM foto video"
-        text url "chave no storage, nao link assinado"
+        text chave "chave no R2, nao link assinado"
         text mime_type
         bigint tamanho_bytes
         timestamptz criado_em
@@ -245,22 +251,16 @@ erDiagram
     %% deixou de ser imutavel.
     %% ==========================================================
     solicitacao_os ||--o| ordem_servico : "convertida em"
-    nivel_urgencia ||--o{ ordem_servico : "prioriza"
     usuario ||--o{ ordem_servico : "tecnico responsavel"
     usuario ||--o{ ordem_servico : "aberta pelo gestor"
     empresa_terceirizada ||--o{ ordem_servico : "atende"
     ordem_servico ||--o{ os_pausa : "historico de pausas"
     ordem_servico ||--o| os_encerramento : "encerrada por"
     ordem_servico ||--o| os_custo : "custo lancado em"
+    ordem_servico ||--o{ os_custo_item : "tarefas executadas"
+    ordem_servico ||--o{ os_nota_fiscal : "notas conferidas"
     usuario ||--o{ os_encerramento : "registrado por"
     usuario ||--o{ os_custo : "lancado por"
-
-    nivel_urgencia {
-        smallint id PK
-        bigint tenant_id FK "empresa.id"
-        text nome "Baixa Media Alta"
-        smallint ordem
-    }
 
     ordem_servico {
         bigint id PK
@@ -268,10 +268,10 @@ erDiagram
         bigint solicitacao_id FK "UNIQUE um para um"
         tipo_os tipo "nasce igual ao da solicitacao, vira terceiros ao acionar"
         bigint tecnico_id FK "sempre preenchido, toda OS passa pelo Tecnico"
-        smallint urgencia_id FK "sempre preenchida, definida na abertura"
+        nivel_urgencia urgencia "ENUM, Baixa na OS de preventiva"
         bigint empresa_terceirizada_id FK "NOT NULL se e so se tipo terceiros"
         timestamptz terceiro_acionado_em "quando o Tecnico encaminhou"
-        bigint aberta_por_id FK "usuario perfil gestor"
+        bigint aberta_por_id FK "gestor; NULL na OS de preventiva"
         boolean afeta_producao "copiado do marcador da solicitacao"
         status_os status "ENUM Aberta EmAndamento Pausada Concluida"
         timestamptz aberta_em "quando o Gestor abriu, NAO e o inicio de horas parada"
@@ -308,18 +308,43 @@ erDiagram
     }
 
     %% Lancamento financeiro, separado da execucao: a linha nasce no encerramento
-    %% (o Tecnico informa os valores) e o Administrador corrige depois em Custos
+    %% (o Tecnico informa as tarefas) e o Administrador corrige depois em Custos
     %% Pendentes. Sua existencia e o que torna a OS "finalizada".
+    %% Os dois valores sao a SOMA de os_custo_item, escrita pelo servidor.
     os_custo {
         bigint id PK
         bigint tenant_id FK "empresa.id"
         bigint ordem_servico_id FK "UNIQUE um para um"
         tipo_os tipo FK "par com ordem_servico"
-        numeric custo_hora_tecnico "so no tipo maquinario"
-        numeric custo_manutencao "CHECK nao negativo"
-        text numero_nota_fiscal "so no tipo terceiros"
-        text serie_nota_fiscal "so no tipo terceiros"
+        numeric custo_hora_tecnico "soma dos itens, so no tipo maquinario"
+        numeric custo_manutencao "soma dos itens"
         text descricao_servico_terceiro "so no tipo terceiros"
+        boolean tem_nota_fiscal "declarado pelo Tecnico no encerramento"
         bigint lancado_por_id FK
         timestamptz lancado_em
+        timestamptz custo_revisado_em "NULL ate o Administrador conferir"
+    }
+
+    %% Uma linha por TAREFA, com os dois valores dela. Reescrita inteira a cada
+    %% edicao (DELETE + INSERT), por isso apaga de verdade, sem soft delete.
+    os_custo_item {
+        bigint id PK
+        bigint tenant_id FK "empresa.id"
+        bigint ordem_servico_id FK
+        tipo_os tipo FK "par com ordem_servico"
+        text descricao "a tarefa"
+        numeric custo_manutencao "CHECK nao negativo, zero vale"
+        numeric custo_hora_tecnico "so no tipo maquinario"
+        timestamptz criado_em
+    }
+
+    %% N notas por OS, sem vinculo com os itens: uma nota pode cobrir duas
+    %% pecas e uma peca pode nao ter nota. So entra com tem_nota_fiscal.
+    os_nota_fiscal {
+        bigint id PK
+        bigint tenant_id FK "empresa.id"
+        bigint ordem_servico_id FK
+        text numero "UNIQUE com serie por OS, NULLS NOT DISTINCT"
+        text serie "opcional"
+        timestamptz criado_em
     }

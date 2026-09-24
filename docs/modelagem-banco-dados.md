@@ -1,4 +1,4 @@
-# Modelagem do Banco de Dados — Revisão 4
+# Modelagem do Banco de Dados — Revisão 4.4
 
 Documento gerado a partir da revisão do código do front-end (`/src/tipos`, `/src/servicos`,
 `/src/paginas`) comparado ao modelo da revisão anterior.
@@ -33,6 +33,16 @@ Documento gerado a partir da revisão do código do front-end (`/src/tipos`, `/s
   `os_custo_item` e `os_nota_fiscal`, e duas colunas saem de `os_custo`
   (`numero_nota_fiscal`, `serie_nota_fiscal`) — **21 tabelas + 9 tipos ENUM**. É a primeira
   revisão que AUMENTA a contagem desde a 1. Ver 1.6.
+- **Revisão 4.4** (13/09/2026, migration `000013`): **recuperação de senha por e-mail.** Duas
+  colunas nullable em `usuario` — `token_recuperacao_hash` (SHA-256 do token do link, nunca o
+  token: quem lê um backup ou o pgAdmin não redefine a senha de ninguém) e
+  `token_recuperacao_expira_em` —, amarradas por `ck_usuario_token_recuperacao` (hash sem
+  validade seria token eterno; os dois nascem e morrem juntos). Na própria `usuario`, e não em
+  tabela filha, porque só o último link pedido vale: um pedido novo sobrescreve o anterior, e
+  trocar a senha zera os dois no mesmo `UPDATE`. Nenhuma tabela nova.
+  ⚠️ **Contagem real do schema: 19 tabelas + 11 tipos ENUM.** O "21 + 9" da 4.3 ainda tratava
+  `nivel_criticidade` e `nivel_urgencia` como tabelas; as duas viraram ENUM nas migrations
+  `000004`/`000007` (ver 2.4).
 
 O diagrama em si está em [`der-banco-dados.mmd`](./der-banco-dados.mmd) (Mermaid, pronto para colar
 em <https://mermaid.live>), com [`.svg`](./der-banco-dados.svg) e [`.png`](./der-banco-dados.png)
@@ -572,7 +582,7 @@ marcador deixou de ser FK para uma tabela de domínio e passou a ser coluna `ENU
 - **Datas:** `timestamptz` (nunca `timestamp` sem fuso); `date` só onde não há hora
   (`preventiva.proxima_data`).
 - **Dinheiro:** `numeric(12,2)` — nunca `float`/`real`, que acumula erro de centavos.
-- **Senha:** `senha_hash` (bcrypt/argon2). O DER original tinha `login.senha`, o que sugeria texto puro.
+- **Senha:** `senha_hash` (argon2id — `auth/passHash.go`). O DER original tinha `login.senha`, o que sugeria texto puro.
 - **`ENUM`:** valores escritos exatamente como o front os envia, acentos inclusive
   (`'Em Andamento'`, `'Concluída'`, `'Afeta Produção'`), para não exigir tradução na borda.
 - **Auditoria:** `criado_em` em todas as tabelas; `atualizado_em` via trigger onde houver edição.

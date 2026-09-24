@@ -199,10 +199,12 @@ O modelo de dados em si (o porquê de cada constraint) está em
 - ⚠️ **`ListarPreventivasVencidas` é a única query do projeto sem `tenant_id` no `WHERE`**,
   e sem parâmetro nenhum: é do job, não de um request — não há token, e o `tenant_id` viaja
   na linha direto pro INSERT da solicitação. Não "conserte" adicionando filtro. Ver a seção
-  do job para o papel de `m.ativa` e do `NOT EXISTS`.
-- `database/queries/solicitacao_os.sql` existe hoje **só** com
-  `CriarSolicitacaoPreventiva` — o resto da fase 1 (as duas criações humanas e as
-  leituras) entra nele. `tipo` e `origem` são **literais no SQL, não parâmetros**:
+  do job para o papel de `m.ativa` e do `FOR UPDATE` de `ObterPreventivaVencidaParaAbertura`
+  (o `NOT EXISTS` que protegia contra ciclo duplicado saiu na `000008`).
+- `database/queries/solicitacao_os.sql` guarda as três criações (`CriarSolicitacaoPreventiva`
+  e as duas humanas), as leituras da fase 1 e as duas aberturas de OS
+  (`CriarOrdemServicoDeSolicitacao`, `CriarOrdemServicoDePreventiva`). Nas criações,
+  `tipo` e `origem` são **literais no SQL, não parâmetros**:
   `ck_solicitacao_alvo` e `ck_origem` não deixam variar, e `solicitante_id` nem aparece
   na lista de colunas porque ali ele é *proibido*, não opcional.
   ⚠️ `maquina_id` e `preventiva_id` levam `::bigint` **de propósito**: as colunas são

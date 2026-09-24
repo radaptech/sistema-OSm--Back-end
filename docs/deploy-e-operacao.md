@@ -52,7 +52,7 @@ tenant, porque é o banco inteiro, todos os tenants juntos (o Postgres é uma in
 só, sem um banco por tenant).
 
 **Agendamento é Railway Cron, não `pg_cron`** — mesmo motivo do job de preventiva vencida
-(ver "Abertura automática de solicitação por preventiva" nesse arquivo): Hobby não libera
+(ver "Abertura automática de OS por preventiva" em `docs/fluxo-de-negocio.md`): Hobby não libera
 `shared_preload_libraries`. Ao configurar o Cron Job no Railway:
 - ⚠️ **A major do `postgresql*-client` no `dockerfile` tem que ser >= a do servidor.**
   `pg_dump` recusa dumpar um Postgres maior que ele: `aborting because of server version
@@ -82,8 +82,9 @@ só, sem um banco por tenant).
 ## Job de preventiva vencida (`preventivas-vencidas`)
 Terceiro subcomando de CLI, mesmo molde de `provisionar-admin` e `backup-banco`:
 `cli_preventivas_vencidas.go` na raiz, `make preventivas-vencidas` em dev, Railway Cron em
-produção. Abre uma Solicitação para cada preventiva vencida e avança o ciclo dela — o
-porquê de cada decisão está em "Abertura automática de solicitação por preventiva".
+produção. Abre Solicitação **e** OS (já no técnico da preventiva, sem passar pelo Gestor)
+para cada preventiva vencida e avança o ciclo dela — o porquê de cada decisão está em
+"Abertura automática de OS por preventiva" (`docs/fluxo-de-negocio.md`).
 
 Imprime o total **antes** do erro de propósito (falha parcial é normal: sem o número
 primeiro, o log do cron mostraria só o que deu errado), e mesmo assim sai com código ≠ 0
@@ -163,8 +164,11 @@ bloqueio: (1) configurar o Cron Job no Railway apontando pra esse `dockerfile` (
    `5432`, usuário `postgres.<project-ref>`),
    `DB_SSLMODE`, **`JWT_SECRET` novo** (`openssl rand -base64 64` — não reaproveitar o do
    `.env` local, que já circulou), `TRUSTED_PROXIES` com o endereço do proxy do Railway, e
-   os quatro `R2_*` (sem eles o CRUD funciona e só o upload de foto responde 500 — a
-   guarda de nil em `bucketR2` evita o panic).
+   os `R2_*` (sem eles o CRUD funciona e só o upload de foto responde 500 — a
+   guarda de nil em `bucketR2` evita o panic). Opcionais, cada um só desliga o próprio
+   envio: `EVOLUTION_*` (WhatsApp) e **`RESEND_API_KEY` + `URL_FRONTEND_FORMATO=https://%s.radaptech.com.br`**
+   (recuperação de senha — sem o formato, o link do e-mail aponta pra `localhost`; e o
+   domínio do remetente `contato@radaptech.com.br` precisa estar verificado no Resend).
 2. ⚠️ **A URL da API é congelada no BUILD do front**, não em runtime: o `define` do
    `vite.config.ts` resolve `process.env.REACT_APP_URL_API` em build time. Setar a
    variável só no runtime do serviço não adianta — ela precisa existir no `vite build`,
@@ -180,14 +184,10 @@ bloqueio: (1) configurar o Cron Job no Railway apontando pra esse `dockerfile` (
 diferentes o login responde 200 e o navegador **descarta o cookie**, sem erro visível. O
 CORS (`middleware/cors.go`) também só libera `radaptech.com.br` e `localhost`.
 
-**Resolvido no front (23/08/2026):** os cards "Custos Pendentes" e "OS Finalizadas" do
-painel do Administrador chamavam `/ordens-servico`, que **não existe** aqui — o admin
-clicava e recebia toast de erro. Os dois **saíram da Home do painel**; as telas e as rotas
-do front continuam prontas, esperando este back. `GET /ordens-servico` já existe (ver a
-seção dela), mas as duas telas também escrevem — `AdministradorCustosPendentes` chama
-`POST /:id/custo` —, então o `git revert` do commit que os removeu só vale depois do ciclo
-de vida da fase 2. Não recriar os cards na mão.
-Deixa de ser aceite consciente para entregar o acesso.
+**Cards "Custos Pendentes" e "OS Finalizadas" do Administrador: de volta.** Saíram da
+Home em 23/08/2026 porque chamavam `/ordens-servico`, que ainda não existia. Com
+`GET /ordens-servico` e `POST /:id/custo` prontos, as duas telas voltaram a ser
+alcançáveis pelo `PainelAdministrador` — não há mais bloqueio aqui.
 
 ### Antes de entregar pro admin
 - **Backup com restore ensaiado.** O mecanismo (`backup-banco`, `pg_dump` → R2) está
@@ -315,11 +315,12 @@ o que fazer com essas OS.
   `teste.<dominio>` exercita fluxo com dado descartável, isolado do tenant real, sem
   custo nenhum. Não cobre erro de schema — migration pega todos os tenants.
 
-### R2 — storage de anexos (parcialmente implementado)
-Schema e cliente R2 prontos (`bucketR2/`, migration `000003_anexo_chave_r2`); falta o
-CRUD que os usa. Decisões já fechadas, não reabrir sem motivo novo:
+### R2 — storage de anexos
+Pronto e wireado: `POST`/`PUT /maquinas` (foto da máquina) e as duas criações de
+solicitação (foto obrigatória + vídeo opcional em `/maquinario`); toda leitura devolve URL
+assinada. Decisões já fechadas, não reabrir sem motivo novo:
 - **Key, não URL, prefixada por tenant** (`tenant/{id}/{timestamp}{ext}`, ver
-  `bucketR2.UploadFoto`) e **URL assinada de leitura** gerada na hora (`bucketR2.
+  `bucketR2.UploadFoto(ctx, tenantID, bucket, header)`) e **URL assinada de leitura** gerada na hora (`bucketR2.
   URLLeitura`), com TTL curto — nunca persistida. Bucket público num sistema
   multi-tenant deixaria qualquer um com o link ver a foto de outro tenant, e uma URL
   persistida acumula link morto sem indicar que quebrou (docs/modelagem-banco-dados.md
@@ -327,24 +328,21 @@ CRUD que os usa. Decisões já fechadas, não reabrir sem motivo novo:
   só que resolvida no service a partir da key, nunca devolvida crua.
 - **Colunas já renomeadas** (migration `000003`): `maquina.foto_url` → `foto_chave`,
   `solicitacao_anexo.url` → `chave`. Sem coluna `bucket` — cada tipo de anexo sobe pra
-  um bucket fixo, escolhido no código que registra a rota (`UploadFoto(url, bucket)`),
-  não varia por linha.
+  um bucket fixo (um por tipo: maquinário, pequenos reparos, OS de serviço), escolhido no
+  controller, não varia por linha.
 - **Egress do R2 é grátis** — é o motivo de ele estar aqui. Sirva o arquivo direto pro
   browser; nunca faça proxy pela API.
 - **Vídeo passando pelo container é o que vai doer primeiro.** O contrato hoje manda
-  multipart pra API (`POST /maquinas`, as três criações de solicitação) e o Gin bufferiza
-  32MB por padrão — no Hobby isso é RAM e CPU que não sobram. `UploadFoto` já limita em
-  10MB (`tamanhoMaximoFoto`, com `http.MaxBytesReader` — sem ele o `ParseMultipartForm`
-  só limita o que fica em memória, não o tamanho do request). Mantenha multipart por
+  multipart pra API (`POST /maquinas`, as duas criações de solicitação). `corpoMultipart`
+  limita o corpo com `http.MaxBytesReader` (`TamanhoMaximoFoto`, ou
+  `TamanhoMaximoComVideo` só em `/solicitacoes/maquinario`) e o excedente do vídeo escorre
+  pro disco em vez da heap — ver `controller/helpers.go` em `docs/arquitetura.md`. Mantenha multipart por
   enquanto e troque por `PUT` assinado direto do browser quando incomodar (muda o
   contrato, precisa do front junto).
 
-**O que falta pra fechar o fluxo:** wirear `UploadFoto`/`URLLeitura` numa rota real
-(`POST /maquinas`, as criações de solicitação), o CRUD de `solicitacao_anexo` (nada em
-`database/queries/` ainda — o de `maquina` já existe), e o service resolvendo
-`foto_chave`/`chave` em `fotoUrl`/`url` assinada na resposta. Validação de
-content-type/extensão também não existe — `UploadFoto` aceita qualquer arquivo enviado no
-campo `foto`.
+O content-type é validado antes do upload em solicitação (`chaveDoUpload`: `image/` na
+foto, `video/` no vídeo). O que continua em aberto: retenção (foto antiga nunca é apagada)
+e objeto órfão quando a foto da máquina é trocada (ver `docs/banco-de-dados.md`).
 
 ⚠️ **`MontarListaMaquinarios` copia `foto_chave` direto para `FotoUrl`** — ou seja, o
 service devolve a **chave**, não a URL. Quem troca é o controller, em `resolverFoto`, nos
