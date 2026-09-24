@@ -9,9 +9,9 @@ import (
 	"strconv"
 
 	"github.com/gin-gonic/gin"
+	"github.com/radaptech/ginmw"
 	"github.com/radaptech/sistema-OSm--Back-end/internal/helper"
 	"github.com/radaptech/sistema-OSm--Back-end/internal/model"
-	"github.com/radaptech/sistema-OSm--Back-end/middleware"
 )
 
 type LoginServiceInterface interface {
@@ -36,7 +36,7 @@ func NewLoginController(service LoginServiceInterface) *LoginController {
 	}
 }
 
-// cookieSessao escreve o cookie que middleware.AutenticacaoJwt lê. Login e
+// cookieSessao escreve o cookie que ginmw.JWT lê. Login e
 // logout passam por aqui de propósito: o browser só apaga um cookie se o
 // Set-Cookie de remoção casar com o de criação, e um Set-Cookie sem Secure
 // vindo de origem insegura nem sobrescreve um cookie Secure.
@@ -67,7 +67,7 @@ func (l *LoginController) Registrar() gin.HandlerFunc {
 		}
 
 		// Tenant do token, não do header: rota autenticada.
-		tenantID, ok := middleware.GetTenantIDToken(ctx)
+		tenantID, ok := ginmw.TenantID(ctx)
 		if !ok {
 			ctx.JSON(http.StatusInternalServerError, gin.H{"error": "Erro interno de tenant"})
 			return
@@ -111,7 +111,7 @@ func (l *LoginController) Login() gin.HandlerFunc {
 		}
 
 		// Único endpoint em que o tenant vem do header: ainda não existe token.
-		tenantId, ok := middleware.GetTenantID(ctx)
+		tenantId, ok := ginmw.TenantIDFromHeader(ctx)
 		if !ok {
 			ctx.JSON(http.StatusInternalServerError, gin.H{"error": "erro interno de tenant"})
 			return
@@ -153,8 +153,8 @@ func (l *LoginController) Sessao() gin.HandlerFunc {
 
 	return func(ctx *gin.Context) {
 
-		userId, okUser := middleware.GetUserID(ctx)
-		tenantId, okTenant := middleware.GetTenantIDToken(ctx)
+		userId, okUser := ginmw.UserID(ctx)
+		tenantId, okTenant := ginmw.TenantID(ctx)
 		if !okUser || !okTenant {
 			ctx.JSON(http.StatusInternalServerError, gin.H{"error": "erro interno de sessao"})
 			return
@@ -203,7 +203,7 @@ func (l *LoginController) ListarUsuarios() gin.HandlerFunc {
 		// Tenant do token, não do header: rota autenticada. Com GetTenantID
 		// aqui, um administrador do tenant A lista o tenant B só trocando o
 		// X-tenant-ID -- o banco aceita calado, é só um int64.
-		tenantId, ok := middleware.GetTenantIDToken(ctx)
+		tenantId, ok := ginmw.TenantID(ctx)
 		if !ok {
 			ctx.JSON(http.StatusInternalServerError, gin.H{"error": "erro interno de tenant"})
 			return
@@ -277,7 +277,7 @@ func (l *LoginController) Atualizar() gin.HandlerFunc {
 		}
 
 		// Tenant do token, não do header: rota autenticada.
-		tenantId, okTenant := middleware.GetTenantIDToken(ctx)
+		tenantId, okTenant := ginmw.TenantID(ctx)
 		if !okTenant {
 			ctx.JSON(http.StatusInternalServerError, gin.H{"error": "erro interno de tenant"})
 			return
@@ -321,8 +321,8 @@ func (l *LoginController) Desativar() gin.HandlerFunc {
 			return
 		}
 
-		atorId, okUser := middleware.GetUserID(ctx)
-		tenantId, okTenant := middleware.GetTenantIDToken(ctx)
+		atorId, okUser := ginmw.UserID(ctx)
+		tenantId, okTenant := ginmw.TenantID(ctx)
 		if !okUser || !okTenant {
 			ctx.JSON(http.StatusInternalServerError, gin.H{"error": "erro interno de sessao"})
 			return
@@ -361,7 +361,7 @@ func (l *LoginController) Obter() gin.HandlerFunc {
 		}
 
 		// Tenant do token, não do header: rota autenticada.
-		tenantId, okTenant := middleware.GetTenantIDToken(ctx)
+		tenantId, okTenant := ginmw.TenantID(ctx)
 		if !okTenant {
 			ctx.JSON(http.StatusInternalServerError, gin.H{"error": "erro interno de tenant"})
 			return

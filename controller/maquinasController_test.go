@@ -11,9 +11,9 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
+	"github.com/radaptech/ginmw"
 	"github.com/radaptech/sistema-OSm--Back-end/internal/helper"
 	"github.com/radaptech/sistema-OSm--Back-end/internal/model"
-	"github.com/radaptech/sistema-OSm--Back-end/middleware"
 )
 
 // maquinaFake grava o que recebeu, não só o erro que devolve: payload vindo do
@@ -113,11 +113,11 @@ func requisicaoMaquina(metodo, id, query, dados string, comFoto bool) (*httptest
 	if id != "" {
 		ctx.Params = gin.Params{{Key: "id", Value: id}}
 	}
-	ctx.Set(middleware.UserTenantId, int64(7))
+	ctx.Set(ginmw.TenantIDKey, int64(7))
 	// Ator autenticado por padrão: toda rota daqui roda atrás do AutenticacaoJwt.
 	// Quem testa a ausência das claims monta o contexto na mão.
-	ctx.Set(middleware.UserId, int64(1))
-	ctx.Set(middleware.UserPerfil, "administrador")
+	ctx.Set(ginmw.UserIDKey, int64(1))
+	ctx.Set(ginmw.RoleKey, "administrador")
 	return w, ctx
 }
 
@@ -255,7 +255,7 @@ func TestMaquinaValidacaoDoPayload(t *testing.T) {
 		ctx, _ := gin.CreateTestContext(w)
 		ctx.Request = httptest.NewRequest(http.MethodPost, "/maquinas", strings.NewReader(dadosMaquina))
 		ctx.Request.Header.Set("Content-Type", "application/json")
-		ctx.Set(middleware.UserTenantId, int64(7))
+		ctx.Set(ginmw.TenantIDKey, int64(7))
 
 		NewMaquinaController(maquinaFake{}, "bucket-teste").Cadastrar()(ctx)
 
@@ -383,8 +383,8 @@ func TestMaquinaListarUsaAtorDoToken(t *testing.T) {
 	t.Run("ator vem do token, não da query", func(t *testing.T) {
 		var recebido string
 		w, ctx := requisicaoMaquina(http.MethodGet, "", "?usuarioId=999&perfil=administrador", "", false)
-		ctx.Set(middleware.UserId, int64(42))
-		ctx.Set(middleware.UserPerfil, "solicitante")
+		ctx.Set(ginmw.UserIDKey, int64(42))
+		ctx.Set(ginmw.RoleKey, "solicitante")
 
 		NewMaquinaController(maquinaFake{ator: &recebido}, "bucket-teste").ListarMaquinas()(ctx)
 
@@ -401,7 +401,7 @@ func TestMaquinaListarUsaAtorDoToken(t *testing.T) {
 		w := httptest.NewRecorder()
 		ctx, _ := gin.CreateTestContext(w)
 		ctx.Request = httptest.NewRequest(http.MethodGet, "/maquinas", nil)
-		ctx.Set(middleware.UserTenantId, int64(7)) // tenant ok, ator faltando
+		ctx.Set(ginmw.TenantIDKey, int64(7)) // tenant ok, ator faltando
 
 		NewMaquinaController(maquinaFake{ator: &recebido}, "bucket-teste").ListarMaquinas()(ctx)
 

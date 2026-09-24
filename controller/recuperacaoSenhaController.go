@@ -8,9 +8,9 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"github.com/radaptech/ginmw"
 	"github.com/radaptech/sistema-OSm--Back-end/internal/helper"
 	"github.com/radaptech/sistema-OSm--Back-end/internal/model"
-	"github.com/radaptech/sistema-OSm--Back-end/middleware"
 )
 
 type RecuperacaoSenhaServiceInterface interface {
@@ -40,7 +40,7 @@ func (r *RecuperacaoSenhaController) EsqueciSenha() gin.HandlerFunc {
 		}
 
 		// Rota pública: tenant do header, como no login (TenantMiddleware já validou o subdomínio no banco).
-		tenantId, ok := middleware.GetTenantID(ctx)
+		tenantId, ok := ginmw.TenantIDFromHeader(ctx)
 		if !ok {
 			ctx.JSON(http.StatusInternalServerError, gin.H{"error": "erro interno de tenant"})
 			return
@@ -67,7 +67,7 @@ func (r *RecuperacaoSenhaController) RedefinirSenha() gin.HandlerFunc {
 			return
 		}
 
-		tenantId, ok := middleware.GetTenantID(ctx)
+		tenantId, ok := ginmw.TenantIDFromHeader(ctx)
 		if !ok {
 			ctx.JSON(http.StatusInternalServerError, gin.H{"error": "erro interno de tenant"})
 			return

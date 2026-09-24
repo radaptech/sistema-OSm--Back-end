@@ -26,9 +26,9 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/gin-gonic/gin/binding"
+	"github.com/radaptech/ginmw"
 	bucketr2 "github.com/radaptech/sistema-OSm--Back-end/bucketR2"
 	"github.com/radaptech/sistema-OSm--Back-end/internal/helper"
-	"github.com/radaptech/sistema-OSm--Back-end/middleware"
 )
 
 // idDaRota lê o :id da URL. Erro aqui é 400 e não 404 de propósito: "/abc" não
@@ -51,7 +51,7 @@ func idDaRota(ctx *gin.Context) (int64, bool) {
 // Falta da claim é 500, não 401: o AutenticacaoJwt já devia tê-la garantido,
 // então chegar sem ela é erro de wiring da rota, não sessão inválida.
 func tenantDaRota(ctx *gin.Context) (int64, bool) {
-	tenantId, ok := middleware.GetTenantIDToken(ctx)
+	tenantId, ok := ginmw.TenantID(ctx)
 	if !ok {
 		ctx.JSON(http.StatusInternalServerError, gin.H{"error": "erro interno de tenant"})
 		return 0, false
@@ -68,8 +68,8 @@ func tenantDaRota(ctx *gin.Context) (int64, bool) {
 // Claim ausente é 500, não 401 -- o AutenticacaoJwt já devia tê-la garantido.
 func atorDaRota(ctx *gin.Context) (int64, string, bool) {
 
-	usuarioId, okId := middleware.GetUserID(ctx)
-	perfil, okPerfil := middleware.GetUserPerfil(ctx)
+	usuarioId, okId := ginmw.UserID(ctx)
+	perfil, okPerfil := ginmw.Role(ctx)
 	if !okId || !okPerfil {
 		ctx.JSON(http.StatusInternalServerError, gin.H{"error": "erro interno de sessão"})
 		return 0, "", false
