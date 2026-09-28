@@ -3,8 +3,7 @@ package config
 import (
 	"context"
 	"fmt"
-	"log"
-	"os"
+	"log/slog"
 	"time"
 
 	"github.com/golang-migrate/migrate/v4"
@@ -75,7 +74,7 @@ func (p *ConnPostgresql) Conn(configEnv *VariaveisDeAmbiente) (*pgxpool.Pool, er
 	}
 
 	s := pool.Stat()
-	log.Printf("conn totais: %d | em uso: %d | ociosas: %d\n", s.TotalConns(), s.AcquiredConns(), s.IdleConns())
+	slog.Info("pool do banco", "total", s.TotalConns(), "em_uso", s.AcquiredConns(), "ociosas", s.IdleConns())
 
 	return pool, nil
 }
@@ -94,20 +93,11 @@ func (p *ConnPostgresql) RunMigrationPostgress(db *pgxpool.Pool) error {
 	if err != nil {
 		return fmt.Errorf("erro ao instanciar migraççao no banco de dados")
 	}
-	dir, _ := os.Getwd()
-	fmt.Println("O programa está rodando na pasta:", dir)
-	fmt.Println("Tentando ler migrações de:", dir+"/database/migrate")
 	err = m.Up()
 	if err != nil && err != migrate.ErrNoChange {
 		return fmt.Errorf("erro ao aplicar migrações: %w", err)
 	}
 
-	if err == migrate.ErrNoChange {
-		log.Println("Nenhuma migração nova para aplicar.")
-	} else {
-		log.Println("Migrações aplicadas com sucesso!")
-	}
-
-	log.Println("Migrações aplicadas no banco de dados!....")
+	slog.Info("migrações", "aplicadas", err != migrate.ErrNoChange)
 	return nil
 }

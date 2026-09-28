@@ -3,7 +3,7 @@ package controller
 import (
 	"context"
 	"errors"
-	"log"
+	"log/slog"
 	"net/http"
 	"slices"
 	"strconv"
@@ -175,7 +175,7 @@ func (o *OrdemServicoController) Listar() gin.HandlerFunc {
 			Busca:      busca,
 		})
 		if err != nil {
-			log.Printf("listar ordens de serviço tenant=%d: %v", tenantId, err)
+			slog.ErrorContext(ctx.Request.Context(), "listar ordens de serviço", "tenant", tenantId, "err", err)
 			ctx.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao listar ordens de serviço"})
 			return
 		}
@@ -220,7 +220,7 @@ func (o *OrdemServicoController) Indicadores() gin.HandlerFunc {
 				ctx.JSON(http.StatusNotFound, gin.H{"error": "máquina não encontrada"})
 				return
 			}
-			log.Printf("indicadores da máquina %d tenant=%d: %v", maquinaId, tenantId, err)
+			slog.ErrorContext(ctx.Request.Context(), "indicadores da máquina", "maquina", maquinaId, "tenant", tenantId, "err", err)
 			ctx.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao obter indicadores da máquina"})
 			return
 		}
@@ -260,7 +260,7 @@ func (o *OrdemServicoController) Iniciar() gin.HandlerFunc {
 			case errors.Is(err, helper.ErrConflitoIntegridade):
 				ctx.JSON(http.StatusUnprocessableEntity, gin.H{"error": err.Error()})
 			default:
-				log.Printf("iniciar ordem de serviço=%d tenant=%d: %v", id, tenantId, err)
+				slog.ErrorContext(ctx.Request.Context(), "iniciar ordem de serviço", "os", id, "tenant", tenantId, "err", err)
 				ctx.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao iniciar ordem de serviço"})
 			}
 			return
@@ -307,7 +307,7 @@ func (o *OrdemServicoController) Pausar() gin.HandlerFunc {
 			case errors.Is(err, helper.ErrConflitoIntegridade):
 				ctx.JSON(http.StatusUnprocessableEntity, gin.H{"error": err.Error()})
 			default:
-				log.Printf("pausar ordem de serviço=%d tenant=%d: %v", id, tenantId, err)
+				slog.ErrorContext(ctx.Request.Context(), "pausar ordem de serviço", "os", id, "tenant", tenantId, "err", err)
 				ctx.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao pausar ordem de serviço"})
 			}
 			return
@@ -347,7 +347,7 @@ func (o *OrdemServicoController) Retomar() gin.HandlerFunc {
 			case errors.Is(err, helper.ErrConflitoIntegridade):
 				ctx.JSON(http.StatusUnprocessableEntity, gin.H{"error": err.Error()})
 			default:
-				log.Printf("retomar ordem de serviço=%d tenant=%d: %v", id, tenantId, err)
+				slog.ErrorContext(ctx.Request.Context(), "retomar ordem de serviço", "os", id, "tenant", tenantId, "err", err)
 				ctx.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao retomar ordem de serviço"})
 			}
 			return
@@ -393,7 +393,7 @@ func (o *OrdemServicoController) AcionarTerceiro() gin.HandlerFunc {
 			case errors.Is(err, helper.ErrConflitoIntegridade):
 				ctx.JSON(http.StatusUnprocessableEntity, gin.H{"error": err.Error()})
 			default:
-				log.Printf("acionar terceiro ordem de serviço=%d tenant=%d: %v", id, tenantId, err)
+				slog.ErrorContext(ctx.Request.Context(), "acionar terceiro ordem de serviço", "os", id, "tenant", tenantId, "err", err)
 				ctx.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao acionar terceiro"})
 			}
 			return
@@ -441,7 +441,7 @@ func (o *OrdemServicoController) Encerrar() gin.HandlerFunc {
 			case errors.Is(err, helper.ErrConflitoIntegridade):
 				ctx.JSON(http.StatusUnprocessableEntity, gin.H{"error": err.Error()})
 			default:
-				log.Printf("encerrar ordem de serviço=%d tenant=%d: %v", id, tenantId, err)
+				slog.ErrorContext(ctx.Request.Context(), "encerrar ordem de serviço", "os", id, "tenant", tenantId, "err", err)
 				ctx.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao encerrar ordem de serviço"})
 			}
 			return
@@ -497,7 +497,7 @@ func (o *OrdemServicoController) Custo() gin.HandlerFunc {
 			case errors.Is(err, helper.ErrConflitoIntegridade):
 				ctx.JSON(http.StatusUnprocessableEntity, gin.H{"error": err.Error()})
 			default:
-				log.Printf("corrigir custo ordem de serviço=%d tenant=%d: %v", id, tenantId, err)
+				slog.ErrorContext(ctx.Request.Context(), "corrigir custo ordem de serviço", "os", id, "tenant", tenantId, "err", err)
 				ctx.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao corrigir custo da ordem de serviço"})
 			}
 			return

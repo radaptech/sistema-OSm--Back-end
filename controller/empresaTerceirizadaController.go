@@ -3,7 +3,7 @@ package controller
 import (
 	"context"
 	"errors"
-	"log"
+	"log/slog"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -61,7 +61,7 @@ func (e *EmpresaTerceirizadaController) Cadastrar() gin.HandlerFunc {
 			case errors.Is(err, helper.ErrConflitoIntegridade):
 				ctx.JSON(http.StatusUnprocessableEntity, gin.H{"error": err.Error()})
 			default:
-				log.Printf("cadastrar empresa terceirizada tenant=%d: %v", tenantId, err)
+				slog.ErrorContext(ctx.Request.Context(), "cadastrar empresa terceirizada", "tenant", tenantId, "err", err)
 				ctx.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao cadastrar empresa terceirizada"})
 			}
 			return
@@ -91,7 +91,7 @@ func (e *EmpresaTerceirizadaController) Listar() gin.HandlerFunc {
 		empresas, err := e.service.ListarEmpresasTerceirizadas(ctx.Request.Context(), tenantId)
 		if err != nil {
 
-			log.Printf("listar empresas terceirizadas tenant=%d: %v", tenantId, err)
+			slog.ErrorContext(ctx.Request.Context(), "listar empresas terceirizadas", "tenant", tenantId, "err", err)
 			ctx.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao listar empresas terceirizadas"})
 			return
 		}
@@ -124,7 +124,7 @@ func (e *EmpresaTerceirizadaController) Obter() gin.HandlerFunc {
 			case errors.Is(err, helper.ErrNaoEncontrado):
 				ctx.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
 			default:
-				log.Printf("obter empresa terceirizada id=%d tenant=%d: %v", id, tenantId, err)
+				slog.ErrorContext(ctx.Request.Context(), "obter empresa terceirizada", "id", id, "tenant", tenantId, "err", err)
 				ctx.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao obter empresa terceirizada"})
 			}
 			return
@@ -169,7 +169,7 @@ func (e *EmpresaTerceirizadaController) Atualizar() gin.HandlerFunc {
 			case errors.Is(err, helper.ErrConflitoIntegridade):
 				ctx.JSON(http.StatusUnprocessableEntity, gin.H{"error": err.Error()})
 			default:
-				log.Printf("atualizar empresa terceirizada id=%d tenant=%d: %v", id, tenantId, err)
+				slog.ErrorContext(ctx.Request.Context(), "atualizar empresa terceirizada", "id", id, "tenant", tenantId, "err", err)
 				ctx.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao atualizar empresa terceirizada"})
 			}
 			return
@@ -204,7 +204,7 @@ func (e *EmpresaTerceirizadaController) Desativar() gin.HandlerFunc {
 			case errors.Is(err, helper.ErrConflitoIntegridade):
 				ctx.JSON(http.StatusUnprocessableEntity, gin.H{"error": err.Error()})
 			default:
-				log.Printf("desativar empresa terceirizada id=%d tenant=%d: %v", id, tenantId, err)
+				slog.ErrorContext(ctx.Request.Context(), "desativar empresa terceirizada", "id", id, "tenant", tenantId, "err", err)
 				ctx.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao desativar empresa terceirizada"})
 			}
 			return

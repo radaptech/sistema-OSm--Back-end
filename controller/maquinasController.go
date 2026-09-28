@@ -3,7 +3,7 @@ package controller
 import (
 	"context"
 	"errors"
-	"log"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -57,7 +57,7 @@ func (m *MaquinaController) resolverFoto(ctx context.Context, maquina *model.Maq
 
 	url, err := bucketr2.URLLeitura(ctx, m.bucketFotos, *maquina.FotoUrl, ttlFotoMaquina)
 	if err != nil {
-		log.Printf("assinar url da foto maquina=%d: %v", maquina.Id, err)
+		slog.ErrorContext(ctx, "assinar url da foto", "maquina", maquina.Id, "err", err)
 		maquina.FotoUrl = nil
 		return
 	}
@@ -91,7 +91,7 @@ func (m *MaquinaController) chaveDaFoto(ctx *gin.Context, tenantId int64) (*stri
 
 	chave, err := bucketr2.UploadFoto(ctx.Request.Context(), tenantId, m.bucketFotos, header)
 	if err != nil {
-		log.Printf("upload foto maquina tenant=%d: %v", tenantId, err)
+		slog.ErrorContext(ctx.Request.Context(), "upload foto maquina", "tenant", tenantId, "err", err)
 		ctx.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao salvar a foto"})
 		return nil, false
 	}
@@ -131,7 +131,7 @@ func (m *MaquinaController) Cadastrar() gin.HandlerFunc {
 			case errors.Is(err, helper.ErrConflitoIntegridade):
 				ctx.JSON(http.StatusUnprocessableEntity, gin.H{"error": err.Error()})
 			default:
-				log.Printf("cadastrar maquina tenant=%d: %v", tenantId, err)
+				slog.ErrorContext(ctx.Request.Context(), "cadastrar maquina", "tenant", tenantId, "err", err)
 				ctx.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao cadastrar máquina"})
 			}
 			return
@@ -177,7 +177,7 @@ func (m *MaquinaController) ListarMaquinas() gin.HandlerFunc {
 		maquinas, err := m.service.ListarMaquinario(ctx.Request.Context(), tenantId, usuarioId, perfil, lojaId, setorId)
 		if err != nil {
 
-			log.Printf("listar maquinas tenant=%d: %v", tenantId, err)
+			slog.ErrorContext(ctx.Request.Context(), "listar maquinas", "tenant", tenantId, "err", err)
 			ctx.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao listar máquinas"})
 			return
 		}
@@ -216,7 +216,7 @@ func (m *MaquinaController) Obter() gin.HandlerFunc {
 			case errors.Is(err, helper.ErrNaoEncontrado):
 				ctx.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
 			default:
-				log.Printf("obter maquina id=%d tenant=%d: %v", id, tenantId, err)
+				slog.ErrorContext(ctx.Request.Context(), "obter maquina", "id", id, "tenant", tenantId, "err", err)
 				ctx.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao obter máquina"})
 			}
 			return
@@ -274,7 +274,7 @@ func (m *MaquinaController) Atualizar() gin.HandlerFunc {
 			case errors.Is(err, helper.ErrConflitoIntegridade):
 				ctx.JSON(http.StatusUnprocessableEntity, gin.H{"error": err.Error()})
 			default:
-				log.Printf("atualizar maquina id=%d tenant=%d: %v", id, tenantId, err)
+				slog.ErrorContext(ctx.Request.Context(), "atualizar maquina", "id", id, "tenant", tenantId, "err", err)
 				ctx.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao atualizar máquina"})
 			}
 			return
@@ -311,7 +311,7 @@ func (m *MaquinaController) Desativar() gin.HandlerFunc {
 			case errors.Is(err, helper.ErrConflitoIntegridade):
 				ctx.JSON(http.StatusUnprocessableEntity, gin.H{"error": err.Error()})
 			default:
-				log.Printf("desativar maquina id=%d tenant=%d: %v", id, tenantId, err)
+				slog.ErrorContext(ctx.Request.Context(), "desativar maquina", "id", id, "tenant", tenantId, "err", err)
 				ctx.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao desativar máquina"})
 			}
 			return
