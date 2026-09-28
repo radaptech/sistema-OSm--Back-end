@@ -7,7 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -60,7 +60,7 @@ func (s *RecuperacaoSenhaService) SolicitarRecuperacao(ctx context.Context, tena
 		defer cancel()
 
 		if err := s.Email.RecuperaEmail(ctx, destino, token, subdominio); err != nil {
-			log.Printf("enviar e-mail de recuperação de senha tenant=%d: %v", tenantId, err)
+			slog.ErrorContext(ctx, "enviar e-mail de recuperação de senha", "tenant", tenantId, "err", err)
 		}
 	}()
 

@@ -3,7 +3,7 @@ package controller
 import (
 	"context"
 	"errors"
-	"log"
+	"log/slog"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -71,7 +71,7 @@ func (p *PreventivaController) Cadastrar() gin.HandlerFunc {
 			case errors.Is(err, helper.ErrConflitoIntegridade):
 				ctx.JSON(http.StatusUnprocessableEntity, gin.H{"error": err.Error()})
 			default:
-				log.Printf("cadastrar preventiva tenant=%d: %v", tenantId, err)
+				slog.ErrorContext(ctx.Request.Context(), "cadastrar preventiva", "tenant", tenantId, "err", err)
 				ctx.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao cadastrar preventiva"})
 			}
 			return
@@ -109,7 +109,7 @@ func (p *PreventivaController) Listar() gin.HandlerFunc {
 		preventivas, err := p.service.ListarPreventivas(ctx.Request.Context(), tenantId, usuarioId, perfil, maquinaId)
 		if err != nil {
 
-			log.Printf("listar preventivas tenant=%d: %v", tenantId, err)
+			slog.ErrorContext(ctx.Request.Context(), "listar preventivas", "tenant", tenantId, "err", err)
 			ctx.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao listar preventivas"})
 			return
 		}
@@ -140,7 +140,7 @@ func (p *PreventivaController) Obter() gin.HandlerFunc {
 			case errors.Is(err, helper.ErrNaoEncontrado):
 				ctx.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
 			default:
-				log.Printf("obter preventiva id=%d tenant=%d: %v", id, tenantId, err)
+				slog.ErrorContext(ctx.Request.Context(), "obter preventiva", "id", id, "tenant", tenantId, "err", err)
 				ctx.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao obter preventiva"})
 			}
 			return
@@ -185,7 +185,7 @@ func (p *PreventivaController) Atualizar() gin.HandlerFunc {
 			case errors.Is(err, helper.ErrConflitoIntegridade):
 				ctx.JSON(http.StatusUnprocessableEntity, gin.H{"error": err.Error()})
 			default:
-				log.Printf("atualizar preventiva id=%d tenant=%d: %v", id, tenantId, err)
+				slog.ErrorContext(ctx.Request.Context(), "atualizar preventiva", "id", id, "tenant", tenantId, "err", err)
 				ctx.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao atualizar preventiva"})
 			}
 			return
@@ -223,7 +223,7 @@ func (p *PreventivaController) Desativar() gin.HandlerFunc {
 			case errors.Is(err, helper.ErrConflitoIntegridade):
 				ctx.JSON(http.StatusUnprocessableEntity, gin.H{"error": err.Error()})
 			default:
-				log.Printf("desativar preventiva id=%d tenant=%d: %v", id, tenantId, err)
+				slog.ErrorContext(ctx.Request.Context(), "desativar preventiva", "id", id, "tenant", tenantId, "err", err)
 				ctx.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao desativar preventiva"})
 			}
 			return

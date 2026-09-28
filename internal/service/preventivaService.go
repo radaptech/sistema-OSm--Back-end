@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -483,7 +483,7 @@ func (s *PreventivaService) notificarPreventivaVencida(p repository.ObterPrevent
 			ID: p.MaquinaID, TenantID: p.TenantID,
 		})
 		if err != nil {
-			log.Printf("notificar preventiva %d: obter máquina %d: %v", p.ID, p.MaquinaID, err)
+			slog.ErrorContext(fundo, "notificar preventiva: obter máquina", "preventiva", p.ID, "maquina", p.MaquinaID, "tenant", p.TenantID, "err", err)
 			return
 		}
 
@@ -498,7 +498,7 @@ func (s *PreventivaService) notificarPreventivaVencida(p repository.ObterPrevent
 		}
 
 		if err := s.Notificador.NotificarOSPreventiva(fundo, p.TenantID, tecnicoId, dados); err != nil {
-			log.Printf("notificar preventiva %d: %v", p.ID, err)
+			slog.ErrorContext(fundo, "notificar preventiva", "preventiva", p.ID, "tenant", p.TenantID, "err", err)
 		}
 	}()
 }

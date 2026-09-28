@@ -3,7 +3,7 @@ package controller
 import (
 	"context"
 	"errors"
-	"log"
+	"log/slog"
 	"net/http"
 	"slices"
 	"strconv"
@@ -86,7 +86,7 @@ func (l *LoginController) Registrar() gin.HandlerFunc {
 			default:
 				// Erro interno vai pro log, não pra resposta: o erro cru do pgx
 				// carrega nome de constraint/coluna e às vezes o SQL.
-				log.Printf("cadastrar usuario tenant=%d: %v", tenantID, err)
+				slog.ErrorContext(ctx.Request.Context(), "cadastrar usuario", "tenant", tenantID, "err", err)
 				ctx.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao registrar usuario"})
 			}
 			return
@@ -124,7 +124,7 @@ func (l *LoginController) Login() gin.HandlerFunc {
 			case errors.Is(err, helper.ErrCredenciaisInvalidas):
 				ctx.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
 			default:
-				log.Printf("login tenant=%d: %v", tenantId, err)
+				slog.ErrorContext(ctx.Request.Context(), "login", "tenant", tenantId, "err", err)
 				ctx.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao logar usuario"})
 			}
 			return
@@ -170,7 +170,7 @@ func (l *LoginController) Sessao() gin.HandlerFunc {
 				cookieSessao(ctx, "", -1)
 				ctx.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
 			default:
-				log.Printf("obter sessao usuario=%d tenant=%d: %v", userId, tenantId, err)
+				slog.ErrorContext(ctx.Request.Context(), "obter sessao", "usuario", userId, "tenant", tenantId, "err", err)
 				ctx.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao obter sessao"})
 			}
 			return
@@ -245,7 +245,7 @@ func (l *LoginController) ListarUsuarios() gin.HandlerFunc {
 
 		usuariosPaginados, err := l.service.ListarUsuarios(ctx.Request.Context(), tenantId, pagina, perfil, busca, lojaId)
 		if err != nil {
-			log.Printf("listar usuarios tenant=%d: %v", tenantId, err)
+			slog.ErrorContext(ctx.Request.Context(), "listar usuarios", "tenant", tenantId, "err", err)
 			ctx.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao listar usuarios"})
 			return
 		}
@@ -294,7 +294,7 @@ func (l *LoginController) Atualizar() gin.HandlerFunc {
 			case errors.Is(err, helper.ErrNaoEncontrado), errors.Is(err, helper.ErrConflitoIntegridade):
 				ctx.JSON(http.StatusUnprocessableEntity, gin.H{"error": err.Error()})
 			default:
-				log.Printf("atualizar usuario id=%d tenant=%d: %v", id, tenantId, err)
+				slog.ErrorContext(ctx.Request.Context(), "atualizar usuario", "id", id, "tenant", tenantId, "err", err)
 				ctx.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao atualizar usuario"})
 			}
 			return
@@ -338,7 +338,7 @@ func (l *LoginController) Desativar() gin.HandlerFunc {
 			case errors.Is(err, helper.ErrConflitoIntegridade):
 				ctx.JSON(http.StatusUnprocessableEntity, gin.H{"error": err.Error()})
 			default:
-				log.Printf("desativar usuario id=%d tenant=%d: %v", id, tenantId, err)
+				slog.ErrorContext(ctx.Request.Context(), "desativar usuario", "id", id, "tenant", tenantId, "err", err)
 				ctx.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao desativar usuario"})
 			}
 			return
@@ -374,7 +374,7 @@ func (l *LoginController) Obter() gin.HandlerFunc {
 			case errors.Is(err, helper.ErrNaoEncontrado):
 				ctx.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
 			default:
-				log.Printf("obter usuario id=%d tenant=%d: %v", id, tenantId, err)
+				slog.ErrorContext(ctx.Request.Context(), "obter usuario", "id", id, "tenant", tenantId, "err", err)
 				ctx.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao obter usuario"})
 			}
 			return
@@ -419,7 +419,7 @@ func (l *LoginController) ListarTecnicos() gin.HandlerFunc {
 		tecnicos, err := l.service.ListarTecnicos(ctx.Request.Context(), tenantId, usuarioId, perfil, lojaId)
 		if err != nil {
 
-			log.Printf("listar tecnicos tenant=%d: %v", tenantId, err)
+			slog.ErrorContext(ctx.Request.Context(), "listar tecnicos", "tenant", tenantId, "err", err)
 			ctx.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao listar técnicos"})
 			return
 		}

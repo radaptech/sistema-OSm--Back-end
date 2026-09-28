@@ -2,7 +2,7 @@ package main
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"os"
 	"strings"
 	"time"
@@ -20,7 +20,10 @@ func main() {
 		return
 	}
 
-	router := gin.Default()
+	slog.SetDefault(middleware.NovoLogger())
+
+	router := gin.New()
+	router.Use(middleware.LogRequest(), gin.Recovery())
 	postgressConnection := config.ConnPostgresql{}
 
 	init := config.Init{Conexao: &postgressConnection}
@@ -28,12 +31,12 @@ func main() {
 	db, err := init.InitAplicattion()
 	if err != nil {
 
-		log.Fatal(err)
+		fatal("conectar no banco", err)
 	}
 	err = postgressConnection.RunMigrationPostgress(db)
 	if err != nil {
 
-		log.Fatal(err)
+		fatal("aplicar migrações", err)
 	}
 
 	ctx := context.Background()
@@ -41,7 +44,7 @@ func main() {
 
 	if err := router.SetTrustedProxies(proxiesConfiaveis()); err != nil {
 
-		log.Fatal(err)
+		fatal("configurar proxies confiáveis", err)
 	}
 
 	router.Use(middleware.CorsConfig())
@@ -135,4 +138,10 @@ func proxiesConfiaveis() []string {
 	}
 
 	return proxies
+}
+
+// log.Fatal sairia como INFO pelo slog.SetDefault; o erro que derruba o boot é ERROR.
+func fatal(msg string, err error) {
+	slog.Error(msg, "err", err)
+	os.Exit(1)
 }

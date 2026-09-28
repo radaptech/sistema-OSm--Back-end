@@ -1,7 +1,7 @@
 package config
 
 import (
-	"log"
+	"log/slog"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -17,12 +17,8 @@ func (I *Init) InitAplicattion() (*pgxpool.Pool, error) {
 	db, err := I.Conexao.Conn(conf)
 	if err != nil {
 
-		log.Printf("Falha ao conectar no banco: %v", err)
 		return nil, err
 	}
-	log.Println("---")
-	log.Println("Carregando informações do banco de dados.....")
-	log.Println("ARQUIVOS .ENV CARREGADOS")
-	log.Println("conexao feita com sucesso!!")
+	slog.Info("conectado ao banco")
 	return db, nil
 }
