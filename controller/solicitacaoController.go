@@ -3,7 +3,7 @@ package controller
 import (
 	"context"
 	"errors"
-	"log"
+	"log/slog"
 	"net/http"
 	"slices"
 	"strconv"
@@ -91,7 +91,7 @@ func (s *SolicitacaoController) chaveDoUpload(ctx *gin.Context, tenantId int64, 
 
 	chave, err = bucketr2.UploadFoto(ctx.Request.Context(), tenantId, bucket, header)
 	if err != nil {
-		log.Printf("upload %s tenant=%d: %v", campo, tenantId, err)
+		slog.ErrorContext(ctx.Request.Context(), "upload", "campo", campo, "tenant", tenantId, "err", err)
 		ctx.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao salvar " + campo})
 		return "", "", 0, false
 	}
@@ -117,7 +117,7 @@ func (s *SolicitacaoController) resolverSolicitacao(ctx context.Context, sol *mo
 		}
 		url, err := bucketr2.URLLeitura(ctx, bucket, *sol.Anexos[i].Url, ttlFotoMaquina)
 		if err != nil {
-			log.Printf("assinar url do anexo solicitacao=%d anexo=%d: %v", sol.Id, sol.Anexos[i].Id, err)
+			slog.ErrorContext(ctx, "assinar url do anexo", "solicitacao", sol.Id, "anexo", sol.Anexos[i].Id, "err", err)
 			// null é o degrade: melhor a tela reconhecer "sem mídia" do que
 			// tentar carregar uma URL vazia como se fosse válida.
 			sol.Anexos[i].Url = nil
@@ -132,7 +132,7 @@ func (s *SolicitacaoController) resolverSolicitacao(ctx context.Context, sol *mo
 
 	url, err := bucketr2.URLLeitura(ctx, s.bucketMaquinas, *sol.MaquinaFotoUrl, ttlFotoMaquina)
 	if err != nil {
-		log.Printf("assinar url da foto da maquina solicitacao=%d: %v", sol.Id, err)
+		slog.ErrorContext(ctx, "assinar url da foto da maquina", "solicitacao", sol.Id, "err", err)
 		sol.MaquinaFotoUrl = nil
 		return
 	}
@@ -190,7 +190,7 @@ func (s *SolicitacaoController) CriarMaquinario() gin.HandlerFunc {
 			case errors.Is(err, helper.ErrConflitoIntegridade):
 				ctx.JSON(http.StatusUnprocessableEntity, gin.H{"error": err.Error()})
 			default:
-				log.Printf("cadastrar solicitação de maquinário tenant=%d: %v", tenantId, err)
+				slog.ErrorContext(ctx.Request.Context(), "cadastrar solicitação de maquinário", "tenant", tenantId, "err", err)
 				ctx.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao cadastrar solicitação"})
 			}
 			return
@@ -237,7 +237,7 @@ func (s *SolicitacaoController) CriarReparo() gin.HandlerFunc {
 			case errors.Is(err, helper.ErrConflitoIntegridade):
 				ctx.JSON(http.StatusUnprocessableEntity, gin.H{"error": err.Error()})
 			default:
-				log.Printf("cadastrar solicitação de reparo tenant=%d: %v", tenantId, err)
+				slog.ErrorContext(ctx.Request.Context(), "cadastrar solicitação de reparo", "tenant", tenantId, "err", err)
 				ctx.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao cadastrar solicitação"})
 			}
 			return
@@ -299,7 +299,7 @@ func (s *SolicitacaoController) Minhas() gin.HandlerFunc {
 
 		pagina2, err := s.service.ListarMinhasSolicitacoes(ctx.Request.Context(), tenantId, solicitanteId, pagina, status, busca)
 		if err != nil {
-			log.Printf("listar minhas solicitações tenant=%d: %v", tenantId, err)
+			slog.ErrorContext(ctx.Request.Context(), "listar minhas solicitações", "tenant", tenantId, "err", err)
 			ctx.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao listar solicitações"})
 			return
 		}
@@ -356,7 +356,7 @@ func (s *SolicitacaoController) Listar() gin.HandlerFunc {
 
 		solicitacoes, err := s.service.ListarSolicitacoes(ctx.Request.Context(), tenantId, usuarioId, perfil, status, tipo, busca, lojaId)
 		if err != nil {
-			log.Printf("listar solicitações tenant=%d: %v", tenantId, err)
+			slog.ErrorContext(ctx.Request.Context(), "listar solicitações", "tenant", tenantId, "err", err)
 			ctx.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao listar solicitações"})
 			return
 		}
@@ -395,7 +395,7 @@ func (s *SolicitacaoController) Obter() gin.HandlerFunc {
 			case errors.Is(err, helper.ErrNaoEncontrado):
 				ctx.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
 			default:
-				log.Printf("obter solicitação id=%d tenant=%d: %v", id, tenantId, err)
+				slog.ErrorContext(ctx.Request.Context(), "obter solicitação", "id", id, "tenant", tenantId, "err", err)
 				ctx.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao obter solicitação"})
 			}
 			return
@@ -424,7 +424,7 @@ func (s *SolicitacaoController) Resumo() gin.HandlerFunc {
 
 		resumo, err := s.service.ObterResumo(ctx.Request.Context(), tenantId, solicitanteId)
 		if err != nil {
-			log.Printf("obter resumo de solicitações tenant=%d: %v", tenantId, err)
+			slog.ErrorContext(ctx.Request.Context(), "obter resumo de solicitações", "tenant", tenantId, "err", err)
 			ctx.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao obter resumo"})
 			return
 		}
@@ -470,7 +470,7 @@ func (s *SolicitacaoController) AbrirOS() gin.HandlerFunc {
 			case errors.Is(err, helper.ErrConflitoIntegridade):
 				ctx.JSON(http.StatusUnprocessableEntity, gin.H{"error": err.Error()})
 			default:
-				log.Printf("abrir os solicitacao=%d tenant=%d: %v", id, tenantId, err)
+				slog.ErrorContext(ctx.Request.Context(), "abrir os", "solicitacao", id, "tenant", tenantId, "err", err)
 				ctx.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao abrir ordem de serviço"})
 			}
 			return
@@ -517,7 +517,7 @@ func (s *SolicitacaoController) Rejeitar() gin.HandlerFunc {
 			case errors.Is(err, helper.ErrConflitoIntegridade):
 				ctx.JSON(http.StatusUnprocessableEntity, gin.H{"error": err.Error()})
 			default:
-				log.Printf("rejeitar solicitacao=%d tenant=%d: %v", id, tenantId, err)
+				slog.ErrorContext(ctx.Request.Context(), "rejeitar solicitação", "solicitacao", id, "tenant", tenantId, "err", err)
 				ctx.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao rejeitar solicitação"})
 			}
 			return

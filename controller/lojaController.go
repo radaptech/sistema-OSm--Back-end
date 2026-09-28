@@ -3,7 +3,7 @@ package controller
 import (
 	"context"
 	"errors"
-	"log"
+	"log/slog"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -62,7 +62,7 @@ func (l *LojaController) Cadastrar() gin.HandlerFunc {
 			default:
 				// Erro interno só no log: o erro cru do pgx carrega nome de
 				// constraint/coluna e às vezes o SQL.
-				log.Printf("cadastrar loja tenant=%d: %v", tenantId, err)
+				slog.ErrorContext(ctx.Request.Context(), "cadastrar loja", "tenant", tenantId, "err", err)
 				ctx.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao cadastrar loja"})
 			}
 			return
@@ -94,7 +94,7 @@ func (l *LojaController) Obter() gin.HandlerFunc {
 			case errors.Is(err, helper.ErrNaoEncontrado):
 				ctx.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
 			default:
-				log.Printf("obter loja id=%d tenant=%d: %v", id, tenantId, err)
+				slog.ErrorContext(ctx.Request.Context(), "obter loja", "id", id, "tenant", tenantId, "err", err)
 				ctx.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao obter loja"})
 			}
 			return
@@ -118,7 +118,7 @@ func (l *LojaController) Listar() gin.HandlerFunc {
 
 		lojas, err := l.service.ListarLojas(ctx.Request.Context(), tenantId)
 		if err != nil {
-			log.Printf("listar lojas tenant=%d: %v", tenantId, err)
+			slog.ErrorContext(ctx.Request.Context(), "listar lojas", "tenant", tenantId, "err", err)
 			ctx.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao listar lojas"})
 			return
 		}
@@ -162,7 +162,7 @@ func (l *LojaController) Atualizar() gin.HandlerFunc {
 			case errors.Is(err, helper.ErrConflitoIntegridade):
 				ctx.JSON(http.StatusUnprocessableEntity, gin.H{"error": err.Error()})
 			default:
-				log.Printf("atualizar loja id=%d tenant=%d: %v", id, tenantId, err)
+				slog.ErrorContext(ctx.Request.Context(), "atualizar loja", "id", id, "tenant", tenantId, "err", err)
 				ctx.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao atualizar loja"})
 			}
 			return
@@ -199,7 +199,7 @@ func (l *LojaController) Desativar() gin.HandlerFunc {
 			case errors.Is(err, helper.ErrConflitoIntegridade):
 				ctx.JSON(http.StatusUnprocessableEntity, gin.H{"error": err.Error()})
 			default:
-				log.Printf("desativar loja id=%d tenant=%d: %v", id, tenantId, err)
+				slog.ErrorContext(ctx.Request.Context(), "desativar loja", "id", id, "tenant", tenantId, "err", err)
 				ctx.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao desativar loja"})
 			}
 			return
@@ -223,7 +223,7 @@ func (l *LojaController) ListarEmpresas() gin.HandlerFunc {
 
 		empresas, err := l.service.ListarEmpresas(ctx.Request.Context(), tenantId)
 		if err != nil {
-			log.Printf("listar empresas tenant=%d: %v", tenantId, err)
+			slog.ErrorContext(ctx.Request.Context(), "listar empresas", "tenant", tenantId, "err", err)
 			ctx.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao listar empresas"})
 			return
 		}

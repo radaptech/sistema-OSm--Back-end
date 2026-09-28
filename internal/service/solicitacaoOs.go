@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"slices"
 	"time"
 
@@ -60,7 +60,7 @@ func (s *SolicitacaoService) notificar(tenantId int64, sol model.SolicitacaoOS) 
 		defer cancel()
 
 		if err := s.Notificador.NotificarNovaSolicitacao(ctx, tenantId, sol.SetorId, dados); err != nil {
-			log.Printf("notificar solicitação %d: %v", sol.Id, err)
+			slog.ErrorContext(ctx, "notificar solicitação", "solicitacao", sol.Id, "tenant", tenantId, "err", err)
 		}
 	}()
 }

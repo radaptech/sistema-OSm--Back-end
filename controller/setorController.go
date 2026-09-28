@@ -3,7 +3,7 @@ package controller
 import (
 	"context"
 	"errors"
-	"log"
+	"log/slog"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -60,7 +60,7 @@ func (s *SetorController) Cadastrar() gin.HandlerFunc {
 			case errors.Is(err, helper.ErrConflitoIntegridade):
 				ctx.JSON(http.StatusUnprocessableEntity, gin.H{"error": err.Error()})
 			default:
-				log.Printf("cadastrar setor tenant=%d: %v", tenantId, err)
+				slog.ErrorContext(ctx.Request.Context(), "cadastrar setor", "tenant", tenantId, "err", err)
 				ctx.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao cadastrar setor"})
 			}
 			return
@@ -92,7 +92,7 @@ func (s *SetorController) Obter() gin.HandlerFunc {
 			case errors.Is(err, helper.ErrNaoEncontrado):
 				ctx.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
 			default:
-				log.Printf("obter setor id=%d tenant=%d: %v", id, tenantId, err)
+				slog.ErrorContext(ctx.Request.Context(), "obter setor", "id", id, "tenant", tenantId, "err", err)
 				ctx.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao obter setor"})
 			}
 			return
@@ -122,7 +122,7 @@ func (s *SetorController) Listar() gin.HandlerFunc {
 
 		setores, err := s.service.ListarSetores(ctx.Request.Context(), tenantId, lojaId)
 		if err != nil {
-			log.Printf("listar setores tenant=%d: %v", tenantId, err)
+			slog.ErrorContext(ctx.Request.Context(), "listar setores", "tenant", tenantId, "err", err)
 			ctx.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao listar setores"})
 			return
 		}
@@ -164,7 +164,7 @@ func (s *SetorController) Atualizar() gin.HandlerFunc {
 			case errors.Is(err, helper.ErrConflitoIntegridade):
 				ctx.JSON(http.StatusUnprocessableEntity, gin.H{"error": err.Error()})
 			default:
-				log.Printf("atualizar setor id=%d tenant=%d: %v", id, tenantId, err)
+				slog.ErrorContext(ctx.Request.Context(), "atualizar setor", "id", id, "tenant", tenantId, "err", err)
 				ctx.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao atualizar setor"})
 			}
 			return
@@ -198,7 +198,7 @@ func (s *SetorController) Desativar() gin.HandlerFunc {
 			case errors.Is(err, helper.ErrConflitoIntegridade):
 				ctx.JSON(http.StatusUnprocessableEntity, gin.H{"error": err.Error()})
 			default:
-				log.Printf("desativar setor id=%d tenant=%d: %v", id, tenantId, err)
+				slog.ErrorContext(ctx.Request.Context(), "desativar setor", "id", id, "tenant", tenantId, "err", err)
 				ctx.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao desativar setor"})
 			}
 			return

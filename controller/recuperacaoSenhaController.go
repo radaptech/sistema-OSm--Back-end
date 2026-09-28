@@ -3,7 +3,7 @@ package controller
 import (
 	"context"
 	"errors"
-	"log"
+	"log/slog"
 	"net/http"
 	"strings"
 
@@ -48,7 +48,7 @@ func (r *RecuperacaoSenhaController) EsqueciSenha() gin.HandlerFunc {
 		subdominio := strings.TrimSpace(ctx.GetHeader("X-tenant-ID"))
 
 		if err := r.service.SolicitarRecuperacao(ctx.Request.Context(), tenantId, subdominio, input.Email); err != nil {
-			log.Printf("solicitar recuperação de senha tenant=%d: %v", tenantId, err)
+			slog.ErrorContext(ctx.Request.Context(), "solicitar recuperação de senha", "tenant", tenantId, "err", err)
 			ctx.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao solicitar recuperação de senha"})
 			return
 		}
@@ -80,7 +80,7 @@ func (r *RecuperacaoSenhaController) RedefinirSenha() gin.HandlerFunc {
 			case errors.Is(err, helper.ErrTokenRecuperacaoInvalido):
 				ctx.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			default:
-				log.Printf("redefinir senha tenant=%d: %v", tenantId, err)
+				slog.ErrorContext(ctx.Request.Context(), "redefinir senha", "tenant", tenantId, "err", err)
 				ctx.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao redefinir senha"})
 			}
 			return

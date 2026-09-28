@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"mime/multipart"
 	"os"
 	"path/filepath"
@@ -45,7 +45,8 @@ func InitR2_cloudflare(ctx context.Context) {
 		r2_config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(keyid, secretKey, "")),
 		r2_config.WithRegion("auto"))
 	if err != nil {
-		log.Fatalf("erro ao carregar configuraçoes da aws: %v", err)
+		slog.ErrorContext(ctx, "carregar configurações do R2", "err", err)
+		os.Exit(1)
 	}
 
 	s3Client = s3.NewFromConfig(config, func(o *s3.Options) {
@@ -97,7 +98,7 @@ func UploadFoto(ctx context.Context, tenantID int64, bucket string, header *mult
 		ContentType: aws.String(header.Header.Get("Content-Type")),
 	})
 	if err != nil {
-		log.Printf("erro ao salvar foto no r2 bucket=%s key=%s: %v", bucket, objkey, err)
+		slog.ErrorContext(ctx, "erro ao salvar foto no r2", "bucket", bucket, "key", objkey, "err", err)
 		return "", fmt.Errorf("erro ao salvar no R2")
 	}
 
@@ -126,7 +127,7 @@ func UploadArquivo(ctx context.Context, bucket, key string, corpo io.Reader, con
 		ContentType: aws.String(contentType),
 	})
 	if err != nil {
-		log.Printf("erro ao salvar arquivo no r2 bucket=%s key=%s: %v", bucket, key, err)
+		slog.ErrorContext(ctx, "erro ao salvar arquivo no r2", "bucket", bucket, "key", key, "err", err)
 		return fmt.Errorf("erro ao salvar no R2")
 	}
 
@@ -148,7 +149,7 @@ func URLLeitura(ctx context.Context, bucket, key string, ttl time.Duration) (str
 		Key:    aws.String(key),
 	}, s3.WithPresignExpires(ttl))
 	if err != nil {
-		log.Printf("erro ao gerar url da foto: %v", err)
+		slog.ErrorContext(ctx, "erro ao gerar url da foto", "err", err)
 		return "", fmt.Errorf("erro ao gerar url da foto")
 	}
 

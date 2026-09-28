@@ -50,7 +50,8 @@ func CorsConfig() gin.HandlerFunc {
 			"x-tenant-id",
 		},
 
-		ExposeHeaders: []string{"Content-Length", "Content-Disposition", "Set-Cookie"},
+		// X-Request-ID: sem expor, o front em outra origem lê null e o erro sai sem o código pro suporte.
+		ExposeHeaders: []string{"Content-Length", "Content-Disposition", "Set-Cookie", "X-Request-ID"},
 
 		AllowCredentials: true,
 		// Garanta que o preflight permita repassar os headers na requisição OPTIONS
