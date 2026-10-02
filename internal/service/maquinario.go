@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/radaptech/sistema-OSm--Back-end/database/repository"
 	"github.com/radaptech/sistema-OSm--Back-end/internal/helper"
@@ -63,7 +64,7 @@ func (m *MaquinarioService) CadastrarMaquina(ctx context.Context, tenantId int64
 	})
 	if err != nil {
 
-		return model.Maquinario{}, helper.TraduzErroPostgres(err)
+		return model.Maquinario{}, traduzErroMaquina(err)
 	}
 
 	// Mesma transação da máquina: a regra é que máquina sem preventiva não
@@ -166,7 +167,7 @@ func (m *MaquinarioService) AtualizarMaquina(ctx context.Context, tenantId, id i
 		if errors.Is(err, pgx.ErrNoRows) {
 			return model.Maquinario{}, helper.ErrNaoEncontrado
 		}
-		return model.Maquinario{}, helper.TraduzErroPostgres(err)
+		return model.Maquinario{}, traduzErroMaquina(err)
 	}
 
 	// Substitui o conjunto inteiro, sem merge incremental: desativa as atuais e
@@ -218,4 +219,16 @@ func (m *MaquinarioService) DesativarMaquina(ctx context.Context, tenantId, id i
 	}
 
 	return nil
+}
+
+// traduzErroMaquina separa as duas UNIQUE de maquina: patrimônio e série dão
+// 23505 iguais, e só o nome da constraint diz qual o usuário tem de corrigir.
+func traduzErroMaquina(err error) error {
+
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.ConstraintName == "uq_maquina_serie" {
+		return helper.ErrSerieDuplicada
+	}
+
+	return helper.TraduzErroPostgres(err)
 }

@@ -13,6 +13,9 @@ var (
 	ErrInternal      = errors.New("Erro Internal do banco de dados")
 	ErrNaoEncontrado = errors.New("registro não encontrado")
 	ErrDadoDuplicado = errors.New("este registro já existe no sistema")
+	// uq_maquina_serie: sem ela o 23505 da série caía no ErrDadoDuplicado e o
+	// controller respondia "patrimônio duplicado" com um patrimônio inédito.
+	ErrSerieDuplicada = errors.New("já existe uma máquina (ativa ou desativada) com esse número de série")
 	// Violação de FK (23503), que acontece nas duas direções: apontar para um
 	// registro que não existe e desativar um registro que ainda é referenciado.
 	// O texto cobre as duas porque ele vai direto pro toast do front -- e ele

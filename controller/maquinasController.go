@@ -126,8 +126,10 @@ func (m *MaquinaController) Cadastrar() gin.HandlerFunc {
 			switch {
 			case errors.Is(err, helper.ErrValidacao):
 				ctx.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			case errors.Is(err, helper.ErrSerieDuplicada):
+				ctx.JSON(http.StatusConflict, gin.H{"error": err.Error()})
 			case errors.Is(err, helper.ErrDadoDuplicado):
-				ctx.JSON(http.StatusConflict, gin.H{"error": "já existe uma máquina com esse número de patrimônio"})
+				ctx.JSON(http.StatusConflict, gin.H{"error": "já existe uma máquina (ativa ou desativada) com esse número de patrimônio"})
 			case errors.Is(err, helper.ErrConflitoIntegridade):
 				ctx.JSON(http.StatusUnprocessableEntity, gin.H{"error": err.Error()})
 			default:
@@ -267,8 +269,10 @@ func (m *MaquinaController) Atualizar() gin.HandlerFunc {
 			switch {
 			case errors.Is(err, helper.ErrValidacao):
 				ctx.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			case errors.Is(err, helper.ErrSerieDuplicada):
+				ctx.JSON(http.StatusConflict, gin.H{"error": err.Error()})
 			case errors.Is(err, helper.ErrDadoDuplicado):
-				ctx.JSON(http.StatusConflict, gin.H{"error": "já existe uma máquina com esse número de patrimônio"})
+				ctx.JSON(http.StatusConflict, gin.H{"error": "já existe uma máquina (ativa ou desativada) com esse número de patrimônio"})
 			case errors.Is(err, helper.ErrNaoEncontrado):
 				ctx.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
 			case errors.Is(err, helper.ErrConflitoIntegridade):
