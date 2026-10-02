@@ -114,6 +114,22 @@ func TestMaquinarioCrud(t *testing.T) {
 		}
 	})
 
+	// Bug de produção: série repetida com patrimônio inédito respondia
+	// "patrimônio duplicado", porque uq_maquina_serie também é 23505.
+	t.Run("série duplicada não se passa por patrimônio duplicado", func(t *testing.T) {
+		serie := "S-DUP"
+		primeira := novaMaquina("PS1", "Batedeira")
+		primeira.NumeroSerie = &serie
+		if _, err := svc.CadastrarMaquina(ctx, tenantID, primeira); err != nil {
+			t.Fatalf("cadastrar a primeira: %v", err)
+		}
+		segunda := novaMaquina("PS2", "Batedeira 2")
+		segunda.NumeroSerie = &serie
+		if _, err := svc.CadastrarMaquina(ctx, tenantID, segunda); !errors.Is(err, helper.ErrSerieDuplicada) {
+			t.Errorf("esperado ErrSerieDuplicada, veio %v", err)
+		}
+	})
+
 	t.Run("setor inexistente é conflito, não 500", func(t *testing.T) {
 		payload := novaMaquina("P9", "Serra")
 		payload.SetorID = setor.Id + 1000
