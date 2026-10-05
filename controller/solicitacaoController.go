@@ -23,6 +23,7 @@ type SolicitacaoServiceInterface interface {
 	ObterSolicitacao(ctx context.Context, tenantId, usuarioId int64, perfil string, id int64) (model.SolicitacaoOS, error)
 	ObterResumo(ctx context.Context, tenantId, solicitanteId int64) (model.ResumoSolicitacoes, error)
 	AbrirOS(ctx context.Context, tenantId, atorId int64, perfil string, solicitacaoId int64, payload model.AberturaOrdemServicoPayload) (model.OrdemServico, error)
+	CadastrarSolicitacaoDireta(ctx context.Context, tenantId, atorId int64, perfil string, payload model.NovaSolicitacaoDiretaPayload) (model.OrdemServico, error)
 	Rejeitar(ctx context.Context, tenantId, atorId int64, perfil string, solicitacaoId int64, motivoBruto string) (model.SolicitacaoOS, error)
 }
 
@@ -467,10 +468,54 @@ func (s *SolicitacaoController) AbrirOS() gin.HandlerFunc {
 			switch {
 			case errors.Is(err, helper.ErrNaoEncontrado):
 				ctx.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+			// Técnico que não atende a loja da solicitação (criarOrdemServico).
+			case errors.Is(err, helper.ErrValidacao):
+				ctx.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			case errors.Is(err, helper.ErrConflitoIntegridade):
 				ctx.JSON(http.StatusUnprocessableEntity, gin.H{"error": err.Error()})
 			default:
 				slog.ErrorContext(ctx.Request.Context(), "abrir os", "solicitacao", id, "tenant", tenantId, "err", err)
+				ctx.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao abrir ordem de serviço"})
+			}
+			return
+		}
+
+		ctx.JSON(http.StatusCreated, os)
+	}
+}
+
+// CriarDireta é POST /solicitacoes/direta -- o Gestor/Administrador abre a
+// OS sem passar pela fila (origem 'direta'). JSON puro, sem upload: a OS
+// direta não leva foto. Responde a OrdemServico, como AbrirOS.
+func (s *SolicitacaoController) CriarDireta() gin.HandlerFunc {
+
+	return func(ctx *gin.Context) {
+
+		tenantId, ok := tenantDaRota(ctx)
+		if !ok {
+			return
+		}
+
+		atorId, perfil, ok := atorDaRota(ctx)
+		if !ok {
+			return
+		}
+
+		input, ok := corpoJSON[model.NovaSolicitacaoDiretaPayload](ctx)
+		if !ok {
+			return
+		}
+
+		os, err := s.service.CadastrarSolicitacaoDireta(ctx.Request.Context(), tenantId, atorId, perfil, input)
+		if err != nil {
+
+			switch {
+			case errors.Is(err, helper.ErrValidacao):
+				ctx.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			case errors.Is(err, helper.ErrConflitoIntegridade):
+				ctx.JSON(http.StatusUnprocessableEntity, gin.H{"error": err.Error()})
+			default:
+				slog.ErrorContext(ctx.Request.Context(), "abrir os direta", "tenant", tenantId, "err", err)
 				ctx.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao abrir ordem de serviço"})
 			}
 			return

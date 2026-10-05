@@ -184,6 +184,9 @@ func ConfigurarRotas(r *gin.Engine, c *Container) {
 	// no front (front-end/CLAUDE.md), a única tela que chama estas rotas.
 	solicitacoes.POST("/maquinario", middleware.Permitir("solicitante"), c.Solicit.CriarMaquinario())
 	solicitacoes.POST("/reparo", middleware.Permitir("solicitante"), c.Solicit.CriarReparo())
+	// A OS direta é do Gestor/Administrador: abre solicitação e OS juntas, sem
+	// fila e sem foto, para quando o Solicitante não está disponível.
+	solicitacoes.POST("/direta", middleware.Permitir("gestor", "administrador"), c.Solicit.CriarDireta())
 	// Minhas e Resumo são sempre "o que é meu" -- o service nem recebe perfil,
 	// só o usuario.id do token (mesmo motivo de GET /lojas e /setores ficarem
 	// sem Permitir: o recorte já está no que a query pede, não no RBAC).

@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"slices"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -339,8 +338,6 @@ func (s *SolicitacaoService) ObterResumo(ctx context.Context, tenantId, solicita
 // engano).
 func (s *SolicitacaoService) AbrirOS(ctx context.Context, tenantId, atorId int64, perfil string, solicitacaoId int64, payload model.AberturaOrdemServicoPayload) (model.OrdemServico, error) {
 
-	urgencia := repository.NivelUrgencia(payload.Urgencia) // 'Baixa'/'Média'/'Alta' já garantidos pelo binding oneof
-
 	tx, err := s.Pool.Begin(ctx)
 	if err != nil {
 		return model.OrdemServico{}, fmt.Errorf("erro ao abrir transação: %w", err)
@@ -369,42 +366,9 @@ func (s *SolicitacaoService) AbrirOS(ctx context.Context, tenantId, atorId int64
 		return model.OrdemServico{}, fmt.Errorf("%w: solicitação já está %s", helper.ErrConflitoIntegridade, atual.Status)
 	}
 
-	tecnico, err := repo.ObterUsuarioPorID(ctx, repository.ObterUsuarioPorIDParams{ID: payload.TecnicoId, TenantID: tenantId})
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return model.OrdemServico{}, fmt.Errorf("%w: técnico %d não existe neste tenant", helper.ErrConflitoIntegridade, payload.TecnicoId)
-		}
-		return model.OrdemServico{}, helper.TraduzErroPostgres(err)
-	}
-	if tecnico.Perfil != repository.PerfilUsuarioTecnico || !tecnico.Ativo {
-		return model.OrdemServico{}, fmt.Errorf("%w: usuário %d não é um técnico ativo", helper.ErrConflitoIntegridade, payload.TecnicoId)
-	}
-
-	impactos, err := repo.ObterImpactosDaSolicitacao(ctx, solicitacaoId)
-	if err != nil {
-		return model.OrdemServico{}, helper.TraduzErroPostgres(err)
-	}
-	afetaProducao := slices.Contains(impactos, repository.MarcadorImpactoAfetaProduo)
-
-	tipoOs, err := tipoOsDaSolicitacao(atual.Tipo)
+	os, err := criarOrdemServico(ctx, repo, tenantId, atorId, atual, payload)
 	if err != nil {
 		return model.OrdemServico{}, err
-	}
-
-	os, err := repo.CriarOrdemServicoDeSolicitacao(ctx, repository.CriarOrdemServicoDeSolicitacaoParams{
-		TenantID:      tenantId,
-		SolicitacaoID: solicitacaoId,
-		Tipo:          tipoOs,
-		TecnicoID:     payload.TecnicoId,
-		Urgencia:      urgencia,
-		// Ponteiro desde a migration 000008, que tornou aberta_por_id nullable
-		// para a OS de preventiva (aberta por ninguém, ver
-		// CriarOrdemServicoDePreventiva). Aqui é sempre o Gestor que clicou.
-		AbertaPorID:   &atorId,
-		AfetaProducao: afetaProducao,
-	})
-	if err != nil {
-		return model.OrdemServico{}, helper.TraduzErroPostgres(err)
 	}
 
 	linhas, err := repo.MarcarSolicitacaoConvertida(ctx, repository.MarcarSolicitacaoConvertidaParams{ID: solicitacaoId, TenantID: tenantId})
@@ -419,7 +383,114 @@ func (s *SolicitacaoService) AbrirOS(ctx context.Context, tenantId, atorId int64
 		return model.OrdemServico{}, fmt.Errorf("erro ao commitar transação: %w", err)
 	}
 
-	return model.MontarOrdemServicoDaAbertura(os, atual, string(urgencia), payload.TecnicoId, afetaProducao), nil
+	return os, nil
+}
+
+// CadastrarSolicitacaoDireta é POST /solicitacoes/direta -- o Gestor (ou o
+// Administrador) abre a OS sem passar pela fila, para quando o Solicitante não
+// está disponível. Solicitação e OS nascem juntas, como na preventiva
+// (origem 'direta', status 'Convertida', migration 000014). Sem foto e sem
+// WhatsApp: a foto e o aviso existem para o Gestor avaliar o pedido, e aqui é
+// ele quem pede.
+//
+// O escopo é cobrado relendo a solicitação recém-inserida com
+// escopoDe(ator) -- o mesmo EXISTS de GET /solicitacoes/:id. Fora do escopo a
+// releitura não acha a linha e o rollback leva o INSERT junto: zero query nova
+// para dizer "este setor é seu?".
+func (s *SolicitacaoService) CadastrarSolicitacaoDireta(ctx context.Context, tenantId, atorId int64, perfil string, payload model.NovaSolicitacaoDiretaPayload) (model.OrdemServico, error) {
+
+	descricao, err := campoObrigatorio("descrição", payload.Descricao)
+	if err != nil {
+		return model.OrdemServico{}, err
+	}
+
+	tx, err := s.Pool.Begin(ctx)
+	if err != nil {
+		return model.OrdemServico{}, fmt.Errorf("erro ao abrir transação: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	repo := repository.New(tx)
+
+	params := repository.CriarSolicitacaoDiretaParams{
+		TenantID:      tenantId,
+		Tipo:          repository.TipoSolicitacao(payload.Tipo),
+		SolicitanteID: atorId,
+		Descricao:     descricao,
+	}
+	var marcadores []repository.MarcadorImpacto
+
+	switch params.Tipo {
+	case repository.TipoSolicitacaoMaquinario:
+		if payload.MaquinaId == nil {
+			return model.OrdemServico{}, fmt.Errorf("%w: máquina é obrigatória", helper.ErrValidacao)
+		}
+		maquina, err := repo.ObterMaquinaPorID(ctx, repository.ObterMaquinaPorIDParams{ID: *payload.MaquinaId, TenantID: tenantId})
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return model.OrdemServico{}, fmt.Errorf("%w: máquina %d não existe neste tenant", helper.ErrConflitoIntegridade, *payload.MaquinaId)
+			}
+			return model.OrdemServico{}, helper.TraduzErroPostgres(err)
+		}
+		if !maquina.Ativa {
+			return model.OrdemServico{}, fmt.Errorf("%w: máquina %d está desativada", helper.ErrConflitoIntegridade, *payload.MaquinaId)
+		}
+		params.MaquinaID = payload.MaquinaId
+		params.SetorID = maquina.SetorID
+
+		for _, item := range payload.Impactos {
+			marcador, err := marcadorValido(item)
+			if err != nil {
+				return model.OrdemServico{}, err
+			}
+			marcadores = append(marcadores, marcador)
+		}
+	default: // reparo -- o binding oneof já recusou o resto
+		if payload.Item == nil {
+			return model.OrdemServico{}, fmt.Errorf("%w: item é obrigatório", helper.ErrValidacao)
+		}
+		item, err := campoObrigatorio("item", *payload.Item)
+		if err != nil {
+			return model.OrdemServico{}, err
+		}
+		if payload.SetorId == nil {
+			return model.OrdemServico{}, fmt.Errorf("%w: setor é obrigatório", helper.ErrValidacao)
+		}
+		params.ItemDescricao = &item
+		params.SetorID = *payload.SetorId
+	}
+
+	criada, err := repo.CriarSolicitacaoDireta(ctx, params)
+	if err != nil {
+		return model.OrdemServico{}, helper.TraduzErroPostgres(err)
+	}
+
+	if err := gravarImpactosEAnexos(ctx, repo, criada, marcadores, nil); err != nil {
+		return model.OrdemServico{}, err
+	}
+
+	atual, err := repo.ObterSolicitacaoPorID(ctx, repository.ObterSolicitacaoPorIDParams{
+		ID:              criada,
+		TenantID:        tenantId,
+		EscopoUsuarioID: escopoDe(atorId, perfil),
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return model.OrdemServico{}, fmt.Errorf("%w: setor fora do seu escopo", helper.ErrValidacao)
+		}
+		return model.OrdemServico{}, helper.TraduzErroPostgres(err)
+	}
+
+	os, err := criarOrdemServico(ctx, repo, tenantId, atorId, atual, payload.AberturaOrdemServicoPayload)
+	if err != nil {
+		return model.OrdemServico{}, err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return model.OrdemServico{}, fmt.Errorf("erro ao commitar transação: %w", err)
+	}
+
+	return os, nil
 }
 
 // Rejeitar é POST /solicitacoes/:id/rejeitar -- encerra a solicitação sem

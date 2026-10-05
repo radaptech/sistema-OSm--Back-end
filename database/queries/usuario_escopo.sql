@@ -64,3 +64,13 @@ LEFT JOIN usuario_escopo_setor ues ON ues.escopo_id = ue.id
 WHERE ue.usuario_id = ANY(sqlc.arg(usuario_ids)::bigint[])
 GROUP BY ue.id, ue.usuario_id, ue.loja_id, ue.acesso_total_setores
 ORDER BY ue.usuario_id, ue.loja_id;
+
+-- name: TecnicoAtendeLoja :one
+-- A OS só vai para técnico que atende a loja da solicitação -- abrir OS na
+-- Loja C chamando um técnico só da Loja A não faz sentido. Técnico tem um
+-- escopo por loja, sempre acesso_total_setores (ver o topo do arquivo), então
+-- basta a linha da loja.
+SELECT EXISTS (
+    SELECT 1 FROM usuario_escopo
+    WHERE usuario_id = sqlc.arg(usuario_id) AND loja_id = sqlc.arg(loja_id)
+);

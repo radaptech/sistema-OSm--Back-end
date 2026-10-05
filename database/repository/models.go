@@ -143,6 +143,7 @@ type OrigemSolicitacao string
 const (
 	OrigemSolicitacaoSolicitante OrigemSolicitacao = "solicitante"
 	OrigemSolicitacaoPreventiva  OrigemSolicitacao = "preventiva"
+	OrigemSolicitacaoDireta      OrigemSolicitacao = "direta"
 )
 
 func (e *OrigemSolicitacao) Scan(src interface{}) error {

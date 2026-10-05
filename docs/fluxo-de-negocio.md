@@ -186,7 +186,8 @@ origem** (`s.setor_id`) — `ordem_servico` não tem setor próprio. É a mesma 
 amplia: gestor pedindo setor fora do escopo dele recebe lista vazia, não a do vizinho.
 
 **Não existe `POST /ordens-servico`, e não é esquecimento**: a OS nasce de
-`POST /solicitacoes/:id/abrir-os` (a aprovação do Gestor). `uq_os_solicitacao` garante
+`POST /solicitacoes/:id/abrir-os` (a aprovação do Gestor), do job de preventiva ou de
+`POST /solicitacoes/direta` (ver "OS direta" abaixo) — os três criam a solicitação antes. `uq_os_solicitacao` garante
 que toda OS vem de uma solicitação, e criar direto pularia a aprovação — que é o ponto do
 fluxo. Nenhum teste insere em `ordem_servico` na mão: todos passam por `AbrirOS`.
 
@@ -380,6 +381,32 @@ não ficou no repo) que confirmou `CadastrarSolicitacaoMaquinario` voltando em ~
 **O que falta**: só o chip — comprar, instalar WhatsApp Business, escanear o QR
 (`POST /instance/connect/sistema-os-notificacoes` contra a Evolution API). Nenhum código
 pendente.
+
+## OS direta — Gestor/Administrador abre sem fila (`POST /solicitacoes/direta`, feito)
+
+Pedido dos gestores: quando o Solicitante não está disponível, quem aprova abre a OS
+pelo próprio perfil. Gestor e Administrador, mesmos requisitos. Mesmo desenho da
+preventiva: **solicitação e OS nascem juntas** numa transação (`CadastrarSolicitacaoDireta`),
+a solicitação com `origem = 'direta'` e status `Convertida`, `solicitante_id` = quem abriu.
+
+- **Origem própria (migration `000014`) por causa da foto.** `fn_check_solicitacao_tem_foto`
+  cobra anexo de `origem = 'solicitante'`; a foto existe para o Gestor avaliar antes de
+  aprovar, e aqui quem abre é quem aprovaria. Sem foto, corpo JSON (sem multipart).
+- **Sem WhatsApp**: a direta não chama `notificar` — avisar o gestor do que ele mesmo abriu
+  é ruído. Aviso ao Técnico continua não existindo (igual ao abrir-os da fila).
+- **Corpo**: `tipo` (`maquinario`/`reparo`), `maquinaId` (maquinário — o setor sai da
+  máquina) ou `item` + `setorId` (reparo), `descricao`, `impactos` (só maquinário),
+  `urgencia`, `tecnicoId`. Técnico é obrigatório. Resposta é a `OrdemServico`, igual ao
+  abrir-os.
+- **Escopo**: o service insere e relê com `ObterSolicitacaoPorID` + `escopoDe(ator)`; fora do
+  escopo a releitura não acha a linha, volta 400 e o rollback leva o INSERT junto. Zero
+  query nova.
+- **Técnico tem que atender a loja da solicitação** (`TecnicoAtendeLoja`) — vale para a
+  direta **e para o abrir-os da fila**, porque os dois passam por `criarOrdemServico`
+  (`solicitacaoOsHelpers.go`). Antes o abrir-os aceitava técnico de qualquer loja; agora
+  é 400. O select do front já filtra por `GET /tecnicos?lojaId=`.
+- Não checa setor desativado nem pede motivo ("solicitante indisponível") — ninguém pediu.
+- Testado: `internal/service/solicitacaoDiretaIntegracao_test.go`.
 
 ## Abertura automática de OS por preventiva (feito; falta o Cron no Railway)
 Ao vencer a `proxima_data` de uma preventiva **ativa**, o sistema abre a **Solicitação e
