@@ -371,6 +371,15 @@ type Querier interface {
 	// dois, e é ela que torna impossível pendurar um setor numa loja de outro
 	// tenant -- o banco recusa, não depende de disciplina no service.
 	CriarSetor(ctx context.Context, arg CriarSetorParams) (Setor, error)
+	// POST /solicitacoes/direta -- Gestor/Administrador abrindo a OS sem passar
+	// pela fila (migration 000014). `origem` e `status` literais, mesmo motivo de
+	// CriarSolicitacaoPreventiva: 'direta' nasce 'Convertida', com a OS na mesma
+	// transação (CriarOrdemServicoDeSolicitacao). Uma query só para os dois
+	// tipos, diferente das criações do Solicitante: maquina_id/item_descricao vêm
+	// nulos conforme o tipo e ck_solicitacao_alvo segura a combinação errada.
+	// solicitante_id é quem abriu (o Gestor/Administrador) e sem foto --
+	// fn_check_solicitacao_tem_foto só cobra origem = 'solicitante'.
+	CriarSolicitacaoDireta(ctx context.Context, arg CriarSolicitacaoDiretaParams) (int64, error)
 	// POST /solicitacoes/maquinario. `tipo`/`origem` literais, mesmo motivo de
 	// CriarSolicitacaoPreventiva: ck_solicitacao_alvo exige maquina_id e proíbe
 	// item_descricao para 'maquinario', ck_origem exige solicitante_id para
@@ -1061,6 +1070,11 @@ type Querier interface {
 	// Um pedido novo sobrescreve o anterior: só o último link enviado vale.
 	// Os 30 minutos estão escritos no texto do e-mail (EmailService.go): mudou aqui, muda lá.
 	SalvarTokenRecuperacaoSenha(ctx context.Context, arg SalvarTokenRecuperacaoSenhaParams) (string, error)
+	// A OS só vai para técnico que atende a loja da solicitação -- abrir OS na
+	// Loja C chamando um técnico só da Loja A não faz sentido. Técnico tem um
+	// escopo por loja, sempre acesso_total_setores (ver o topo do arquivo), então
+	// basta a linha da loja.
+	TecnicoAtendeLoja(ctx context.Context, arg TecnicoAtendeLojaParams) (bool, error)
 }
 
 var _ Querier = (*Queries)(nil)

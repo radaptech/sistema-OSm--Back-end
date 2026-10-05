@@ -227,3 +227,26 @@ func (q *Queries) ObterSetoresPorEscopos(ctx context.Context, escopoIds []int64)
 	}
 	return items, nil
 }
+
+const tecnicoAtendeLoja = `-- name: TecnicoAtendeLoja :one
+SELECT EXISTS (
+    SELECT 1 FROM usuario_escopo
+    WHERE usuario_id = $1 AND loja_id = $2
+)
+`
+
+type TecnicoAtendeLojaParams struct {
+	UsuarioID int64
+	LojaID    int64
+}
+
+// A OS só vai para técnico que atende a loja da solicitação -- abrir OS na
+// Loja C chamando um técnico só da Loja A não faz sentido. Técnico tem um
+// escopo por loja, sempre acesso_total_setores (ver o topo do arquivo), então
+// basta a linha da loja.
+func (q *Queries) TecnicoAtendeLoja(ctx context.Context, arg TecnicoAtendeLojaParams) (bool, error) {
+	row := q.db.QueryRow(ctx, tecnicoAtendeLoja, arg.UsuarioID, arg.LojaID)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
+}

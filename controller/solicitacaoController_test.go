@@ -130,6 +130,16 @@ func (s solicitacaoFake) AbrirOS(_ context.Context, _, atorId int64, perfil stri
 	return model.OrdemServico{Id: 1, SolicitacaoId: 1, StatusExecucao: "Aberta"}, nil
 }
 
+func (s solicitacaoFake) CadastrarSolicitacaoDireta(_ context.Context, _, atorId int64, perfil string, _ model.NovaSolicitacaoDiretaPayload) (model.OrdemServico, error) {
+	if s.ator != nil {
+		*s.ator = fmt.Sprintf("%d/%s", atorId, perfil)
+	}
+	if s.err != nil {
+		return model.OrdemServico{}, s.err
+	}
+	return model.OrdemServico{Id: 1, SolicitacaoId: 1, StatusExecucao: "Aberta"}, nil
+}
+
 func (s solicitacaoFake) Rejeitar(_ context.Context, _, atorId int64, perfil string, _ int64, motivo string) (model.SolicitacaoOS, error) {
 	if s.motivo != nil {
 		*s.motivo = motivo
@@ -235,6 +245,13 @@ func TestSolicitacaoMapeiaErroParaStatus(t *testing.T) {
 		{"abrir-os inexistente", "abrir-os", helper.ErrNaoEncontrado, http.StatusNotFound},
 		{"abrir-os já convertida", "abrir-os", jaConvertida, http.StatusUnprocessableEntity},
 		{"abrir-os interno", "abrir-os", fmt.Errorf("conexão recusada"), http.StatusInternalServerError},
+		{"abrir-os técnico de outra loja", "abrir-os", fmt.Errorf("%w: técnico não atende a loja", helper.ErrValidacao), http.StatusBadRequest},
+
+		{"direta sucesso", "direta", nil, http.StatusCreated},
+		{"direta fora do escopo", "direta", fmt.Errorf("%w: setor fora do seu escopo", helper.ErrValidacao), http.StatusBadRequest},
+		{"direta máquina desativada", "direta", fmt.Errorf("%w: máquina desativada", helper.ErrConflitoIntegridade), http.StatusUnprocessableEntity},
+		{"direta interno", "direta", fmt.Errorf("conexão recusada"), http.StatusInternalServerError},
+		{"direta sem técnico é recusada no binding", "direta-sem-tecnico", nil, http.StatusBadRequest},
 
 		{"rejeitar sucesso", "rejeitar", nil, http.StatusOK},
 		{"rejeitar motivo vazio", "rejeitar", fmt.Errorf("%w: motivo é obrigatório", helper.ErrValidacao), http.StatusBadRequest},
@@ -261,6 +278,12 @@ func TestSolicitacaoMapeiaErroParaStatus(t *testing.T) {
 			case "abrir-os":
 				w, ctx = requisicaoJSON(http.MethodPost, "/solicitacoes/1/abrir-os", "1", `{"urgencia":"Alta","tecnicoId":5}`)
 				ctrl.AbrirOS()(ctx)
+			case "direta":
+				w, ctx = requisicaoJSON(http.MethodPost, "/solicitacoes/direta", "", `{"tipo":"maquinario","maquinaId":9,"descricao":"Vazando","urgencia":"Alta","tecnicoId":5}`)
+				ctrl.CriarDireta()(ctx)
+			case "direta-sem-tecnico":
+				w, ctx = requisicaoJSON(http.MethodPost, "/solicitacoes/direta", "", `{"tipo":"maquinario","maquinaId":9,"descricao":"Vazando","urgencia":"Alta"}`)
+				ctrl.CriarDireta()(ctx)
 			case "rejeitar":
 				w, ctx = requisicaoJSON(http.MethodPost, "/solicitacoes/1/rejeitar", "1", `{"motivo":"Já resolvido"}`)
 				ctrl.Rejeitar()(ctx)

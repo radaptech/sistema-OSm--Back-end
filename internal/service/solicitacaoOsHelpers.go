@@ -7,7 +7,9 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"slices"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/radaptech/sistema-OSm--Back-end/database/repository"
@@ -53,6 +55,67 @@ func tipoOsDaSolicitacao(tipo repository.TipoSolicitacao) (repository.TipoOs, er
 		return repository.TipoOsReparo, nil
 	}
 	return "", fmt.Errorf("tipo de solicitação desconhecido: %s", tipo)
+}
+
+// criarOrdemServico é o miolo comum de AbrirOS (aprovação pela fila) e
+// CadastrarSolicitacaoDireta: valida o técnico e insere a OS da solicitação
+// `sol`, na transação de quem chama. Marcar a solicitação como Convertida
+// fica com quem chama -- a direta já nasce assim.
+//
+// O técnico tem que estar ativo E atender a loja da solicitação: abrir OS na
+// Loja C chamando um técnico só da Loja A não faz sentido. O select do front
+// já filtra por GET /tecnicos?lojaId=; isto segura o POST direto.
+func criarOrdemServico(ctx context.Context, repo *repository.Queries, tenantId, atorId int64, sol repository.ObterSolicitacaoPorIDRow, payload model.AberturaOrdemServicoPayload) (model.OrdemServico, error) {
+
+	urgencia := repository.NivelUrgencia(payload.Urgencia) // 'Baixa'/'Média'/'Alta' já garantidos pelo binding oneof
+
+	tecnico, err := repo.ObterUsuarioPorID(ctx, repository.ObterUsuarioPorIDParams{ID: payload.TecnicoId, TenantID: tenantId})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return model.OrdemServico{}, fmt.Errorf("%w: técnico %d não existe neste tenant", helper.ErrConflitoIntegridade, payload.TecnicoId)
+		}
+		return model.OrdemServico{}, helper.TraduzErroPostgres(err)
+	}
+	if tecnico.Perfil != repository.PerfilUsuarioTecnico || !tecnico.Ativo {
+		return model.OrdemServico{}, fmt.Errorf("%w: usuário %d não é um técnico ativo", helper.ErrConflitoIntegridade, payload.TecnicoId)
+	}
+
+	atende, err := repo.TecnicoAtendeLoja(ctx, repository.TecnicoAtendeLojaParams{UsuarioID: payload.TecnicoId, LojaID: sol.LojaID})
+	if err != nil {
+		return model.OrdemServico{}, helper.TraduzErroPostgres(err)
+	}
+	if !atende {
+		return model.OrdemServico{}, fmt.Errorf("%w: técnico não atende a loja %s", helper.ErrValidacao, sol.LojaNome)
+	}
+
+	impactos, err := repo.ObterImpactosDaSolicitacao(ctx, sol.ID)
+	if err != nil {
+		return model.OrdemServico{}, helper.TraduzErroPostgres(err)
+	}
+	afetaProducao := slices.Contains(impactos, repository.MarcadorImpactoAfetaProduo)
+
+	tipoOs, err := tipoOsDaSolicitacao(sol.Tipo)
+	if err != nil {
+		return model.OrdemServico{}, err
+	}
+
+	os, err := repo.CriarOrdemServicoDeSolicitacao(ctx, repository.CriarOrdemServicoDeSolicitacaoParams{
+		TenantID:      tenantId,
+		SolicitacaoID: sol.ID,
+		Tipo:          tipoOs,
+		TecnicoID:     payload.TecnicoId,
+		Urgencia:      urgencia,
+		// Ponteiro desde a migration 000008, que tornou aberta_por_id nullable
+		// para a OS de preventiva (aberta por ninguém, ver
+		// CriarOrdemServicoDePreventiva). Aqui é sempre quem aprovou/abriu.
+		AbertaPorID:   &atorId,
+		AfetaProducao: afetaProducao,
+	})
+	if err != nil {
+		return model.OrdemServico{}, helper.TraduzErroPostgres(err)
+	}
+
+	return model.MontarOrdemServicoDaAbertura(os, sol, string(urgencia), payload.TecnicoId, afetaProducao), nil
 }
 
 // resolverSetorSolicitante busca o único setor do escopo de quem abre uma

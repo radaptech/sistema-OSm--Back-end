@@ -683,7 +683,7 @@ CREATE TYPE perfil_usuario     AS ENUM ('solicitante','tecnico','gestor','admini
 CREATE TYPE tipo_solicitacao   AS ENUM ('maquinario','reparo');
 CREATE TYPE tipo_os            AS ENUM ('maquinario','terceiros','reparo');
 CREATE TYPE tipo_defeito       AS ENUM ('Predial','Corretiva');
-CREATE TYPE origem_solicitacao AS ENUM ('solicitante','preventiva');
+CREATE TYPE origem_solicitacao AS ENUM ('solicitante','preventiva','direta'); -- 'direta': migration 000014
 CREATE TYPE status_solicitacao AS ENUM ('Pendente','Convertida','Rejeitada');
 CREATE TYPE status_os          AS ENUM ('Aberta','Em Andamento','Pausada','Concluída');
 CREATE TYPE marcador_impacto   AS ENUM ('Afeta Produção');
@@ -775,10 +775,14 @@ CREATE UNIQUE INDEX uq_pausa_aberta ON os_pausa (ordem_servico_id)
 -- CREATE UNIQUE INDEX uq_preventiva_pendente ON solicitacao_os (preventiva_id)
 --   WHERE preventiva_id IS NOT NULL AND status = 'Pendente';
 
--- Origem da solicitação: humana ou automática, nunca as duas.
+-- Origem da solicitação: humana ou automática, nunca as duas. Humana é
+-- 'solicitante' (pela fila, com foto) ou 'direta' (Gestor/Administrador abrindo
+-- a OS sem fila e sem foto, migration 000014) -- nas duas solicitante_id é quem
+-- abriu. Reescrita na 000014 sem citar 'direta': o Postgres não deixa usar um
+-- valor de ENUM na mesma transação que o criou.
 ALTER TABLE solicitacao_os ADD CONSTRAINT ck_origem CHECK (
-  ((origem = 'preventiva')  = (preventiva_id  IS NOT NULL)) AND
-  ((origem = 'solicitante') = (solicitante_id IS NOT NULL)));
+  ((origem = 'preventiva') = (preventiva_id  IS NOT NULL)) AND
+  ((origem = 'preventiva') = (solicitante_id IS NULL)));
 
 -- Rejeição carrega motivo, autor e instante -- os três juntos ou nenhum (1.4.6).
 ALTER TABLE solicitacao_os ADD CONSTRAINT ck_rejeicao CHECK (

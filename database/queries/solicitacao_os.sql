@@ -113,6 +113,29 @@ VALUES (
 )
 RETURNING id, criado_em;
 
+-- name: CriarSolicitacaoDireta :one
+-- POST /solicitacoes/direta -- Gestor/Administrador abrindo a OS sem passar
+-- pela fila (migration 000014). `origem` e `status` literais, mesmo motivo de
+-- CriarSolicitacaoPreventiva: 'direta' nasce 'Convertida', com a OS na mesma
+-- transação (CriarOrdemServicoDeSolicitacao). Uma query só para os dois
+-- tipos, diferente das criações do Solicitante: maquina_id/item_descricao vêm
+-- nulos conforme o tipo e ck_solicitacao_alvo segura a combinação errada.
+-- solicitante_id é quem abriu (o Gestor/Administrador) e sem foto --
+-- fn_check_solicitacao_tem_foto só cobra origem = 'solicitante'.
+INSERT INTO solicitacao_os (tenant_id, tipo, maquina_id, item_descricao, setor_id, solicitante_id, origem, status, descricao)
+VALUES (
+    sqlc.arg(tenant_id),
+    sqlc.arg(tipo),
+    sqlc.narg(maquina_id),
+    sqlc.narg(item_descricao),
+    sqlc.arg(setor_id),
+    sqlc.arg(solicitante_id)::bigint,
+    'direta',
+    'Convertida',
+    sqlc.arg(descricao)
+)
+RETURNING id;
+
 -- name: CriarImpactoSolicitacao :exec
 -- Um INSERT por marcador (hoje só existe 'Afeta Produção' -- marcador_impacto
 -- é ENUM de um valor só, associativa porque o contrato já troca uma lista).

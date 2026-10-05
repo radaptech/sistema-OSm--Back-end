@@ -236,6 +236,55 @@ func (q *Queries) CriarOrdemServicoDeSolicitacao(ctx context.Context, arg CriarO
 	return i, err
 }
 
+const criarSolicitacaoDireta = `-- name: CriarSolicitacaoDireta :one
+INSERT INTO solicitacao_os (tenant_id, tipo, maquina_id, item_descricao, setor_id, solicitante_id, origem, status, descricao)
+VALUES (
+    $1,
+    $2,
+    $3,
+    $4,
+    $5,
+    $6::bigint,
+    'direta',
+    'Convertida',
+    $7
+)
+RETURNING id
+`
+
+type CriarSolicitacaoDiretaParams struct {
+	TenantID      int64
+	Tipo          TipoSolicitacao
+	MaquinaID     *int64
+	ItemDescricao *string
+	SetorID       int64
+	SolicitanteID int64
+	Descricao     string
+}
+
+// POST /solicitacoes/direta -- Gestor/Administrador abrindo a OS sem passar
+// pela fila (migration 000014). `origem` e `status` literais, mesmo motivo de
+// CriarSolicitacaoPreventiva: 'direta' nasce 'Convertida', com a OS na mesma
+// transação (CriarOrdemServicoDeSolicitacao). Uma query só para os dois
+// tipos, diferente das criações do Solicitante: maquina_id/item_descricao vêm
+// nulos conforme o tipo e ck_solicitacao_alvo segura a combinação errada.
+// solicitante_id é quem abriu (o Gestor/Administrador) e sem foto --
+// fn_check_solicitacao_tem_foto só cobra origem = 'solicitante'.
+func (q *Queries) CriarSolicitacaoDireta(ctx context.Context, arg CriarSolicitacaoDiretaParams) (int64, error) {
+	row := q.db.QueryRow(ctx, criarSolicitacaoDireta,
+		arg.TenantID,
+		arg.Tipo,
+		arg.MaquinaID,
+		arg.ItemDescricao,
+		arg.SetorID,
+		arg.SolicitanteID,
+		arg.Descricao,
+	)
+	var id int64
+	err := row.Scan(&id)
+	return id, err
+}
+
 const criarSolicitacaoMaquinario = `-- name: CriarSolicitacaoMaquinario :one
 INSERT INTO solicitacao_os (tenant_id, tipo, maquina_id, setor_id, solicitante_id, origem, descricao)
 VALUES (

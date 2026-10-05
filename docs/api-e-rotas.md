@@ -129,6 +129,7 @@ Leia antes de registrar rota nova, mexer em middleware ou montar corpo de respos
   | `GET /solicitacoes` (fila) | gestor, administrador |
   | `GET /solicitacoes/:id` | **qualquer perfil autenticado** (escopo no `WHERE`) |
   | `POST /solicitacoes/:id/abrir-os`, `/:id/rejeitar` | gestor, administrador |
+  | `POST /solicitacoes/direta` | gestor, administrador (escopo checado no service) |
   | `GET /ordens-servico` | gestor, administrador, **técnico** (escopo no `WHERE`) |
   | `POST /ordens-servico/:id/{iniciar,pausar,retomar,acionar-terceiro,encerrar}` | **técnico** (dono da OS — checado no service, não aqui: de outro técnico é 404, não 403) |
   | `POST /ordens-servico/:id/custo` | **administrador** (correção pós-encerramento, sem dono pra checar) |
@@ -170,7 +171,8 @@ Leia antes de registrar rota nova, mexer em middleware ou montar corpo de respos
 - `GET /empresas` mora no `LojaController` porque empresa **não tem CRUD** — o tenant
   nasce pela CLI de provisionamento, e a única tela que pergunta por ela é a de loja.
 - **As duas criações de `/solicitacoes` são só do solicitante** — é a única tela que
-  chama (`NovaSolicitacao` no front). `/minhas` e `/resumo` ficam sem `Permitir` de
+  chama (`NovaSolicitacao` no front). A terceira, `POST /solicitacoes/direta`, é do
+  gestor/administrador (OS aberta sem fila, ver "OS direta" em `docs/fluxo-de-negocio.md`). `/minhas` e `/resumo` ficam sem `Permitir` de
   propósito, mesmo critério de `/lojas`/`/setores`: o service já filtra pelo
   `usuario.id` de quem chama (nunca recebe `perfil`), então RBAC ali não filtraria nada
   a mais, só barraria administrador/gestor de testar a própria rota. `GET /solicitacoes`

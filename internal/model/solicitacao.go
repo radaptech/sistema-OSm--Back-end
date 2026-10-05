@@ -56,6 +56,25 @@ type AberturaOrdemServicoPayload struct {
 	TecnicoId int64  `json:"tecnicoId" binding:"required,gt=0"`
 }
 
+// NovaSolicitacaoDiretaPayload é o corpo de POST /solicitacoes/direta -- o
+// Gestor/Administrador abrindo a OS sem passar pela fila (origem 'direta',
+// migration 000014): os campos da solicitação mais os do abrir-os, embutidos.
+// JSON puro, sem multipart: a OS direta não leva foto.
+//
+// MaquinaId só em 'maquinario' (o setor sai da máquina); Item e SetorId só em
+// 'reparo' (sem máquina, o setor vem escolhido). Quem cobra a combinação é o
+// service -- `required_if` deixaria o erro em inglês. Impactos, como no
+// Solicitante, só valem para maquinário.
+type NovaSolicitacaoDiretaPayload struct {
+	Tipo      string   `json:"tipo" binding:"required,oneof=maquinario reparo"`
+	MaquinaId *int64   `json:"maquinaId"`
+	Item      *string  `json:"item"`
+	SetorId   *int64   `json:"setorId"`
+	Descricao string   `json:"descricao" binding:"required"`
+	Impactos  []string `json:"impactos"`
+	AberturaOrdemServicoPayload
+}
+
 // RejeicaoSolicitacaoPayload é o corpo de POST /solicitacoes/:id/rejeitar --
 // espelha RejeicaoSolicitacaoPayload do front, menos SolicitacaoId (mesmo
 // motivo do payload acima).
