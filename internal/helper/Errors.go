@@ -35,6 +35,12 @@ var (
 	// olhar o texto do erro.
 	ErrValidacao = errors.New("dados inválidos")
 	ErrToken     = errors.New("")
+	// Reautenticação da exclusão definitiva de máquina. Não é 401: 401 fora
+	// de /login desloga o usuário, e aqui a sessão está boa -- só a senha
+	// digitada no modal é que não confere.
+	ErrSenhaIncorreta = errors.New("senha incorreta")
+	// DesativarMaquina com solicitação pendente ou OS não concluída.
+	ErrMaquinaEmUso = errors.New("a máquina tem solicitação ou OS em aberto; conclua ou rejeite antes de desativar")
 	// Mensagem única para token inexistente, expirado ou já usado: o cliente só precisa saber que tem de pedir outro link.
 	ErrTokenRecuperacaoInvalido = errors.New("link de recuperação inválido ou expirado, solicite um novo")
 )

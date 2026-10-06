@@ -90,6 +90,10 @@ type Querier interface {
 	// próxima data em intervalo_dias a partir da data vencida (não a partir de
 	// hoje) -- senão um ciclo processado com atraso arrastaria todos os seguintes.
 	AvancarProximaData(ctx context.Context, arg AvancarProximaDataParams) (Preventiva, error)
+	// O que a exclusão definitiva vai levar junto, para o modal mostrar antes de
+	// pedir a senha. `em_aberto` é o que bloqueia DesativarMaquina: solicitação
+	// ainda na fila do Gestor ou OS que não chegou a 'Concluída'.
+	ContarHistoricoDaMaquina(ctx context.Context, arg ContarHistoricoDaMaquinaParams) (ContarHistoricoDaMaquinaRow, error)
 	// Loja não é desativada por baixo dos setores: o escopo de acesso aponta pro
 	// setor (usuario_escopo_setor), então setor ativo pendurado em loja inativa
 	// continua dando acesso a uma loja que sumiu das listagens. Quem chama decide
@@ -534,6 +538,19 @@ type Querier interface {
 	// compostas (fk_encerramento_os_tipo, fk_custo_os_tipo) exigem o par
 	// (ordem_servico_id, tipo) bater exatamente com o da OS.
 	EncerrarOrdemServico(ctx context.Context, arg EncerrarOrdemServicoParams) (OrdemServico, error)
+	// ⚠️ A ÚNICA exclusão física de entidade do projeto (o resto é soft delete).
+	// Existe para o Administrador limpar cadastro de teste/duplicado em produção;
+	// o controller só chega aqui depois de conferir senha e patrimônio.
+	//
+	// Um statement só, com CTEs, em vez de onze DELETEs: todas as CTEs enxergam
+	// o mesmo snapshot (então `alvo_os` ainda acha as OS que `d_os` apaga) e as
+	// FKs NO ACTION são checadas no fim do statement, quando filhos e pais já
+	// saíram. Nenhuma FK tem ON DELETE CASCADE e não deve ganhar -- o cascade
+	// valeria pra qualquer DELETE acidental, não só este.
+	//
+	// Se uma tabela nova passar a apontar para ordem_servico/solicitacao_os/
+	// preventiva/maquina, ela TEM de entrar aqui, senão este DELETE vira 23503.
+	ExcluirMaquinaDefinitivo(ctx context.Context, arg ExcluirMaquinaDefinitivoParams) (int64, error)
 	// Fecha a pausa que ObterPausaAbertaDaOrdemServico acabou de achar.
 	// `retomada_em IS NULL` no WHERE (e não só `id`) é a mesma rede de corrida
 	// das outras transições: se a linha já foi fechada entre a leitura e aqui,
@@ -547,6 +564,10 @@ type Querier interface {
 	// pgx.ErrNoRows quando a corrida perde, e o service traduz isso pra
 	// ErrConflitoIntegridade -- nunca 500.
 	IniciarOrdemServico(ctx context.Context, arg IniciarOrdemServicoParams) (OrdemServico, error)
+	// Lido ANTES de ExcluirMaquinaDefinitivo, na mesma transação: depois do
+	// DELETE as chaves somem e os objetos ficariam órfãos no R2 sem ninguém
+	// saber quais eram. Quem apaga do R2 é o controller, depois do commit.
+	ListarChavesAnexosDaMaquina(ctx context.Context, arg ListarChavesAnexosDaMaquinaParams) ([]string, error)
 	// Só as ativas: a lista alimenta o select do ModalAcionarTerceiro, e oferecer
 	// uma empresa desativada é oferecer o que o Administrador acabou de tirar do ar.
 	//
@@ -595,6 +616,10 @@ type Querier interface {
 	// setorId e lojaId são opcionais e combináveis (ParametrosListagemMaquinas no
 	// front) -- NULL não filtra, mesmo padrão de ListarSetores. O JOIN com setor
 	// é o que permite filtrar por loja, já que maquina não guarda loja_id.
+	//
+	// ativa é opcional: NULL lista só as ativas (o que todo chamador antigo
+	// quer); false é a aba de inativas da tela de ativar/desativar, que só o
+	// controller do administrador repassa.
 	//
 	// Filtra só por m.ativa, não por s.ativo/l.ativa: máquina em setor desativado
 	// continua listada. É o comportamento certo enquanto DesativarSetor não
@@ -1049,6 +1074,10 @@ type Querier interface {
 	// que lê o estado antes de chamar esta query (ObterOrdemServicoPorID) e
 	// repassa esse valor pra CriarPausa.status_anterior logo abaixo.
 	PausarOrdemServico(ctx context.Context, arg PausarOrdemServicoParams) (OrdemServico, error)
+	// Espelho de DesativarMaquina. As preventivas não voltam junto porque nunca
+	// saíram: desativar a máquina não mexe nelas, e o job já pula máquina inativa
+	// (ListarPreventivasVencidas filtra m.ativa).
+	ReativarMaquina(ctx context.Context, arg ReativarMaquinaParams) (int64, error)
 	// Troca a senha e queima o token no mesmo UPDATE: dois cliques no mesmo link não passam os dois.
 	// 0 linhas = token inexistente, expirado, de outro tenant ou de usuário desativado -- o cliente não distingue.
 	RedefinirSenhaPorToken(ctx context.Context, arg RedefinirSenhaPorTokenParams) (int64, error)
