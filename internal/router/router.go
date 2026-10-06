@@ -70,7 +70,7 @@ func NewContainer(db *pgxpool.Pool) *Container {
 		Login:   controller.NewLoginController(serviceLogin),
 		Loja:    controller.NewLojaController(serviceLoja),
 		Setor:   controller.NewSetorController(serviceSetor),
-		Maquina: controller.NewMaquinaController(serviceMaquina, bucketMaquinas),
+		Maquina: controller.NewMaquinaController(serviceMaquina, bucketMaquinas, bucketOsServico),
 		Prevent: controller.NewPreventivaController(servicePreventiva),
 		Terceir: controller.NewEmpresaTerceirizadaController(serviceTerceirizada),
 		Solicit: controller.NewSolicitacaoController(serviceSolicitacao, bucketOsServico, bucketPequenosReparos, bucketMaquinas),
@@ -153,6 +153,11 @@ func ConfigurarRotas(r *gin.Engine, c *Container) {
 	maquinas.POST("", middleware.Permitir("administrador"), c.Maquina.Cadastrar())
 	maquinas.PUT("/:id", middleware.Permitir("administrador"), c.Maquina.Atualizar())
 	maquinas.DELETE("/:id", middleware.Permitir("administrador"), c.Maquina.Desativar())
+	maquinas.POST("/:id/reativar", middleware.Permitir("administrador"), c.Maquina.Reativar())
+	maquinas.GET("/:id/historico", middleware.Permitir("administrador"), c.Maquina.Historico())
+	// Mesmo limite do login: o corpo leva senha, e sem isso um token de
+	// administrador vazado vira um oráculo de força bruta da própria senha.
+	maquinas.POST("/:id/excluir", middleware.LimitarPorIP(rate.Every(12*time.Second), 5), middleware.Permitir("administrador"), c.Maquina.ExcluirDefinitivo())
 
 	preventivas := api.Group("/preventivas", middleware.AutenticacaoJwt())
 	// Listar sem Permitir: a aba "Manutenção Prev." do painel do gestor vive

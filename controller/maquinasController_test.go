@@ -87,6 +87,22 @@ func (m maquinaFake) DesativarMaquina(_ context.Context, _, _ int64) error {
 	return m.err
 }
 
+func (m maquinaFake) ListarMaquinasInativas(_ context.Context, _ int64) ([]model.Maquinario, error) {
+	return []model.Maquinario{}, m.err
+}
+
+func (m maquinaFake) ReativarMaquina(_ context.Context, _, _ int64) error {
+	return m.err
+}
+
+func (m maquinaFake) HistoricoMaquina(_ context.Context, _, _ int64) (model.HistoricoMaquina, error) {
+	return model.HistoricoMaquina{}, m.err
+}
+
+func (m maquinaFake) ExcluirMaquinaDefinitivo(_ context.Context, _, _, _ int64, _ model.ExcluirMaquinaPayload) (*string, []string, error) {
+	return nil, nil, m.err
+}
+
 const dadosMaquina = `{"nome":"Forno","numeroPatrimonio":"P-1","serie":"SN-9","criticidade":"Alta","setorId":9,` +
 	`"preventivas":[{"descricao":"Limpeza","intervaloDias":30,"proximaData":"01/09/2026","ativa":true}]}`
 
@@ -158,7 +174,7 @@ func TestMaquinaMapeiaErroParaStatus(t *testing.T) {
 	for _, c := range casos {
 		t.Run(c.nome, func(t *testing.T) {
 
-			ctrl := NewMaquinaController(maquinaFake{err: c.err}, "bucket-teste")
+			ctrl := NewMaquinaController(maquinaFake{err: c.err}, "bucket-teste", "")
 
 			var w *httptest.ResponseRecorder
 			var ctx *gin.Context
@@ -194,7 +210,7 @@ func TestMaquinaCorpoMultipartChegaNoService(t *testing.T) {
 
 	var recebido model.MaquinarioInsert
 	w, ctx := requisicaoMaquina(http.MethodPost, "", "", dadosMaquina, false)
-	NewMaquinaController(maquinaFake{insert: &recebido}, "bucket-teste").Cadastrar()(ctx)
+	NewMaquinaController(maquinaFake{insert: &recebido}, "bucket-teste", "").Cadastrar()(ctx)
 
 	if w.Code != http.StatusCreated {
 		t.Fatalf("status = %d (corpo: %s)", w.Code, w.Body)
@@ -238,7 +254,7 @@ func TestMaquinaValidacaoDoPayload(t *testing.T) {
 
 			var recebido model.MaquinarioInsert
 			w, ctx := requisicaoMaquina(http.MethodPost, "", "", corpo, false)
-			NewMaquinaController(maquinaFake{insert: &recebido}, "bucket-teste").Cadastrar()(ctx)
+			NewMaquinaController(maquinaFake{insert: &recebido}, "bucket-teste", "").Cadastrar()(ctx)
 
 			if w.Code != http.StatusBadRequest {
 				t.Fatalf("status = %d, esperado 400 (corpo: %s)", w.Code, w.Body)
@@ -257,7 +273,7 @@ func TestMaquinaValidacaoDoPayload(t *testing.T) {
 		ctx.Request.Header.Set("Content-Type", "application/json")
 		ctx.Set(middleware.UserTenantId, int64(7))
 
-		NewMaquinaController(maquinaFake{}, "bucket-teste").Cadastrar()(ctx)
+		NewMaquinaController(maquinaFake{}, "bucket-teste", "").Cadastrar()(ctx)
 
 		if w.Code != http.StatusBadRequest {
 			t.Fatalf("status = %d, esperado 400", w.Code)
@@ -274,7 +290,7 @@ func TestMaquinaListarFiltros(t *testing.T) {
 	t.Run("sem filtro chega nil nos dois", func(t *testing.T) {
 		var loja, setor *int64
 		w, ctx := requisicaoMaquina(http.MethodGet, "", "", "", false)
-		NewMaquinaController(maquinaFake{lojaId: &loja, setorId: &setor}, "bucket-teste").ListarMaquinas()(ctx)
+		NewMaquinaController(maquinaFake{lojaId: &loja, setorId: &setor}, "bucket-teste", "").ListarMaquinas()(ctx)
 
 		if w.Code != http.StatusOK || loja != nil || setor != nil {
 			t.Fatalf("status %d, lojaId %v, setorId %v", w.Code, loja, setor)
@@ -284,7 +300,7 @@ func TestMaquinaListarFiltros(t *testing.T) {
 	t.Run("os dois filtros chegam juntos", func(t *testing.T) {
 		var loja, setor *int64
 		w, ctx := requisicaoMaquina(http.MethodGet, "", "?lojaId=2&setorId=9", "", false)
-		NewMaquinaController(maquinaFake{lojaId: &loja, setorId: &setor}, "bucket-teste").ListarMaquinas()(ctx)
+		NewMaquinaController(maquinaFake{lojaId: &loja, setorId: &setor}, "bucket-teste", "").ListarMaquinas()(ctx)
 
 		if w.Code != http.StatusOK {
 			t.Fatalf("status = %d", w.Code)
@@ -298,7 +314,7 @@ func TestMaquinaListarFiltros(t *testing.T) {
 		for _, ruim := range []string{"?lojaId=abc", "?setorId=0", "?setorId=-1"} {
 			var loja, setor *int64
 			w, ctx := requisicaoMaquina(http.MethodGet, "", ruim, "", false)
-			NewMaquinaController(maquinaFake{lojaId: &loja, setorId: &setor}, "bucket-teste").ListarMaquinas()(ctx)
+			NewMaquinaController(maquinaFake{lojaId: &loja, setorId: &setor}, "bucket-teste", "").ListarMaquinas()(ctx)
 
 			if w.Code != http.StatusBadRequest {
 				t.Errorf("%s: status = %d, esperado 400", ruim, w.Code)
@@ -314,7 +330,7 @@ func TestMaquinaListarFiltros(t *testing.T) {
 		ctx, _ := gin.CreateTestContext(w)
 		ctx.Request = httptest.NewRequest(http.MethodGet, "/maquinas", nil)
 
-		NewMaquinaController(maquinaFake{}, "bucket-teste").ListarMaquinas()(ctx)
+		NewMaquinaController(maquinaFake{}, "bucket-teste", "").ListarMaquinas()(ctx)
 
 		if w.Code != http.StatusInternalServerError {
 			t.Fatalf("status = %d, esperado 500", w.Code)
@@ -332,7 +348,7 @@ func TestMaquinaFotoSemR2Configurado(t *testing.T) {
 	t.Run("upload que falha responde 500 e não cria máquina", func(t *testing.T) {
 		var recebido model.MaquinarioInsert
 		w, ctx := requisicaoMaquina(http.MethodPost, "", "", dadosMaquina, true)
-		NewMaquinaController(maquinaFake{insert: &recebido}, "bucket-teste").Cadastrar()(ctx)
+		NewMaquinaController(maquinaFake{insert: &recebido}, "bucket-teste", "").Cadastrar()(ctx)
 
 		if w.Code != http.StatusInternalServerError {
 			t.Fatalf("status = %d, esperado 500 (corpo: %s)", w.Code, w.Body)
@@ -347,7 +363,7 @@ func TestMaquinaFotoSemR2Configurado(t *testing.T) {
 	t.Run("assinatura que falha não derruba a resposta", func(t *testing.T) {
 		chave := "tenant/7/123.png"
 		w, ctx := requisicaoMaquina(http.MethodGet, "3", "", "", false)
-		NewMaquinaController(maquinaFake{chaveFoto: &chave}, "bucket-teste").Obter()(ctx)
+		NewMaquinaController(maquinaFake{chaveFoto: &chave}, "bucket-teste", "").Obter()(ctx)
 
 		if w.Code != http.StatusOK {
 			t.Fatalf("status = %d, esperado 200", w.Code)
@@ -361,7 +377,7 @@ func TestMaquinaFotoSemR2Configurado(t *testing.T) {
 	t.Run("listagem com foto também não vaza a chave", func(t *testing.T) {
 		chave := "tenant/7/456.png"
 		w, ctx := requisicaoMaquina(http.MethodGet, "", "", "", false)
-		NewMaquinaController(maquinaFake{chaveFoto: &chave}, "bucket-teste").ListarMaquinas()(ctx)
+		NewMaquinaController(maquinaFake{chaveFoto: &chave}, "bucket-teste", "").ListarMaquinas()(ctx)
 
 		if w.Code != http.StatusOK {
 			t.Fatalf("status = %d, esperado 200", w.Code)
@@ -386,7 +402,7 @@ func TestMaquinaListarUsaAtorDoToken(t *testing.T) {
 		ctx.Set(middleware.UserId, int64(42))
 		ctx.Set(middleware.UserPerfil, "solicitante")
 
-		NewMaquinaController(maquinaFake{ator: &recebido}, "bucket-teste").ListarMaquinas()(ctx)
+		NewMaquinaController(maquinaFake{ator: &recebido}, "bucket-teste", "").ListarMaquinas()(ctx)
 
 		if w.Code != http.StatusOK {
 			t.Fatalf("status = %d", w.Code)
@@ -403,7 +419,7 @@ func TestMaquinaListarUsaAtorDoToken(t *testing.T) {
 		ctx.Request = httptest.NewRequest(http.MethodGet, "/maquinas", nil)
 		ctx.Set(middleware.UserTenantId, int64(7)) // tenant ok, ator faltando
 
-		NewMaquinaController(maquinaFake{ator: &recebido}, "bucket-teste").ListarMaquinas()(ctx)
+		NewMaquinaController(maquinaFake{ator: &recebido}, "bucket-teste", "").ListarMaquinas()(ctx)
 
 		if w.Code != http.StatusInternalServerError {
 			t.Fatalf("status = %d, esperado 500", w.Code)

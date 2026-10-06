@@ -24,21 +24,31 @@ type MaquinaServicesInterface interface {
 	ObterMaquina(ctx context.Context, tenantID, id int64) (model.Maquinario, error)
 	AtualizarMaquina(ctx context.Context, tenantId, id int64, payload model.AtualizarMaquina) (model.Maquinario, error)
 	DesativarMaquina(ctx context.Context, tenantId, id int64) error
+	ListarMaquinasInativas(ctx context.Context, tenantId int64) ([]model.Maquinario, error)
+	ReativarMaquina(ctx context.Context, tenantId, id int64) error
+	HistoricoMaquina(ctx context.Context, tenantId, id int64) (model.HistoricoMaquina, error)
+	ExcluirMaquinaDefinitivo(ctx context.Context, tenantId, usuarioId, id int64, payload model.ExcluirMaquinaPayload) (*string, []string, error)
 }
 
 // bucketFotos é o bucket do R2 onde a foto da máquina vive. Vem de fora (o
 // router lê R2_BUCKET_NAME_MAQUINARIO) porque cada tipo de anexo tem o seu, e
 // a escolha é de wiring, não de linha do banco -- não existe coluna `bucket`.
+//
+// bucketAnexos é o dos anexos das solicitações de maquinário
+// (R2_BUCKET_NAME_OS_SERVICO): só a exclusão definitiva usa, para apagar os
+// arquivos do histórico que ela leva junto.
 type MaquinaController struct {
-	service     MaquinaServicesInterface
-	bucketFotos string
+	service      MaquinaServicesInterface
+	bucketFotos  string
+	bucketAnexos string
 }
 
-func NewMaquinaController(service MaquinaServicesInterface, bucketFotos string) *MaquinaController {
+func NewMaquinaController(service MaquinaServicesInterface, bucketFotos, bucketAnexos string) *MaquinaController {
 
 	return &MaquinaController{
-		service:     service,
-		bucketFotos: bucketFotos,
+		service:      service,
+		bucketFotos:  bucketFotos,
+		bucketAnexos: bucketAnexos,
 	}
 }
 
@@ -176,7 +186,16 @@ func (m *MaquinaController) ListarMaquinas() gin.HandlerFunc {
 			return
 		}
 
-		maquinas, err := m.service.ListarMaquinario(ctx.Request.Context(), tenantId, usuarioId, perfil, lojaId, setorId)
+		// ?ativa=false é a aba de inativas da tela de ativar/desativar. Só do
+		// administrador: para os outros perfis o parâmetro é ignorado e a
+		// listagem segue a de sempre.
+		var maquinas []model.Maquinario
+		var err error
+		if ctx.Query("ativa") == "false" && perfil == "administrador" {
+			maquinas, err = m.service.ListarMaquinasInativas(ctx.Request.Context(), tenantId)
+		} else {
+			maquinas, err = m.service.ListarMaquinario(ctx.Request.Context(), tenantId, usuarioId, perfil, lojaId, setorId)
+		}
 		if err != nil {
 
 			slog.ErrorContext(ctx.Request.Context(), "listar maquinas", "tenant", tenantId, "err", err)
@@ -312,6 +331,8 @@ func (m *MaquinaController) Desativar() gin.HandlerFunc {
 			switch {
 			case errors.Is(err, helper.ErrNaoEncontrado):
 				ctx.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+			case errors.Is(err, helper.ErrMaquinaEmUso):
+				ctx.JSON(http.StatusConflict, gin.H{"error": err.Error()})
 			case errors.Is(err, helper.ErrConflitoIntegridade):
 				ctx.JSON(http.StatusUnprocessableEntity, gin.H{"error": err.Error()})
 			default:
@@ -322,5 +343,135 @@ func (m *MaquinaController) Desativar() gin.HandlerFunc {
 		}
 
 		ctx.JSON(http.StatusOK, gin.H{"message": "máquina desativada"})
+	}
+}
+
+// Reativar é POST /maquinas/:id/reativar -- desfaz o DELETE /maquinas/:id.
+func (m *MaquinaController) Reativar() gin.HandlerFunc {
+
+	return func(ctx *gin.Context) {
+
+		id, ok := idDaRota(ctx)
+		if !ok {
+			return
+		}
+
+		tenantId, ok := tenantDaRota(ctx)
+		if !ok {
+			return
+		}
+
+		if err := m.service.ReativarMaquina(ctx.Request.Context(), tenantId, id); err != nil {
+
+			switch {
+			case errors.Is(err, helper.ErrNaoEncontrado):
+				ctx.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+			default:
+				slog.ErrorContext(ctx.Request.Context(), "reativar maquina", "id", id, "tenant", tenantId, "err", err)
+				ctx.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao reativar máquina"})
+			}
+			return
+		}
+
+		ctx.JSON(http.StatusOK, gin.H{"message": "máquina reativada"})
+	}
+}
+
+// Historico é GET /maquinas/:id/historico -- as contagens que o modal de
+// exclusão definitiva mostra antes de pedir a senha.
+func (m *MaquinaController) Historico() gin.HandlerFunc {
+
+	return func(ctx *gin.Context) {
+
+		id, ok := idDaRota(ctx)
+		if !ok {
+			return
+		}
+
+		tenantId, ok := tenantDaRota(ctx)
+		if !ok {
+			return
+		}
+
+		historico, err := m.service.HistoricoMaquina(ctx.Request.Context(), tenantId, id)
+		if err != nil {
+
+			switch {
+			case errors.Is(err, helper.ErrNaoEncontrado):
+				ctx.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+			default:
+				slog.ErrorContext(ctx.Request.Context(), "historico maquina", "id", id, "tenant", tenantId, "err", err)
+				ctx.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao contar o histórico da máquina"})
+			}
+			return
+		}
+
+		ctx.JSON(http.StatusOK, historico)
+	}
+}
+
+// ExcluirDefinitivo é POST /maquinas/:id/excluir -- apaga a máquina e todo o
+// histórico, com senha do administrador e patrimônio digitado no corpo. POST
+// e não DELETE porque leva corpo (DELETE com corpo é ignorado por proxy).
+//
+// Senha errada é 403, nunca 401: 401 fora de /login desloga o usuário.
+func (m *MaquinaController) ExcluirDefinitivo() gin.HandlerFunc {
+
+	return func(ctx *gin.Context) {
+
+		id, ok := idDaRota(ctx)
+		if !ok {
+			return
+		}
+
+		tenantId, ok := tenantDaRota(ctx)
+		if !ok {
+			return
+		}
+
+		usuarioId, _, ok := atorDaRota(ctx)
+		if !ok {
+			return
+		}
+
+		input, ok := corpoJSON[model.ExcluirMaquinaPayload](ctx)
+		if !ok {
+			return
+		}
+
+		foto, anexos, err := m.service.ExcluirMaquinaDefinitivo(ctx.Request.Context(), tenantId, usuarioId, id, input)
+		if err != nil {
+
+			switch {
+			case errors.Is(err, helper.ErrSenhaIncorreta):
+				ctx.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
+			case errors.Is(err, helper.ErrValidacao):
+				ctx.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			case errors.Is(err, helper.ErrNaoEncontrado):
+				ctx.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+			default:
+				slog.ErrorContext(ctx.Request.Context(), "excluir maquina definitivo", "id", id, "tenant", tenantId, "err", err)
+				ctx.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao excluir máquina"})
+			}
+			return
+		}
+
+		slog.InfoContext(ctx.Request.Context(), "maquina excluida definitivamente", "id", id, "tenant", tenantId, "usuario", usuarioId)
+
+		// Depois do commit e sem derrubar a resposta: o banco já está limpo, um
+		// arquivo que não saiu do R2 é só lixo órfão -- fica no log.
+		apagar := func(bucket, chave string) {
+			if err := bucketr2.Apagar(ctx.Request.Context(), bucket, chave); err != nil {
+				slog.ErrorContext(ctx.Request.Context(), "apagar objeto r2", "bucket", bucket, "key", chave, "err", err)
+			}
+		}
+		if foto != nil {
+			apagar(m.bucketFotos, *foto)
+		}
+		for _, chave := range anexos {
+			apagar(m.bucketAnexos, chave)
+		}
+
+		ctx.JSON(http.StatusOK, gin.H{"message": "máquina excluída definitivamente"})
 	}
 }

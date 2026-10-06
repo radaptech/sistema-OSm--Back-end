@@ -123,3 +123,20 @@ type AtualizarMaquina struct {
 	FotoChave        *string             `json:"-"`
 	Preventivas      []PreventivaPayload `json:"preventivas" binding:"required,min=1,dive"`
 }
+
+// HistoricoMaquina é GET /maquinas/:id/historico: o que a exclusão definitiva
+// leva junto, mostrado no modal antes de pedir a senha.
+type HistoricoMaquina struct {
+	Solicitacoes  int64 `json:"solicitacoes"`
+	OrdensServico int64 `json:"ordensServico"`
+	NotasFiscais  int64 `json:"notasFiscais"`
+	Preventivas   int64 `json:"preventivas"`
+	EmAberto      int64 `json:"emAberto"`
+}
+
+// ExcluirMaquinaPayload é o corpo de POST /maquinas/:id/excluir. Confirmacao é
+// o número de patrimônio digitado à mão; o servidor confere, não o front.
+type ExcluirMaquinaPayload struct {
+	Senha       string `json:"senha" binding:"required"`
+	Confirmacao string `json:"confirmacao" binding:"required"`
+}

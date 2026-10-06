@@ -155,3 +155,19 @@ func URLLeitura(ctx context.Context, bucket, key string, ttl time.Duration) (str
 
 	return resul.URL, nil
 }
+
+// Apagar remove um objeto. Hoje só a exclusão definitiva de máquina chama, e
+// depois do commit: falhar aqui deixa lixo órfão no bucket, nunca linha
+// apontando para arquivo que sumiu.
+func Apagar(ctx context.Context, bucket, key string) error {
+
+	if s3Client == nil {
+		return fmt.Errorf("R2 não inicializado")
+	}
+
+	_, err := s3Client.DeleteObject(ctx, &s3.DeleteObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String(key),
+	})
+	return err
+}

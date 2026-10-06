@@ -76,6 +76,54 @@ func (q *Queries) AtualizarMaquina(ctx context.Context, arg AtualizarMaquinaPara
 	return i, err
 }
 
+const contarHistoricoDaMaquina = `-- name: ContarHistoricoDaMaquina :one
+SELECT
+    (SELECT count(*) FROM solicitacao_os s
+      WHERE s.tenant_id = $2 AND s.maquina_id = $1) AS solicitacoes,
+    (SELECT count(*) FROM ordem_servico os
+      JOIN solicitacao_os s ON s.id = os.solicitacao_id
+      WHERE s.tenant_id = $2 AND s.maquina_id = $1) AS ordens_servico,
+    (SELECT count(*) FROM os_nota_fiscal nf
+      JOIN ordem_servico os ON os.id = nf.ordem_servico_id
+      JOIN solicitacao_os s ON s.id = os.solicitacao_id
+      WHERE s.tenant_id = $2 AND s.maquina_id = $1) AS notas_fiscais,
+    (SELECT count(*) FROM preventiva p
+      WHERE p.tenant_id = $2 AND p.maquina_id = $1) AS preventivas,
+    (SELECT count(*) FROM solicitacao_os s
+      LEFT JOIN ordem_servico os ON os.solicitacao_id = s.id
+      WHERE s.tenant_id = $2 AND s.maquina_id = $1
+        AND (s.status = 'Pendente' OR os.status <> 'Concluída')) AS em_aberto
+`
+
+type ContarHistoricoDaMaquinaParams struct {
+	MaquinaID *int64
+	TenantID  int64
+}
+
+type ContarHistoricoDaMaquinaRow struct {
+	Solicitacoes  int64
+	OrdensServico int64
+	NotasFiscais  int64
+	Preventivas   int64
+	EmAberto      int64
+}
+
+// O que a exclusão definitiva vai levar junto, para o modal mostrar antes de
+// pedir a senha. `em_aberto` é o que bloqueia DesativarMaquina: solicitação
+// ainda na fila do Gestor ou OS que não chegou a 'Concluída'.
+func (q *Queries) ContarHistoricoDaMaquina(ctx context.Context, arg ContarHistoricoDaMaquinaParams) (ContarHistoricoDaMaquinaRow, error) {
+	row := q.db.QueryRow(ctx, contarHistoricoDaMaquina, arg.MaquinaID, arg.TenantID)
+	var i ContarHistoricoDaMaquinaRow
+	err := row.Scan(
+		&i.Solicitacoes,
+		&i.OrdensServico,
+		&i.NotasFiscais,
+		&i.Preventivas,
+		&i.EmAberto,
+	)
+	return i, err
+}
+
 const criarMaquina = `-- name: CriarMaquina :one
 
 INSERT INTO maquina (
@@ -188,15 +236,97 @@ func (q *Queries) DesativarMaquina(ctx context.Context, arg DesativarMaquinaPara
 	return result.RowsAffected(), nil
 }
 
+const excluirMaquinaDefinitivo = `-- name: ExcluirMaquinaDefinitivo :execrows
+WITH
+alvo_sol AS (
+    SELECT s.id FROM solicitacao_os s WHERE s.tenant_id = $2 AND s.maquina_id = $1
+),
+alvo_os AS (
+    SELECT os.id FROM ordem_servico os WHERE os.solicitacao_id IN (SELECT a.id FROM alvo_sol a)
+),
+d_item  AS (DELETE FROM os_custo_item   WHERE ordem_servico_id IN (SELECT a.id FROM alvo_os a)),
+d_nf    AS (DELETE FROM os_nota_fiscal  WHERE ordem_servico_id IN (SELECT a.id FROM alvo_os a)),
+d_custo AS (DELETE FROM os_custo        WHERE ordem_servico_id IN (SELECT a.id FROM alvo_os a)),
+d_enc   AS (DELETE FROM os_encerramento WHERE ordem_servico_id IN (SELECT a.id FROM alvo_os a)),
+d_pausa AS (DELETE FROM os_pausa        WHERE ordem_servico_id IN (SELECT a.id FROM alvo_os a)),
+d_os    AS (DELETE FROM ordem_servico x WHERE x.id IN (SELECT a.id FROM alvo_os a)),
+d_imp   AS (DELETE FROM solicitacao_impacto WHERE solicitacao_id IN (SELECT a.id FROM alvo_sol a)),
+d_anexo AS (DELETE FROM solicitacao_anexo   WHERE solicitacao_id IN (SELECT a.id FROM alvo_sol a)),
+d_sol   AS (DELETE FROM solicitacao_os x WHERE x.id IN (SELECT a.id FROM alvo_sol a)),
+d_prev  AS (DELETE FROM preventiva x WHERE x.tenant_id = $2 AND x.maquina_id = $1)
+DELETE FROM maquina m
+WHERE m.id = $1 AND m.tenant_id = $2
+`
+
+type ExcluirMaquinaDefinitivoParams struct {
+	ID       int64
+	TenantID int64
+}
+
+// ⚠️ A ÚNICA exclusão física de entidade do projeto (o resto é soft delete).
+// Existe para o Administrador limpar cadastro de teste/duplicado em produção;
+// o controller só chega aqui depois de conferir senha e patrimônio.
+//
+// Um statement só, com CTEs, em vez de onze DELETEs: todas as CTEs enxergam
+// o mesmo snapshot (então `alvo_os` ainda acha as OS que `d_os` apaga) e as
+// FKs NO ACTION são checadas no fim do statement, quando filhos e pais já
+// saíram. Nenhuma FK tem ON DELETE CASCADE e não deve ganhar -- o cascade
+// valeria pra qualquer DELETE acidental, não só este.
+//
+// Se uma tabela nova passar a apontar para ordem_servico/solicitacao_os/
+// preventiva/maquina, ela TEM de entrar aqui, senão este DELETE vira 23503.
+func (q *Queries) ExcluirMaquinaDefinitivo(ctx context.Context, arg ExcluirMaquinaDefinitivoParams) (int64, error) {
+	result, err := q.db.Exec(ctx, excluirMaquinaDefinitivo, arg.ID, arg.TenantID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const listarChavesAnexosDaMaquina = `-- name: ListarChavesAnexosDaMaquina :many
+SELECT a.chave
+FROM solicitacao_anexo a
+JOIN solicitacao_os s ON s.id = a.solicitacao_id
+WHERE s.tenant_id = $2 AND s.maquina_id = $1
+`
+
+type ListarChavesAnexosDaMaquinaParams struct {
+	MaquinaID *int64
+	TenantID  int64
+}
+
+// Lido ANTES de ExcluirMaquinaDefinitivo, na mesma transação: depois do
+// DELETE as chaves somem e os objetos ficariam órfãos no R2 sem ninguém
+// saber quais eram. Quem apaga do R2 é o controller, depois do commit.
+func (q *Queries) ListarChavesAnexosDaMaquina(ctx context.Context, arg ListarChavesAnexosDaMaquinaParams) ([]string, error) {
+	rows, err := q.db.Query(ctx, listarChavesAnexosDaMaquina, arg.MaquinaID, arg.TenantID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []string
+	for rows.Next() {
+		var chave string
+		if err := rows.Scan(&chave); err != nil {
+			return nil, err
+		}
+		items = append(items, chave)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listarMaquinas = `-- name: ListarMaquinas :many
 SELECT m.id, m.tenant_id, m.setor_id, m.numero_patrimonio, m.numero_serie, m.nome, m.descricao, m.marca, m.modelo, m.foto_chave, m.ativa, m.criado_em, m.criticidade, s.nome AS setor_nome, s.loja_id, l.nome AS loja_nome
 FROM maquina m
 JOIN setor s ON s.tenant_id = m.tenant_id AND s.id = m.setor_id
 JOIN loja  l ON l.tenant_id = s.tenant_id AND l.id = s.loja_id
 WHERE m.tenant_id = $1
-  AND m.ativa
-  AND ($2::bigint IS NULL OR m.setor_id = $2)
-  AND ($3::bigint IS NULL OR s.loja_id = $3)
+  AND m.ativa = COALESCE($2::boolean, true)
+  AND ($3::bigint IS NULL OR m.setor_id = $3)
+  AND ($4::bigint IS NULL OR s.loja_id = $4)
   -- Escopo de acesso no WHERE, nunca no cliente (back-end/CLAUDE.md, "Regras
   -- herdadas do contrato com o front"): NULL não filtra e é o caso do
   -- administrador, que não tem escopo nenhum -- a ausência dele É o acesso
@@ -208,12 +338,12 @@ WHERE m.tenant_id = $1
   -- EXISTS e não JOIN, mesmo motivo de ListarUsuarios: com JOIN a máquina
   -- apareceria uma vez por escopo que a alcança.
   AND (
-    $4::bigint IS NULL
+    $5::bigint IS NULL
     OR EXISTS (
       SELECT 1
       FROM usuario_escopo ue
       LEFT JOIN usuario_escopo_setor ues ON ues.escopo_id = ue.id
-      WHERE ue.usuario_id = $4
+      WHERE ue.usuario_id = $5
         AND ue.loja_id = s.loja_id
         AND (ue.acesso_total_setores OR ues.setor_id = m.setor_id)
     )
@@ -223,6 +353,7 @@ ORDER BY m.nome
 
 type ListarMaquinasParams struct {
 	TenantID        int64
+	Ativa           *bool
 	SetorID         *int64
 	LojaID          *int64
 	EscopoUsuarioID *int64
@@ -251,6 +382,10 @@ type ListarMaquinasRow struct {
 // front) -- NULL não filtra, mesmo padrão de ListarSetores. O JOIN com setor
 // é o que permite filtrar por loja, já que maquina não guarda loja_id.
 //
+// ativa é opcional: NULL lista só as ativas (o que todo chamador antigo
+// quer); false é a aba de inativas da tela de ativar/desativar, que só o
+// controller do administrador repassa.
+//
 // Filtra só por m.ativa, não por s.ativo/l.ativa: máquina em setor desativado
 // continua listada. É o comportamento certo enquanto DesativarSetor não
 // recusar (nem cascatear) com máquina ativa pendurada -- hoje não faz nem um
@@ -260,6 +395,7 @@ type ListarMaquinasRow struct {
 func (q *Queries) ListarMaquinas(ctx context.Context, arg ListarMaquinasParams) ([]ListarMaquinasRow, error) {
 	rows, err := q.db.Query(ctx, listarMaquinas,
 		arg.TenantID,
+		arg.Ativa,
 		arg.SetorID,
 		arg.LojaID,
 		arg.EscopoUsuarioID,
@@ -379,4 +515,26 @@ func (q *Queries) ObterMaquinaPorID(ctx context.Context, arg ObterMaquinaPorIDPa
 		&i.LojaNome,
 	)
 	return i, err
+}
+
+const reativarMaquina = `-- name: ReativarMaquina :execrows
+UPDATE maquina
+SET ativa = true
+WHERE id = $1 AND tenant_id = $2
+`
+
+type ReativarMaquinaParams struct {
+	ID       int64
+	TenantID int64
+}
+
+// Espelho de DesativarMaquina. As preventivas não voltam junto porque nunca
+// saíram: desativar a máquina não mexe nelas, e o job já pula máquina inativa
+// (ListarPreventivasVencidas filtra m.ativa).
+func (q *Queries) ReativarMaquina(ctx context.Context, arg ReativarMaquinaParams) (int64, error) {
+	result, err := q.db.Exec(ctx, reativarMaquina, arg.ID, arg.TenantID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
