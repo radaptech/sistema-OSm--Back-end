@@ -22,39 +22,80 @@ type IndicadorPorDefeito struct {
 	HorasParada float64 `json:"horasParada"`
 }
 
-type IndicadorMensal struct {
-	Mes        string  `json:"mes"`
-	CustoTotal float64 `json:"custoTotal"`
-}
-
-type IndicadoresMaquina struct {
-	MaquinaId        int64                 `json:"maquinaId"`
+// ResumoIndicadores são as grandezas dos cards e da rosca. Vale para o histórico
+// inteiro (IndicadoresMaquina) e para cada mês (IndicadorMensal): o painel troca
+// um pelo outro quando o Gestor clica numa barra do gráfico mensal. Embutido nos
+// dois, sai achatado no JSON -- o corpo do histórico inteiro não mudou de forma.
+type ResumoIndicadores struct {
 	HorasParadaTotal float64               `json:"horasParadaTotal"`
 	MttrHoras        float64               `json:"mttrHoras"`
 	MtbfHoras        float64               `json:"mtbfHoras"`
 	CustoTotal       float64               `json:"custoTotal"`
 	PorTipoDefeito   []IndicadorPorDefeito `json:"porTipoDefeito"`
-	PorMes           []IndicadorMensal     `json:"porMes"`
+}
+
+type IndicadorMensal struct {
+	Mes string `json:"mes"`
+	ResumoIndicadores
+}
+
+type IndicadoresMaquina struct {
+	MaquinaId int64 `json:"maquinaId"`
+	ResumoIndicadores
+	PorMes []IndicadorMensal `json:"porMes"`
 }
 
 // A ordem é a do const tiposDefeito do front (tipos/ordemServico.ts): é ela que
 // casa cada fatia da rosca com a cor de CORES_TIPO_DEFEITO.
 var tiposDefeito = []string{"Predial", "Corretiva"}
 
-// O gráfico de barras é rotulado "Custo Mensal (últimos 6 meses)".
-const mesesNoGrafico = 6
+// O gráfico de barras é rotulado "Custo Mensal (últimos 12 meses)".
+const mesesNoGrafico = 12
 
 // MontarIndicadoresMaquina agrega o histórico de OS encerradas da máquina nas
-// seis grandezas do painel. Recebe as linhas JÁ ordenadas por aberta_em
-// ascendente (ListarHistoricoOsDaMaquina) -- o MTBF depende disso.
+// grandezas do painel, no total e por mês de encerramento. Recebe as linhas JÁ
+// ordenadas por aberta_em ascendente (ListarHistoricoOsDaMaquina) -- o MTBF
+// depende disso, e o recorte por mês preserva essa ordem.
 //
 // Histórico vazio devolve os zeros e as duas listas montadas (vazia a de meses,
 // completa a de defeitos): o front tipa `IndicadoresMaquina` sem opcionais e
 // faz `.map` nas duas, então `null` quebraria a tela de uma máquina nova.
 func MontarIndicadoresMaquina(maquinaId int64, historico []repository.ListarHistoricoOsDaMaquinaRow) IndicadoresMaquina {
 
+	porMes := make(map[string][]repository.ListarHistoricoOsDaMaquinaRow)
+	for _, os := range historico {
+		porMes[os.MesEncerramento] = append(porMes[os.MesEncerramento], os)
+	}
+
+	indicadores := IndicadoresMaquina{
+		MaquinaId:         maquinaId,
+		ResumoIndicadores: resumir(historico),
+		PorMes:            make([]IndicadorMensal, 0, mesesNoGrafico),
+	}
+
+	// A chave é YYYY-MM justamente para ordenar como texto (ver a query); o
+	// contrato pede MM/YYYY, montado só agora.
+	meses := make([]string, 0, len(porMes))
+	for mes := range porMes {
+		meses = append(meses, mes)
+	}
+	slices.Sort(meses)
+	if len(meses) > mesesNoGrafico {
+		meses = meses[len(meses)-mesesNoGrafico:]
+	}
+	for _, mes := range meses {
+		indicadores.PorMes = append(indicadores.PorMes, IndicadorMensal{
+			Mes:               mes[5:7] + "/" + mes[0:4],
+			ResumoIndicadores: resumir(porMes[mes]),
+		})
+	}
+
+	return indicadores
+}
+
+func resumir(historico []repository.ListarHistoricoOsDaMaquinaRow) ResumoIndicadores {
+
 	horasPorDefeito := make(map[string]float64, len(tiposDefeito))
-	custoPorMes := make(map[string]float64)
 
 	var horasParadaTotal, custoTotal, somaTrabalhadas float64
 	var comHorasTrabalhadas int
@@ -72,57 +113,37 @@ func MontarIndicadoresMaquina(maquinaId int64, historico []repository.ListarHist
 			comHorasTrabalhadas++
 		}
 
-		custo := zeroSeNulo(os.CustoHoraTecnico) + zeroSeNulo(os.CustoManutencao)
-		custoTotal += custo
-		custoPorMes[os.MesEncerramento] += custo
+		custoTotal += zeroSeNulo(os.CustoHoraTecnico) + zeroSeNulo(os.CustoManutencao)
 	}
 
-	indicadores := IndicadoresMaquina{
-		MaquinaId:        maquinaId,
+	resumo := ResumoIndicadores{
 		HorasParadaTotal: arredondar(horasParadaTotal),
 		CustoTotal:       arredondar(custoTotal),
+		MtbfHoras:        mtbf(historico),
 		PorTipoDefeito:   make([]IndicadorPorDefeito, 0, len(tiposDefeito)),
-		PorMes:           make([]IndicadorMensal, 0, mesesNoGrafico),
 	}
 
 	if comHorasTrabalhadas > 0 {
-		indicadores.MttrHoras = arredondar(somaTrabalhadas / float64(comHorasTrabalhadas))
+		resumo.MttrHoras = arredondar(somaTrabalhadas / float64(comHorasTrabalhadas))
 	}
-	indicadores.MtbfHoras = mtbf(historico)
 
 	// Os dois tipos saem sempre, mesmo zerados: a rosca tem legenda fixa, e uma
 	// fatia que some seria lida como "não existe esse defeito" em vez de "não
 	// houve".
 	for _, tipo := range tiposDefeito {
-		indicadores.PorTipoDefeito = append(indicadores.PorTipoDefeito, IndicadorPorDefeito{
+		resumo.PorTipoDefeito = append(resumo.PorTipoDefeito, IndicadorPorDefeito{
 			TipoDefeito: tipo,
 			HorasParada: arredondar(horasPorDefeito[tipo]),
 		})
 	}
 
-	// A chave é YYYY-MM justamente para ordenar como texto (ver a query); o
-	// contrato pede MM/YYYY, montado só agora.
-	meses := make([]string, 0, len(custoPorMes))
-	for mes := range custoPorMes {
-		meses = append(meses, mes)
-	}
-	slices.Sort(meses)
-	if len(meses) > mesesNoGrafico {
-		meses = meses[len(meses)-mesesNoGrafico:]
-	}
-	for _, mes := range meses {
-		indicadores.PorMes = append(indicadores.PorMes, IndicadorMensal{
-			Mes:        mes[5:7] + "/" + mes[0:4],
-			CustoTotal: arredondar(custoPorMes[mes]),
-		})
-	}
-
-	return indicadores
+	return resumo
 }
 
 // mtbf é a média do intervalo entre aberturas consecutivas, em horas -- o tempo
 // que a máquina costuma passar rodando entre uma OS e a próxima. Com menos de
-// duas OS não há intervalo nenhum, e zero é o que o card exibe.
+// duas OS não há intervalo nenhum, e zero é o que o card exibe -- o que, no
+// recorte de um mês, é o caso comum: só conta o intervalo entre OS do mesmo mês.
 //
 // O marco é aberta_em e não a data da solicitação, diferente de horas_parada:
 // aqui o que se mede é o espaçamento entre as falhas, e ele fica igual

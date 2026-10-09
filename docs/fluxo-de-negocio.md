@@ -268,8 +268,10 @@ OS é da solicitação, não de um lugar.
 
 O Painel de Indicadores do Gestor (`DashboardGestor`, a ação rápida "Indicadores"):
 Horas Parada, MTTR, MTBF e Custo Total da máquina, mais a rosca de paradas por tipo de
-defeito e as barras de custo mensal dos últimos 6 meses. Tudo sai do histórico de OS
+defeito e as barras de custo mensal dos últimos 12 meses. Tudo sai do histórico de OS
 **encerradas** daquela máquina — `ListarHistoricoOsDaMaquina`, uma linha por OS.
+Cada item de `porMes` repete as mesmas grandezas (`ResumoIndicadores`) calculadas só
+com as OS encerradas naquele mês: o painel troca os cards e a rosca pelo mês clicado.
 
 **Não responde mais só zeros** desde que o ciclo de vida da OS ficou completo
 (`/encerrar` grava `os_encerramento`/`os_custo`, `/custo` corrige o segundo depois) — os
@@ -309,7 +311,7 @@ verdade por trás.
   que lê é histórico de OS. A URL é `/indicadores/...` e não `/maquinas/:id/indicadores`
   porque é a que o front já chama.
 - Testado: `internal/model/indicadorMaquina_test.go` (a matemática, sem banco: MTTR
-  ignorando nulo, MTBF precisando de duas OS, corte de 6 meses com meses fora de ordem) e
+  ignorando nulo, MTBF precisando de duas OS, corte de 12 meses com meses fora de ordem) e
   `internal/service/indicadorIntegracao_test.go` (a query contra Postgres: OS aberta não
   entra, os dois relógios, o mês em BRT, escopo → 404, administrador sem escopo).
 

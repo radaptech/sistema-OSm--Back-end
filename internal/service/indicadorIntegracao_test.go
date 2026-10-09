@@ -15,7 +15,7 @@ import (
 // Postgres de verdade: a query (quem entra no histórico e quem fica fora), o
 // escopo virando 404 e o mês em America/Sao_Paulo.
 //
-// A matemática em si (MTTR, MTBF, corte de 6 meses) é testada sem banco em
+// A matemática em si (MTTR, MTBF, corte de 12 meses) é testada sem banco em
 // internal/model/indicadorMaquina_test.go -- aqui o que se prova é que os
 // números que chegam ao model são os certos.
 func TestObterIndicadoresDaMaquina(t *testing.T) {
@@ -199,12 +199,15 @@ func TestObterIndicadoresDaMaquina(t *testing.T) {
 			}
 		}
 
-		esperadoMes := []model.IndicadorMensal{{Mes: "06/2026", CustoTotal: 300}, {Mes: "07/2026", CustoTotal: 50}}
+		esperadoMes := []model.IndicadorMensal{
+			{Mes: "06/2026", ResumoIndicadores: model.ResumoIndicadores{CustoTotal: 300}},
+			{Mes: "07/2026", ResumoIndicadores: model.ResumoIndicadores{CustoTotal: 50}},
+		}
 		if len(ind.PorMes) != 2 {
 			t.Fatalf("porMes = %+v, esperado 2 meses", ind.PorMes)
 		}
 		for i, e := range esperadoMes {
-			if ind.PorMes[i] != e {
+			if ind.PorMes[i].Mes != e.Mes || ind.PorMes[i].CustoTotal != e.CustoTotal {
 				t.Errorf("porMes[%d] = %+v, esperado %+v", i, ind.PorMes[i], e)
 			}
 		}
