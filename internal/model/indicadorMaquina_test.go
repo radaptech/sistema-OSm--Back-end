@@ -95,18 +95,31 @@ func TestIndicadoresAgregaHistorico(t *testing.T) {
 	}
 
 	// MM/YYYY no contrato, ordenado do mais antigo para o mais novo.
-	if len(ind.PorMes) != 2 || ind.PorMes[0] != (IndicadorMensal{"01/2026", 150}) || ind.PorMes[1] != (IndicadorMensal{"02/2026", 0}) {
+	if len(ind.PorMes) != 2 || ind.PorMes[0].Mes != "01/2026" || ind.PorMes[0].CustoTotal != 150 || ind.PorMes[1].Mes != "02/2026" || ind.PorMes[1].CustoTotal != 0 {
 		t.Errorf("porMes = %+v, esperado [{01/2026 150} {02/2026 0}]", ind.PorMes)
+	}
+
+	// Cada mês traz os cards e a rosca só das OS dele: janeiro tem as duas
+	// primeiras (aberturas a 48h uma da outra), fevereiro só a terceira.
+	jan, fev := ind.PorMes[0], ind.PorMes[1]
+	if jan.HorasParadaTotal != 15 || jan.MttrHoras != 4 || jan.MtbfHoras != 48 {
+		t.Errorf("janeiro = %+v, esperado parada 15, mttr 4 (a nula fora), mtbf 48", jan.ResumoIndicadores)
+	}
+	if jan.PorTipoDefeito[0] != (IndicadorPorDefeito{"Predial", 5}) || jan.PorTipoDefeito[1] != (IndicadorPorDefeito{"Corretiva", 10}) {
+		t.Errorf("janeiro porTipoDefeito = %+v", jan.PorTipoDefeito)
+	}
+	if fev.HorasParadaTotal != 2.5 || fev.MttrHoras != 1 || fev.MtbfHoras != 0 {
+		t.Errorf("fevereiro = %+v, esperado parada 2.5, mttr 1, mtbf 0 (uma OS só)", fev.ResumoIndicadores)
 	}
 }
 
-// O gráfico é "Custo Mensal (últimos 6 meses)": mês mais antigo cai fora, e o
+// O gráfico é "Custo Mensal (últimos 12 meses)": mês mais antigo cai fora, e o
 // que sobra continua em ordem crescente.
-func TestIndicadoresCortaEmSeisMeses(t *testing.T) {
+func TestIndicadoresCortaEmDozeMeses(t *testing.T) {
 
 	// Fora de ordem cronológica de propósito: a query ordena por aberta_em, e
 	// uma OS aberta antes pode ser encerrada depois -- o mês NÃO vem ordenado.
-	meses := []string{"2026-03", "2025-11", "2026-01", "2025-12", "2026-05", "2026-02", "2026-04"}
+	meses := []string{"2026-03", "2025-05", "2026-01", "2025-12", "2025-07", "2026-05", "2025-09", "2026-02", "2025-06", "2026-04", "2025-10", "2025-08", "2025-11"}
 	historico := make([]repository.ListarHistoricoOsDaMaquinaRow, 0, len(meses))
 	for i, mes := range meses {
 		historico = append(historico, osEncerrada(i, "Corretiva", mes, f8(1), f8(1), f8(10)))
@@ -114,7 +127,7 @@ func TestIndicadoresCortaEmSeisMeses(t *testing.T) {
 
 	ind := MontarIndicadoresMaquina(1, historico)
 
-	esperado := []string{"12/2025", "01/2026", "02/2026", "03/2026", "04/2026", "05/2026"}
+	esperado := []string{"06/2025", "07/2025", "08/2025", "09/2025", "10/2025", "11/2025", "12/2025", "01/2026", "02/2026", "03/2026", "04/2026", "05/2026"}
 	if len(ind.PorMes) != len(esperado) {
 		t.Fatalf("porMes = %d meses, esperado %d: %+v", len(ind.PorMes), len(esperado), ind.PorMes)
 	}
@@ -123,9 +136,9 @@ func TestIndicadoresCortaEmSeisMeses(t *testing.T) {
 			t.Errorf("porMes[%d] = %q, esperado %q", i, ind.PorMes[i].Mes, e)
 		}
 	}
-	// 11/2025 saiu do gráfico, mas continua no total: o card é do histórico
+	// 05/2025 saiu do gráfico, mas continua no total: o card é do histórico
 	// inteiro, o gráfico é da janela.
-	if ind.CustoTotal != 70 {
-		t.Errorf("custoTotal = %v, esperado 70 (os 7 meses, não os 6 do gráfico)", ind.CustoTotal)
+	if ind.CustoTotal != 130 {
+		t.Errorf("custoTotal = %v, esperado 130 (os 13 meses, não os 12 do gráfico)", ind.CustoTotal)
 	}
 }
