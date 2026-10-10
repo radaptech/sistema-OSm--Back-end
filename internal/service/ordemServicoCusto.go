@@ -75,9 +75,10 @@ func gravarItensDeCusto(
 
 		// ck_custo_item_hora_tecnico espelhado aqui, mesma razão de sempre: sem
 		// isto o CHECK do banco ainda barra, mas com mensagem genérica em vez de
-		// dizer qual campo está errado.
-		if item.CustoHoraTecnico != nil && tipo != repository.TipoOsMaquinario {
-			return agregados, fmt.Errorf("%w: custo hora do técnico só existe em OS de maquinário", helper.ErrValidacao)
+		// dizer qual campo está errado. Desde a 000016 só reparo fica sem mão
+		// de obra; em terceiros a coluna é a mão de obra da EMPRESA.
+		if item.CustoHoraTecnico != nil && tipo == repository.TipoOsReparo {
+			return agregados, fmt.Errorf("%w: pequenos reparos não cobram mão de obra", helper.ErrValidacao)
 		}
 
 		var horaTecnico pgtype.Float8
@@ -101,10 +102,11 @@ func gravarItensDeCusto(
 
 	agregados.Manutencao = totalManutencao
 
-	// Em maquinário a coluna existe sempre, mesmo somando zero: uma OS sem mão
-	// de obra cobrada é conserto de graça, não ausência de informação, e é o
-	// mesmo sentido que custo_hora_tecnico já tinha quando era um campo escalar
-	// obrigatório. Fora de maquinário fica Invalid (NULL), que é o que
+	// Em maquinário e terceiros a coluna existe sempre, mesmo somando zero:
+	// uma OS sem mão de obra cobrada é conserto de graça, não ausência de
+	// informação, e é o mesmo sentido que custo_hora_tecnico já tinha quando
+	// era um campo escalar obrigatório. Em terceiros ela é a mão de obra da
+	// empresa (000016). Em reparo fica Invalid (NULL), que é o que
 	// ck_custo_por_tipo exige -- ver a nota em CriarCusto.
 	//
 	// ⚠️ Não existe mais "maquinário exige hora técnica". A regra vinha de o
@@ -112,7 +114,7 @@ func gravarItensDeCusto(
 	// Técnico a inventar uma tarefa só para carregar a mão de obra quando a OS
 	// tinha duas peças e nenhuma hora a cobrar. Zero diz a mesma coisa sem
 	// mentir sobre o que foi feito.
-	if tipo == repository.TipoOsMaquinario {
+	if tipo != repository.TipoOsReparo {
 		agregados.HoraTecnico = pgtype.Float8{Float64: totalHoraTecnico, Valid: true}
 	}
 

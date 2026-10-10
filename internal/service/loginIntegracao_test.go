@@ -877,3 +877,79 @@ func TestSessaoMorreComTenantDesativado(t *testing.T) {
 		t.Errorf("tenant inexistente: esperado ErrSessaoExpirada, veio %v", err)
 	}
 }
+
+// TestValorHoraTecnico cobre a tarifa de referência do técnico (migration
+// 000015): grava e volta no cadastro, na leitura e em GET /tecnicos, e some
+// quando o perfil deixa de ser técnico -- ck_usuario_valor_hora recusaria a
+// linha se o service mandasse o valor adiante.
+func TestValorHoraTecnico(t *testing.T) {
+
+	ctx := context.Background()
+	pool := bancoDeTeste(t)
+	svc := NewRepoUsuario(pool)
+
+	var tenantID, loja int64
+	if err := pool.QueryRow(ctx, `INSERT INTO empresa (subdominio, nome) VALUES ('vh', 'Empresa VH') RETURNING id`).Scan(&tenantID); err != nil {
+		t.Fatalf("erro ao criar empresa: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `INSERT INTO loja (tenant_id, nome) VALUES ($1, 'Loja') RETURNING id`, tenantID).Scan(&loja); err != nil {
+		t.Fatalf("erro ao criar loja: %v", err)
+	}
+
+	area, valor := "Elétrica", 85.5
+	tecnico, err := svc.CadastrarUsuario(ctx, model.NovoUsuarioPayload{
+		Nome: "Eder", Email: "eder@vh.com", Senha: "senha-forte-123", Perfil: "tecnico",
+		LojasIds: []int64{loja}, Area: &area, ValorHora: &valor,
+	}, tenantID)
+	if err != nil {
+		t.Fatalf("erro ao cadastrar técnico: %v", err)
+	}
+	if tecnico.ValorHora == nil || *tecnico.ValorHora != 85.5 {
+		t.Errorf("valorHora no cadastro = %v, esperado 85.5", tecnico.ValorHora)
+	}
+
+	t.Run("volta na leitura e na listagem de técnicos", func(t *testing.T) {
+		u, err := svc.ObterUsuario(ctx, tecnico.Id, tenantID)
+		if err != nil {
+			t.Fatalf("erro ao obter: %v", err)
+		}
+		if u.ValorHora == nil || *u.ValorHora != 85.5 {
+			t.Errorf("valorHora em GET /usuarios/:id = %v", u.ValorHora)
+		}
+		// Sem a área aqui a tela de edição abria o técnico com o campo
+		// obrigatório em branco.
+		if u.Area == nil || *u.Area != "Elétrica" {
+			t.Errorf("area em GET /usuarios/:id = %v, esperado Elétrica", u.Area)
+		}
+		pagina, err := svc.ListarUsuarios(ctx, tenantID, 1, nil, nil, nil)
+		if err != nil {
+			t.Fatalf("erro ao listar usuários: %v", err)
+		}
+		if len(pagina.Dados) != 1 || pagina.Dados[0].Area == nil || *pagina.Dados[0].Area != "Elétrica" {
+			t.Errorf("area em GET /usuarios = %+v", pagina.Dados)
+		}
+		lista, err := svc.ListarTecnicos(ctx, tenantID, 0, "administrador", nil)
+		if err != nil {
+			t.Fatalf("erro ao listar técnicos: %v", err)
+		}
+		if len(lista) != 1 || lista[0].ValorHora == nil || *lista[0].ValorHora != 85.5 {
+			t.Errorf("GET /tecnicos = %+v", lista)
+		}
+	})
+
+	t.Run("valor fora do perfil técnico é descartado", func(t *testing.T) {
+		u, err := svc.AtualizarUsuario(ctx, tecnico.Id, model.AtualizarUsuarioPayload{
+			Nome: "Eder", Email: "eder@vh.com", Perfil: "gestor",
+			LojasIds: []int64{loja}, AcessoTotalSetores: true, ValorHora: &valor,
+		}, tenantID)
+		if err != nil {
+			t.Fatalf("erro ao virar gestor: %v", err)
+		}
+		if u.ValorHora != nil {
+			t.Errorf("gestor ficou com valorHora %v", *u.ValorHora)
+		}
+		if u.Area != nil {
+			t.Errorf("gestor ficou com area %v", *u.Area)
+		}
+	})
+}

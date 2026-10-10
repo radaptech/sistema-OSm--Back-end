@@ -18,6 +18,7 @@ import (
 type OrdemServicoServiceInterface interface {
 	ListarOrdensServico(ctx context.Context, tenantId, usuarioId int64, perfil string, filtros service.FiltrosOrdemServico) ([]model.OrdemServico, error)
 	ObterIndicadoresDaMaquina(ctx context.Context, tenantId, maquinaId, usuarioId int64, perfil string) (model.IndicadoresMaquina, error)
+	ObterIndicadoresDaLoja(ctx context.Context, tenantId, lojaId, usuarioId int64, perfil string) (model.IndicadoresLoja, error)
 	// Ciclo de vida da OS (fase 2) -- todo método aqui recebe atorId como o
 	// TÉCNICO do token, nunca do corpo (mesmo motivo do resto do sistema): é
 	// o service que confere que atorId é o dono da OS, devolvendo
@@ -222,6 +223,43 @@ func (o *OrdemServicoController) Indicadores() gin.HandlerFunc {
 			}
 			slog.ErrorContext(ctx.Request.Context(), "indicadores da máquina", "maquina", maquinaId, "tenant", tenantId, "err", err)
 			ctx.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao obter indicadores da máquina"})
+			return
+		}
+
+		ctx.JSON(http.StatusOK, indicadores)
+	}
+}
+
+// IndicadoresLoja é GET /indicadores/lojas/:id -- a tela da loja no Painel de
+// Indicadores. Mesmo desenho de Indicadores: o `:id` é de LOJA, e loja que não
+// existe ou fora do escopo são o mesmo 404.
+func (o *OrdemServicoController) IndicadoresLoja() gin.HandlerFunc {
+
+	return func(ctx *gin.Context) {
+
+		tenantId, ok := tenantDaRota(ctx)
+		if !ok {
+			return
+		}
+
+		lojaId, ok := idDaRota(ctx)
+		if !ok {
+			return
+		}
+
+		usuarioId, perfil, ok := atorDaRota(ctx)
+		if !ok {
+			return
+		}
+
+		indicadores, err := o.service.ObterIndicadoresDaLoja(ctx.Request.Context(), tenantId, lojaId, usuarioId, perfil)
+		if err != nil {
+			if errors.Is(err, helper.ErrNaoEncontrado) {
+				ctx.JSON(http.StatusNotFound, gin.H{"error": "loja não encontrada"})
+				return
+			}
+			slog.ErrorContext(ctx.Request.Context(), "indicadores da loja", "loja", lojaId, "tenant", tenantId, "err", err)
+			ctx.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao obter indicadores da loja"})
 			return
 		}
 

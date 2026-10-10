@@ -52,6 +52,12 @@ sql:
             go_type: "github.com/jackc/pgx/v5/pgtype.Float8"
           - column: "*.custo_manutencao"
             go_type: "github.com/jackc/pgx/v5/pgtype.Float8"
+          # Valor/hora do técnico (migration 000015): nullable -- técnico sem
+          # tarifa cadastrada é NULL, não zero --, então pgtype.Float8 pelo
+          # mesmo motivo das quatro acima. Nome qualificado pela tabela porque
+          # "valor_hora" é genérico demais para casar em qualquer lugar.
+          - column: "usuario.valor_hora"
+            go_type: "github.com/jackc/pgx/v5/pgtype.Float8"
           # os_custo_item (migration 000012) reusa os DOIS nomes de coluna de
           # os_custo, então os overrides acima já a cobrem: eles casam por NOME
           # de coluna, em qualquer tabela. Foi um dos ganhos de a linha ter

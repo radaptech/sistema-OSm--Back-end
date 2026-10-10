@@ -3,8 +3,8 @@
 -- vinculado ao usuário (solicitante/técnico/gestor).
 
 -- name: CriarUsuario :one
-INSERT INTO usuario (tenant_id, perfil, area_tecnico_id, nome, email, senha_hash, telefone)
-VALUES ($1, $2, $3, $4, $5, $6, $7)
+INSERT INTO usuario (tenant_id, perfil, area_tecnico_id, nome, email, senha_hash, telefone, valor_hora)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 RETURNING *;
 
 -- name: ObterUsuarioPorID :one
@@ -73,7 +73,8 @@ SET perfil = $3,
     area_tecnico_id = $4,
     nome = $5,
     email = $6,
-    telefone = $7
+    telefone = $7,
+    valor_hora = $8
 WHERE id = $1 AND tenant_id = $2
 RETURNING *;
 
@@ -157,6 +158,7 @@ SELECT
     u.nome,
     u.email,
     u.telefone,
+    u.valor_hora,
     a.nome AS area,
     COALESCE(
         array_agg(ue.loja_id) FILTER (WHERE ue.loja_id IS NOT NULL),
@@ -187,7 +189,7 @@ WHERE u.tenant_id = $1
         )
     )
   )
-GROUP BY u.id, u.nome, u.email, u.telefone, a.nome
+GROUP BY u.id, u.nome, u.email, u.telefone, u.valor_hora, a.nome
 ORDER BY u.nome;
 
 -- name: ObterGestoresDoSetor :many

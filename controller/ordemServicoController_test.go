@@ -74,6 +74,13 @@ func (o ordemServicoFake) ObterIndicadoresDaMaquina(_ context.Context, _, maquin
 	return model.MontarIndicadoresMaquina(maquinaId, nil), nil
 }
 
+func (o ordemServicoFake) ObterIndicadoresDaLoja(_ context.Context, _, lojaId, _ int64, _ string) (model.IndicadoresLoja, error) {
+	if o.err != nil {
+		return model.IndicadoresLoja{}, o.err
+	}
+	return model.MontarIndicadoresLoja(lojaId, nil, nil), nil
+}
+
 func (o ordemServicoFake) Iniciar(_ context.Context, _, atorId, ordemServicoId int64) (model.OrdemServico, error) {
 	if o.ordemServicoId != nil {
 		*o.ordemServicoId = ordemServicoId

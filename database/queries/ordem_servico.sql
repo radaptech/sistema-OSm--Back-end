@@ -458,6 +458,60 @@ WHERE os.tenant_id = sqlc.arg(tenant_id)
 -- ordenado aqui, o Go só percorre. Trocar para DESC quebra o indicador calado.
 ORDER BY os.aberta_em;
 
+-- name: ListarHistoricoOsDaLoja :many
+-- GET /indicadores/lojas/:id -- a mesma matéria-prima de
+-- ListarHistoricoOsDaMaquina, só que de todas as máquinas da loja que quem
+-- chama alcança. O Painel de Indicadores abre a loja com o total dela, um card
+-- por setor e um por máquina; MontarIndicadoresLoja faz os três recortes sobre
+-- esta lista, em Go, pelo mesmo motivo da query por máquina.
+--
+-- maquina_id e setor_id vêm na linha porque são as chaves do recorte -- e o
+-- MTBF de um grupo precisa separar as OS por máquina (ver mtbf no model).
+--
+-- setor_id é o ATUAL da máquina, não o da solicitação: o painel mostra a
+-- máquina onde ela está hoje, e uma máquina transferida de setor leva o
+-- histórico junto.
+--
+-- Escopo no WHERE, mesmo EXISTS de ListarMaquinas: o Gestor com só alguns
+-- setores da loja vê o agregado desses setores, não da loja inteira. Só
+-- máquina ativa, de novo como ListarMaquinas -- o total da loja tem que bater
+-- com a soma dos cards que a tela desenha.
+--
+-- ⚠️ horas_* e custo_* CRUAS, mesma nota de ListarHistoricoOsDaMaquina.
+SELECT
+    m.id AS maquina_id,
+    m.setor_id,
+    os.aberta_em,
+    e.tipo_defeito,
+    to_char(e.data_fim AT TIME ZONE 'America/Sao_Paulo', 'YYYY-MM') AS mes_encerramento,
+    h.horas_parada,
+    h.horas_trabalhadas,
+    c.custo_hora_tecnico,
+    c.custo_manutencao
+FROM ordem_servico os
+JOIN solicitacao_os s   ON s.tenant_id = os.tenant_id AND s.id = os.solicitacao_id
+JOIN maquina m          ON m.tenant_id = s.tenant_id AND m.id = s.maquina_id
+JOIN setor st           ON st.tenant_id = m.tenant_id AND st.id = m.setor_id
+JOIN os_encerramento e  ON e.tenant_id = os.tenant_id AND e.ordem_servico_id = os.id
+JOIN vw_os_horas h      ON h.ordem_servico_id = os.id
+LEFT JOIN os_custo c    ON c.tenant_id = os.tenant_id AND c.ordem_servico_id = os.id
+WHERE os.tenant_id = sqlc.arg(tenant_id)
+  AND st.loja_id = sqlc.arg(loja_id)::bigint
+  AND m.ativa
+  AND (
+    sqlc.narg(escopo_usuario_id)::bigint IS NULL
+    OR EXISTS (
+      SELECT 1
+      FROM usuario_escopo ue
+      LEFT JOIN usuario_escopo_setor ues ON ues.escopo_id = ue.id
+      WHERE ue.usuario_id = sqlc.narg(escopo_usuario_id)
+        AND ue.loja_id = st.loja_id
+        AND (ue.acesso_total_setores OR ues.setor_id = m.setor_id)
+    )
+  )
+-- Ascendente pelo mesmo motivo da query por máquina: o MTBF percorre em ordem.
+ORDER BY os.aberta_em;
+
 -- name: CriarItemDeCusto :exec
 -- Uma TAREFA da OS, com o custo de material e o de mão de obra dela (migration
 -- 000012). Chamada em laço por gravarItensDeCusto, sempre depois de

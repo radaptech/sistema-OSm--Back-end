@@ -671,6 +671,7 @@ type Usuario struct {
 	CriadoEm                 pgtype.Timestamptz
 	TokenRecuperacaoHash     *string
 	TokenRecuperacaoExpiraEm pgtype.Timestamptz
+	ValorHora                pgtype.Float8
 }
 
 type UsuarioEscopo struct {

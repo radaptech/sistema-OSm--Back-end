@@ -15,8 +15,9 @@ import (
 
 // itensMaquinario e itensSemHoraTecnica montam a lista de TAREFAS da migration
 // 000012 sem repetir a struct em cada subteste. A diferença entre os dois é a
-// única regra que o tipo da OS impõe: fora de 'maquinario' a hora técnica é
-// proibida (ck_custo_item_hora_tecnico), então a tarefa vem só com material.
+// única regra que o tipo da OS impõe: em 'reparo' a mão de obra é proibida
+// (ck_custo_item_hora_tecnico), então a tarefa vem só com material. Em
+// 'terceiros' ela é permitida desde a 000016 (mão de obra da empresa).
 //
 // A descrição é obrigatória (ck_custo_item_descricao) e nunca é o assunto dos
 // testes que usam estes helpers -- quem testa a descrição em si passa a lista
@@ -1987,6 +1988,30 @@ func TestCorrigirCusto(t *testing.T) {
 		}
 		if corrigida.Custo.DescricaoServicoTerceiro == nil || *corrigida.Custo.DescricaoServicoTerceiro != "Troca do compressor" {
 			t.Errorf("descricaoServicoTerceiro = %v, esperado %q", corrigida.Custo.DescricaoServicoTerceiro, "Troca do compressor")
+		}
+	})
+
+	// 000016: a OS de terceiros separa peças (custo_manutencao) de mão de obra
+	// da empresa (custo_hora_tecnico), e as duas entram no total.
+	t.Run("OS de terceiros aceita valor de peças e de mão de obra", func(t *testing.T) {
+		os := osConcluidaTerceiros("PAT-CUSTO-8", "Terceiro com mão de obra")
+		corrigida, err := svcOS.CorrigirCusto(ctx, tenantID, adminCorretor.Id, os.Id, model.LancamentoCustoManutencaoPayload{
+			Itens: []model.ItemCustoPayload{
+				{Descricao: "Compressor", CustoManutencao: 950, CustoHoraTecnico: ptrFloat(300)},
+				{Descricao: "Carga de gás", CustoManutencao: 200},
+			},
+		})
+		if err != nil {
+			t.Fatalf("mão de obra em terceiros devia ser aceita: %v", err)
+		}
+		if corrigida.Custo.CustoManutencao != 1150 {
+			t.Errorf("custoManutencao (peças) = %v, esperado 1150", corrigida.Custo.CustoManutencao)
+		}
+		if corrigida.Custo.CustoHoraTecnico == nil || *corrigida.Custo.CustoHoraTecnico != 300 {
+			t.Errorf("custoHoraTecnico (mão de obra) = %v, esperado 300", corrigida.Custo.CustoHoraTecnico)
+		}
+		if corrigida.Custo.CustoTotal != 1450 {
+			t.Errorf("custoTotal = %v, esperado 1450", corrigida.Custo.CustoTotal)
 		}
 	})
 
