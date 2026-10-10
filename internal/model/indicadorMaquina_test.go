@@ -142,3 +142,74 @@ func TestIndicadoresCortaEmDozeMeses(t *testing.T) {
 		t.Errorf("custoTotal = %v, esperado 130 (os 13 meses, não os 12 do gráfico)", ind.CustoTotal)
 	}
 }
+
+// osDaLoja monta uma linha do histórico da loja: a de máquina, com as chaves
+// do recorte (máquina e setor) que a query por loja acrescenta.
+func osDaLoja(maquina, setor int64, dias int, mes string, parada, trabalhadas, custo pgtype.Float8) repository.ListarHistoricoOsDaLojaRow {
+	return repository.ListarHistoricoOsDaLojaRow{
+		MaquinaID:        maquina,
+		SetorID:          setor,
+		AbertaEm:         ts(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC).AddDate(0, 0, dias)),
+		TipoDefeito:      repository.TipoDefeito("Corretiva"),
+		MesEncerramento:  mes,
+		HorasParada:      parada,
+		HorasTrabalhadas: trabalhadas,
+		CustoManutencao:  custo,
+	}
+}
+
+// O MTBF do grupo mede só entre OS da MESMA máquina: as OS das máquinas 1 e 2
+// intercaladas a cada 5 dias não podem virar "uma falha a cada 5 dias" no
+// setor -- cada máquina quebra a cada 10.
+func TestIndicadoresLojaMtbfPorMaquina(t *testing.T) {
+
+	maquinas := []repository.ListarMaquinasRow{
+		{ID: 1, SetorID: 10, SetorNome: "Padaria"},
+		{ID: 2, SetorID: 10, SetorNome: "Padaria"},
+	}
+	ind := MontarIndicadoresLoja(7, maquinas, []repository.ListarHistoricoOsDaLojaRow{
+		osDaLoja(1, 10, 0, "2026-01", f8(2), f8(1), f8(100)),
+		osDaLoja(2, 10, 5, "2026-01", f8(4), f8(3), f8(50)),
+		osDaLoja(1, 10, 10, "2026-01", f8(6), f8(5), f8(10)),
+		osDaLoja(2, 10, 15, "2026-01", nulo(), f8(3), nulo()),
+	})
+
+	if ind.MtbfHoras != 240 {
+		t.Errorf("mtbfHoras = %v, esperado 240 (10 dias entre OS da mesma máquina)", ind.MtbfHoras)
+	}
+	if ind.HorasParadaTotal != 12 || ind.CustoTotal != 160 || ind.QuantidadeOs != 4 {
+		t.Errorf("total = %+v, esperado parada 12, custo 160, 4 OS", ind)
+	}
+	if ind.MttrHoras != 3 {
+		t.Errorf("mttrHoras = %v, esperado 3 (média das 4 OS)", ind.MttrHoras)
+	}
+	if len(ind.PorSetor) != 1 || ind.PorSetor[0].QuantidadeMaquinas != 2 || ind.PorSetor[0].MtbfHoras != 240 {
+		t.Errorf("porSetor = %+v, esperado um setor com 2 máquinas e MTBF 240", ind.PorSetor)
+	}
+	if len(ind.PorMaquina) != 2 || ind.PorMaquina[0].CustoTotal != 110 || ind.PorMaquina[1].QuantidadeOs != 2 {
+		t.Errorf("porMaquina = %+v", ind.PorMaquina)
+	}
+}
+
+// Máquina e setor sem OS encerrada ganham card zerado, não somem: a tela
+// desenha um card por máquina da lista, e o total tem que bater com eles.
+func TestIndicadoresLojaMaquinaSemHistorico(t *testing.T) {
+
+	maquinas := []repository.ListarMaquinasRow{
+		{ID: 1, SetorID: 10, SetorNome: "Padaria"},
+		{ID: 3, SetorID: 20, SetorNome: "Açougue"},
+	}
+	ind := MontarIndicadoresLoja(7, maquinas, []repository.ListarHistoricoOsDaLojaRow{
+		osDaLoja(1, 10, 0, "2026-01", f8(2), f8(1), f8(100)),
+	})
+
+	if len(ind.PorSetor) != 2 || ind.PorSetor[1].SetorNome != "Açougue" || ind.PorSetor[1].CustoTotal != 0 {
+		t.Errorf("porSetor = %+v, esperado o Açougue zerado", ind.PorSetor)
+	}
+	if ind.PorSetor[1].PorMes == nil || len(ind.PorSetor[1].PorTipoDefeito) != 2 {
+		t.Error("setor zerado sem listas montadas; o front faz .map e quebra")
+	}
+	if len(ind.PorMaquina) != 2 || ind.PorMaquina[1].QuantidadeOs != 0 {
+		t.Errorf("porMaquina = %+v, esperado a máquina 3 zerada", ind.PorMaquina)
+	}
+}

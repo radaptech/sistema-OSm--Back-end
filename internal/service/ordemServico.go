@@ -707,3 +707,62 @@ func (s *OrdemServicoService) ObterIndicadoresDaMaquina(ctx context.Context, ten
 	// não 404. É o estado normal de máquina recém-cadastrada.
 	return model.MontarIndicadoresMaquina(maquinaId, historico), nil
 }
+
+// ObterIndicadoresDaLoja é GET /indicadores/lojas/:id -- a tela da loja no
+// Painel de Indicadores: total, setores e máquinas de uma vez.
+//
+// O escopo é aplicado duas vezes, e cada uma responde uma pergunta. A primeira
+// (loja existe no tenant e, fora o administrador, está entre os escopos de
+// quem chama) decide o 404 -- mesmo motivo de ObterIndicadoresDaMaquina:
+// loja alheia e loja sem histórico não podem ficar indistinguíveis atrás de
+// um painel zerado. A segunda é o WHERE das duas listas, que recorta os
+// SETORES: o Gestor com só a Padaria da loja vê a loja como a Padaria.
+func (s *OrdemServicoService) ObterIndicadoresDaLoja(ctx context.Context, tenantId, lojaId, usuarioId int64, perfil string) (model.IndicadoresLoja, error) {
+
+	repo := repository.New(s.Pool)
+
+	if _, err := repo.ObterLojaPorID(ctx, repository.ObterLojaPorIDParams{ID: lojaId, TenantID: tenantId}); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return model.IndicadoresLoja{}, helper.ErrNaoEncontrado
+		}
+		return model.IndicadoresLoja{}, helper.TraduzErroPostgres(err)
+	}
+
+	escopo := escopoDe(usuarioId, perfil)
+	if escopo != nil {
+		escopos, err := repo.ObterEscoposPorUsuario(ctx, usuarioId)
+		if err != nil {
+			return model.IndicadoresLoja{}, helper.TraduzErroPostgres(err)
+		}
+		alcanca := false
+		for _, e := range escopos {
+			if e.LojaID == lojaId {
+				alcanca = true
+				break
+			}
+		}
+		if !alcanca {
+			return model.IndicadoresLoja{}, helper.ErrNaoEncontrado
+		}
+	}
+
+	maquinas, err := repo.ListarMaquinas(ctx, repository.ListarMaquinasParams{
+		TenantID:        tenantId,
+		LojaID:          &lojaId,
+		EscopoUsuarioID: escopo,
+	})
+	if err != nil {
+		return model.IndicadoresLoja{}, helper.TraduzErroPostgres(err)
+	}
+
+	historico, err := repo.ListarHistoricoOsDaLoja(ctx, repository.ListarHistoricoOsDaLojaParams{
+		TenantID:        tenantId,
+		LojaID:          lojaId,
+		EscopoUsuarioID: escopo,
+	})
+	if err != nil {
+		return model.IndicadoresLoja{}, helper.TraduzErroPostgres(err)
+	}
+
+	return model.MontarIndicadoresLoja(lojaId, maquinas, historico), nil
+}

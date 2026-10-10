@@ -575,6 +575,27 @@ type Querier interface {
 	// não manda parâmetro nenhum e a tela do Administrador pagina no cliente
 	// (front-end/CLAUDE.md item 12).
 	ListarEmpresasTerceirizadas(ctx context.Context, tenantID int64) ([]EmpresaTerceirizada, error)
+	// GET /indicadores/lojas/:id -- a mesma matéria-prima de
+	// ListarHistoricoOsDaMaquina, só que de todas as máquinas da loja que quem
+	// chama alcança. O Painel de Indicadores abre a loja com o total dela, um card
+	// por setor e um por máquina; MontarIndicadoresLoja faz os três recortes sobre
+	// esta lista, em Go, pelo mesmo motivo da query por máquina.
+	//
+	// maquina_id e setor_id vêm na linha porque são as chaves do recorte -- e o
+	// MTBF de um grupo precisa separar as OS por máquina (ver mtbf no model).
+	//
+	// setor_id é o ATUAL da máquina, não o da solicitação: o painel mostra a
+	// máquina onde ela está hoje, e uma máquina transferida de setor leva o
+	// histórico junto.
+	//
+	// Escopo no WHERE, mesmo EXISTS de ListarMaquinas: o Gestor com só alguns
+	// setores da loja vê o agregado desses setores, não da loja inteira. Só
+	// máquina ativa, de novo como ListarMaquinas -- o total da loja tem que bater
+	// com a soma dos cards que a tela desenha.
+	//
+	// ⚠️ horas_* e custo_* CRUAS, mesma nota de ListarHistoricoOsDaMaquina.
+	// Ascendente pelo mesmo motivo da query por máquina: o MTBF percorre em ordem.
+	ListarHistoricoOsDaLoja(ctx context.Context, arg ListarHistoricoOsDaLojaParams) ([]ListarHistoricoOsDaLojaRow, error)
 	// GET /indicadores/maquinas/:id -- a matéria-prima do Painel de Indicadores do
 	// Gestor (front DashboardGestor). Uma linha por OS encerrada da máquina; as
 	// seis grandezas do painel (Horas Parada, MTTR, MTBF, Custo Total, rosca por

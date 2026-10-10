@@ -280,6 +280,23 @@ aqui. Ficou pronto e testado contra linhas inseridas na mão ANTES disso existir
 continua valendo: nada nesta seção mudou com o ciclo de vida, só passou a ter dado de
 verdade por trás.
 
+**Por loja (`GET /indicadores/lojas/:id`, feito):** a tela da loja no mesmo painel —
+o total, um item por setor e um por máquina (`IndicadoresLoja`), cada um com o próprio
+`porMes`, porque o mês clicado no gráfico da loja filtra todos os cards da tela. Sai de
+`ListarHistoricoOsDaLoja` (a mesma linha por OS, com `maquina_id`/`setor_id`, e o EXISTS
+de escopo de `ListarMaquinas`) e de `ListarMaquinas` (para toda máquina/setor ganhar
+card, zerado quando não tem OS). Os dois recortes usam o MESMO `resumir`
+(`MontarIndicadoresLoja`): o total da loja tem que bater com a soma do que a tela mostra.
+- **MTBF de grupo só mede entre OS da mesma máquina** (`mtbf` agrupa por `maquinaId`):
+  entre OS consecutivas do setor ele mediria o espaçamento entre falhas de máquinas
+  diferentes, que encolhe a cada máquina cadastrada sem nenhuma quebrar mais. Para uma
+  máquina só, é a conta de antes. MTTR e custo/horas são médias e somas diretas.
+- **Loja fora do escopo é 404** (checado contra `usuario_escopo` antes das listas), pelo
+  mesmo motivo da rota de máquina; o gestor com só alguns setores da loja recebe a loja
+  como a soma desses setores — o `WHERE` recorta, não o front.
+- `quantidadeOs` faz parte de `ResumoIndicadores` (total e cada mês): é o "em N OS" dos
+  cards da loja.
+
 - **A agregação é em Go, não no `SELECT`** (`MontarIndicadoresMaquina`, em
   `internal/model/indicadorMaquina.go`). Seis grandezas seriam três `GROUP BY` numa
   query só, e o MTBF (média do intervalo entre aberturas) ainda pediria `LAG`. Em Go são

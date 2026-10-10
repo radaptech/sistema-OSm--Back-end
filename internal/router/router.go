@@ -257,4 +257,9 @@ func ConfigurarRotas(r *gin.Engine, c *Container) {
 	// /indicadores em vez de /maquinas/:id/indicadores porque é a URL que o
 	// front já chama (servicos/servicoIndicadores.ts), e o contrato manda.
 	api.GET("/indicadores/maquinas/:id", middleware.AutenticacaoJwt(), middleware.Permitir("gestor", "administrador"), c.OrdemOS.Indicadores())
+
+	// GET /indicadores/lojas/:id -- a tela da loja no mesmo painel: total,
+	// setores e máquinas da loja numa ida só. Mesmo RBAC e mesmo recorte da rota
+	// de máquina; aqui o EXISTS de escopo recorta os setores da loja.
+	api.GET("/indicadores/lojas/:id", middleware.AutenticacaoJwt(), middleware.Permitir("gestor", "administrador"), c.OrdemOS.IndicadoresLoja())
 }
