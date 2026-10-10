@@ -7,6 +7,7 @@ import (
 	"slices"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/radaptech/sistema-OSm--Back-end/database/repository"
 	"github.com/radaptech/sistema-OSm--Back-end/internal/helper"
@@ -212,7 +213,62 @@ func montarUsuario(u repository.Usuario, escopos []repository.ObterEscoposSessao
 		SetoresIds:         setoresIds,
 		AcessoTotalSetores: acessoTotal,
 		Ativo:              u.Ativo,
+		ValorHora:          floatOuNil(u.ValorHora),
 	}
+}
+
+// areasPorId monta o id -> nome das áreas do tenant, para preencher `area`
+// das respostas de GET /usuarios(/:id). Uma query só por chamada, mesmo
+// numa página cheia de técnicos.
+func areasPorId(ctx context.Context, repo *repository.Queries, tenantId int64) (map[int16]string, error) {
+	areas, err := repo.ListarAreasTecnico(ctx, tenantId)
+	if err != nil {
+		return nil, helper.TraduzErroPostgres(err)
+	}
+	nomes := make(map[int16]string, len(areas))
+	for _, a := range areas {
+		nomes[a.ID] = a.Nome
+	}
+	return nomes, nil
+}
+
+// nomeDaArea devolve nil para quem não é técnico (area_tecnico_id NULL).
+func nomeDaArea(areas map[int16]string, id *int16) *string {
+	if id == nil {
+		return nil
+	}
+	nome, ok := areas[*id]
+	if !ok {
+		return nil
+	}
+	return &nome
+}
+
+// areaDoPerfil é a `area` da resposta de POST/PUT /usuarios: o nome que o
+// cliente mandou, já validado por resolverAreaTecnico, só no perfil técnico.
+func areaDoPerfil(perfil string, area *string) *string {
+	if perfil != "tecnico" {
+		return nil
+	}
+	return area
+}
+
+// valorHoraDoPerfil é o que vai para usuario.valor_hora: a tarifa só existe no
+// perfil técnico (ck_usuario_valor_hora). Fora dele é sempre NULL, mesmo que o
+// cliente mande um valor -- mesmo motivo de resolverAreaTecnico: trocar o
+// perfil de técnico para outro tem que limpar a coluna junto.
+func valorHoraDoPerfil(perfil string, valor *float64) pgtype.Float8 {
+	if perfil != "tecnico" || valor == nil {
+		return pgtype.Float8{}
+	}
+	return pgtype.Float8{Float64: *valor, Valid: true}
+}
+
+func floatOuNil(f pgtype.Float8) *float64 {
+	if !f.Valid {
+		return nil
+	}
+	return &f.Float64
 }
 
 // resolverAreaTecnico traduz o nome da área (o que o front manda) no
@@ -303,5 +359,6 @@ func comoNovoPayload(p model.AtualizarUsuarioPayload) model.NovoUsuarioPayload {
 		SetoresIds:         p.SetoresIds,
 		AcessoTotalSetores: p.AcessoTotalSetores,
 		Area:               p.Area,
+		ValorHora:          p.ValorHora,
 	}
 }

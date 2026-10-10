@@ -20,6 +20,9 @@ type NovoUsuarioPayload struct {
 	SetoresIds         []int64 `json:"setoresIds" binding:"dive,gt=0"`
 	AcessoTotalSetores bool    `json:"acessoTotalSetores"`
 	Area               *string `json:"area" binding:"required_if=Perfil tecnico"`
+	// ValorHora é a tarifa de referência do técnico (migration 000015).
+	// Opcional, e ignorado fora do perfil técnico -- o service grava NULL.
+	ValorHora *float64 `json:"valorHora" binding:"omitempty,gte=0"`
 }
 
 // AtualizarUsuarioPayload é o corpo de PUT /usuarios/:id -- igual a
@@ -35,12 +38,18 @@ type AtualizarUsuarioPayload struct {
 	SetoresIds         []int64 `json:"setoresIds" binding:"dive,gt=0"`
 	AcessoTotalSetores bool    `json:"acessoTotalSetores"`
 	Area               *string `json:"area" binding:"required_if=Perfil tecnico"`
+	// ValorHora é a tarifa de referência do técnico (migration 000015).
+	// Opcional, e ignorado fora do perfil técnico -- o service grava NULL.
+	ValorHora *float64 `json:"valorHora" binding:"omitempty,gte=0"`
 }
 
 // Usuario é o corpo devolvido por GET/POST/PUT /usuarios -- espelha Usuario
-// no front. Sem Senha de propósito: nem o hash volta pro cliente. Sem Area
-// também: técnico é lido via GET /tecnicos (tipo Tecnico próprio), não por
-// aqui -- mesma divisão do front (Usuario ≠ Tecnico).
+// no front. Sem Senha de propósito: nem o hash volta pro cliente.
+//
+// Area (só técnico) vem aqui também, e não só em GET /tecnicos: a tela de
+// edição (/cadastrar-usuario/:id) carrega GET /usuarios/:id e, sem a área,
+// abria o técnico com o campo obrigatório em branco -- salvar sem mexer nele
+// era impossível.
 type Usuario struct {
 	Id                 int64   `json:"id"`
 	Nome               string  `json:"nome"`
@@ -51,6 +60,11 @@ type Usuario struct {
 	SetoresIds         []int64 `json:"setoresIds"`
 	AcessoTotalSetores bool    `json:"acessoTotalSetores"`
 	Ativo              bool    `json:"ativo"`
+	// Nome da área de atuação ("Refrigeração"); só técnico, omitido nos demais.
+	Area *string `json:"area,omitempty"`
+	// Só técnico tem; omitido quando não há tarifa cadastrada. Vem aqui (e não
+	// só em GET /tecnicos) porque a tela de edição carrega GET /usuarios/:id.
+	ValorHora *float64 `json:"valorHora,omitempty"`
 }
 
 // Tecnico é o corpo de GET /tecnicos -- espelha Tecnico no front
@@ -70,4 +84,6 @@ type Tecnico struct {
 	Telefone *string `json:"telefone,omitempty"`
 	Area     string  `json:"area"`
 	LojasIds []int64 `json:"lojasIds"`
+	// Tarifa de referência cadastrada pelo Administrador; omitida se não houver.
+	ValorHora *float64 `json:"valorHora,omitempty"`
 }

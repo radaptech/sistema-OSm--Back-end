@@ -7,6 +7,8 @@ package repository
 
 import (
 	"context"
+
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 const atualizarSenhaUsuario = `-- name: AtualizarSenhaUsuario :exec
@@ -32,9 +34,10 @@ SET perfil = $3,
     area_tecnico_id = $4,
     nome = $5,
     email = $6,
-    telefone = $7
+    telefone = $7,
+    valor_hora = $8
 WHERE id = $1 AND tenant_id = $2
-RETURNING id, tenant_id, perfil, area_tecnico_id, nome, email, senha_hash, telefone, ativo, ultimo_acesso, criado_em, token_recuperacao_hash, token_recuperacao_expira_em
+RETURNING id, tenant_id, perfil, area_tecnico_id, nome, email, senha_hash, telefone, ativo, ultimo_acesso, criado_em, token_recuperacao_hash, token_recuperacao_expira_em, valor_hora
 `
 
 type AtualizarUsuarioParams struct {
@@ -45,6 +48,7 @@ type AtualizarUsuarioParams struct {
 	Nome          string
 	Email         string
 	Telefone      *string
+	ValorHora     pgtype.Float8
 }
 
 // Sem senha_hash -- troca de senha tem query própria (AtualizarSenhaUsuario),
@@ -59,6 +63,7 @@ func (q *Queries) AtualizarUsuario(ctx context.Context, arg AtualizarUsuarioPara
 		arg.Nome,
 		arg.Email,
 		arg.Telefone,
+		arg.ValorHora,
 	)
 	var i Usuario
 	err := row.Scan(
@@ -75,6 +80,7 @@ func (q *Queries) AtualizarUsuario(ctx context.Context, arg AtualizarUsuarioPara
 		&i.CriadoEm,
 		&i.TokenRecuperacaoHash,
 		&i.TokenRecuperacaoExpiraEm,
+		&i.ValorHora,
 	)
 	return i, err
 }
@@ -119,9 +125,9 @@ func (q *Queries) ContarUsuarios(ctx context.Context, arg ContarUsuariosParams) 
 
 const criarUsuario = `-- name: CriarUsuario :one
 
-INSERT INTO usuario (tenant_id, perfil, area_tecnico_id, nome, email, senha_hash, telefone)
-VALUES ($1, $2, $3, $4, $5, $6, $7)
-RETURNING id, tenant_id, perfil, area_tecnico_id, nome, email, senha_hash, telefone, ativo, ultimo_acesso, criado_em, token_recuperacao_hash, token_recuperacao_expira_em
+INSERT INTO usuario (tenant_id, perfil, area_tecnico_id, nome, email, senha_hash, telefone, valor_hora)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+RETURNING id, tenant_id, perfil, area_tecnico_id, nome, email, senha_hash, telefone, ativo, ultimo_acesso, criado_em, token_recuperacao_hash, token_recuperacao_expira_em, valor_hora
 `
 
 type CriarUsuarioParams struct {
@@ -132,6 +138,7 @@ type CriarUsuarioParams struct {
 	Email         string
 	SenhaHash     string
 	Telefone      *string
+	ValorHora     pgtype.Float8
 }
 
 // Exclusão é sempre soft delete (ativo = false) -- ver "Soft delete" em
@@ -146,6 +153,7 @@ func (q *Queries) CriarUsuario(ctx context.Context, arg CriarUsuarioParams) (Usu
 		arg.Email,
 		arg.SenhaHash,
 		arg.Telefone,
+		arg.ValorHora,
 	)
 	var i Usuario
 	err := row.Scan(
@@ -162,6 +170,7 @@ func (q *Queries) CriarUsuario(ctx context.Context, arg CriarUsuarioParams) (Usu
 		&i.CriadoEm,
 		&i.TokenRecuperacaoHash,
 		&i.TokenRecuperacaoExpiraEm,
+		&i.ValorHora,
 	)
 	return i, err
 }
@@ -194,6 +203,7 @@ SELECT
     u.nome,
     u.email,
     u.telefone,
+    u.valor_hora,
     a.nome AS area,
     COALESCE(
         array_agg(ue.loja_id) FILTER (WHERE ue.loja_id IS NOT NULL),
@@ -224,7 +234,7 @@ WHERE u.tenant_id = $1
         )
     )
   )
-GROUP BY u.id, u.nome, u.email, u.telefone, a.nome
+GROUP BY u.id, u.nome, u.email, u.telefone, u.valor_hora, a.nome
 ORDER BY u.nome
 `
 
@@ -235,12 +245,13 @@ type ListarTecnicosParams struct {
 }
 
 type ListarTecnicosRow struct {
-	ID       int64
-	Nome     string
-	Email    string
-	Telefone *string
-	Area     string
-	LojasIds []int64
+	ID        int64
+	Nome      string
+	Email     string
+	Telefone  *string
+	ValorHora pgtype.Float8
+	Area      string
+	LojasIds  []int64
 }
 
 // GET /tecnicos -- projeção somente-leitura sobre `usuario`, não tabela
@@ -292,6 +303,7 @@ func (q *Queries) ListarTecnicos(ctx context.Context, arg ListarTecnicosParams) 
 			&i.Nome,
 			&i.Email,
 			&i.Telefone,
+			&i.ValorHora,
 			&i.Area,
 			&i.LojasIds,
 		); err != nil {
@@ -306,7 +318,7 @@ func (q *Queries) ListarTecnicos(ctx context.Context, arg ListarTecnicosParams) 
 }
 
 const listarUsuarios = `-- name: ListarUsuarios :many
-SELECT id, tenant_id, perfil, area_tecnico_id, nome, email, senha_hash, telefone, ativo, ultimo_acesso, criado_em, token_recuperacao_hash, token_recuperacao_expira_em FROM usuario
+SELECT id, tenant_id, perfil, area_tecnico_id, nome, email, senha_hash, telefone, ativo, ultimo_acesso, criado_em, token_recuperacao_hash, token_recuperacao_expira_em, valor_hora FROM usuario
 WHERE tenant_id = $1
   AND ativo
   AND ($4::perfil_usuario IS NULL OR perfil = $4)
@@ -375,6 +387,7 @@ func (q *Queries) ListarUsuarios(ctx context.Context, arg ListarUsuariosParams) 
 			&i.CriadoEm,
 			&i.TokenRecuperacaoHash,
 			&i.TokenRecuperacaoExpiraEm,
+			&i.ValorHora,
 		); err != nil {
 			return nil, err
 		}
@@ -459,7 +472,7 @@ func (q *Queries) ObterGestoresDoSetor(ctx context.Context, arg ObterGestoresDoS
 }
 
 const obterUsuarioPorEmail = `-- name: ObterUsuarioPorEmail :one
-SELECT id, tenant_id, perfil, area_tecnico_id, nome, email, senha_hash, telefone, ativo, ultimo_acesso, criado_em, token_recuperacao_hash, token_recuperacao_expira_em FROM usuario
+SELECT id, tenant_id, perfil, area_tecnico_id, nome, email, senha_hash, telefone, ativo, ultimo_acesso, criado_em, token_recuperacao_hash, token_recuperacao_expira_em, valor_hora FROM usuario
 WHERE tenant_id = $1 AND email = $2 AND ativo
 `
 
@@ -486,12 +499,13 @@ func (q *Queries) ObterUsuarioPorEmail(ctx context.Context, arg ObterUsuarioPorE
 		&i.CriadoEm,
 		&i.TokenRecuperacaoHash,
 		&i.TokenRecuperacaoExpiraEm,
+		&i.ValorHora,
 	)
 	return i, err
 }
 
 const obterUsuarioPorID = `-- name: ObterUsuarioPorID :one
-SELECT id, tenant_id, perfil, area_tecnico_id, nome, email, senha_hash, telefone, ativo, ultimo_acesso, criado_em, token_recuperacao_hash, token_recuperacao_expira_em FROM usuario
+SELECT id, tenant_id, perfil, area_tecnico_id, nome, email, senha_hash, telefone, ativo, ultimo_acesso, criado_em, token_recuperacao_hash, token_recuperacao_expira_em, valor_hora FROM usuario
 WHERE id = $1 AND tenant_id = $2
 `
 
@@ -517,6 +531,7 @@ func (q *Queries) ObterUsuarioPorID(ctx context.Context, arg ObterUsuarioPorIDPa
 		&i.CriadoEm,
 		&i.TokenRecuperacaoHash,
 		&i.TokenRecuperacaoExpiraEm,
+		&i.ValorHora,
 	)
 	return i, err
 }

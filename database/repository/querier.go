@@ -564,6 +564,12 @@ type Querier interface {
 	// pgx.ErrNoRows quando a corrida perde, e o service traduz isso pra
 	// ErrConflitoIntegridade -- nunca 500.
 	IniciarOrdemServico(ctx context.Context, arg IniciarOrdemServicoParams) (OrdemServico, error)
+	// O caminho inverso de ObterAreaTecnicoPorNome: id -> nome, para devolver
+	// `area` em GET /usuarios(/:id) -- a tela de edição precisa dela para não
+	// abrir o técnico com a área em branco. Lista inteira e não um :one por
+	// usuário: são as poucas áreas do tenant, e a listagem paginada de usuários
+	// faria uma ida ao banco por técnico.
+	ListarAreasTecnico(ctx context.Context, tenantID int64) ([]ListarAreasTecnicoRow, error)
 	// Lido ANTES de ExcluirMaquinaDefinitivo, na mesma transação: depois do
 	// DELETE as chaves somem e os objetos ficariam órfãos no R2 sem ninguém
 	// saber quais eram. Quem apaga do R2 é o controller, depois do commit.

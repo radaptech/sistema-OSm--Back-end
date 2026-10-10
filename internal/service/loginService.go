@@ -59,6 +59,7 @@ func (s *UsuarioService) CadastrarUsuario(ctx context.Context, modelUser model.N
 		Email:         modelUser.Email,
 		SenhaHash:     string(senhaHash),
 		Telefone:      modelUser.Telefone,
+		ValorHora:     valorHoraDoPerfil(modelUser.Perfil, modelUser.ValorHora),
 	})
 	if err != nil {
 		return model.Usuario{}, helper.TraduzErroPostgres(err)
@@ -83,6 +84,8 @@ func (s *UsuarioService) CadastrarUsuario(ctx context.Context, modelUser model.N
 		SetoresIds:         setoresIds,
 		AcessoTotalSetores: acessoTotal,
 		Ativo:              usuario.Ativo,
+		Area:               areaDoPerfil(modelUser.Perfil, modelUser.Area),
+		ValorHora:          floatOuNil(usuario.ValorHora),
 	}, nil
 }
 
@@ -245,9 +248,16 @@ func (s *UsuarioService) ListarUsuarios(ctx context.Context, tenantId int64, pag
 		porUsuario[e.UsuarioID] = append(porUsuario[e.UsuarioID], e)
 	}
 
+	areas, err := areasPorId(ctx, repo, tenantId)
+	if err != nil {
+		return vazio, err
+	}
+
 	dados := make([]model.Usuario, 0, len(usuarios))
 	for _, u := range usuarios {
-		dados = append(dados, montarUsuario(u, porUsuario[u.ID]))
+		usuario := montarUsuario(u, porUsuario[u.ID])
+		usuario.Area = nomeDaArea(areas, u.AreaTecnicoID)
+		dados = append(dados, usuario)
 	}
 
 	return model.RespostaPaginada[model.Usuario]{
@@ -293,12 +303,13 @@ func (s *UsuarioService) ListarTecnicos(ctx context.Context, tenantId, usuarioId
 	dto := make([]model.Tecnico, 0, len(tecnicos))
 	for _, t := range tecnicos {
 		dto = append(dto, model.Tecnico{
-			Id:       t.ID,
-			Nome:     t.Nome,
-			Email:    t.Email,
-			Telefone: t.Telefone,
-			Area:     t.Area,
-			LojasIds: t.LojasIds,
+			Id:        t.ID,
+			Nome:      t.Nome,
+			Email:     t.Email,
+			Telefone:  t.Telefone,
+			Area:      t.Area,
+			LojasIds:  t.LojasIds,
+			ValorHora: floatOuNil(t.ValorHora),
 		})
 	}
 
@@ -336,6 +347,7 @@ func (s *UsuarioService) AtualizarUsuario(ctx context.Context, id int64, payload
 		Nome:          payload.Nome,
 		Email:         payload.Email,
 		Telefone:      payload.Telefone,
+		ValorHora:     valorHoraDoPerfil(payload.Perfil, payload.ValorHora),
 	})
 	if err != nil {
 		// Id de outro tenant cai aqui igual a id inexistente: o WHERE filtra
@@ -390,6 +402,8 @@ func (s *UsuarioService) AtualizarUsuario(ctx context.Context, id int64, payload
 		SetoresIds:         setoresIds,
 		AcessoTotalSetores: acessoTotal,
 		Ativo:              usuario.Ativo,
+		Area:               areaDoPerfil(payload.Perfil, payload.Area),
+		ValorHora:          floatOuNil(usuario.ValorHora),
 	}, nil
 }
 
@@ -466,5 +480,12 @@ func (s *UsuarioService) ObterUsuario(ctx context.Context, id, tenantId int64) (
 		return model.Usuario{}, helper.TraduzErroPostgres(err)
 	}
 
-	return montarUsuario(usuario, escopos), nil
+	areas, err := areasPorId(ctx, repo, tenantId)
+	if err != nil {
+		return model.Usuario{}, err
+	}
+
+	resposta := montarUsuario(usuario, escopos)
+	resposta.Area = nomeDaArea(areas, usuario.AreaTecnicoID)
+	return resposta, nil
 }

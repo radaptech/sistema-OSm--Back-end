@@ -9,6 +9,41 @@ import (
 	"context"
 )
 
+const listarAreasTecnico = `-- name: ListarAreasTecnico :many
+SELECT id, nome FROM area_tecnico
+WHERE tenant_id = $1
+`
+
+type ListarAreasTecnicoRow struct {
+	ID   int16
+	Nome string
+}
+
+// O caminho inverso de ObterAreaTecnicoPorNome: id -> nome, para devolver
+// `area` em GET /usuarios(/:id) -- a tela de edição precisa dela para não
+// abrir o técnico com a área em branco. Lista inteira e não um :one por
+// usuário: são as poucas áreas do tenant, e a listagem paginada de usuários
+// faria uma ida ao banco por técnico.
+func (q *Queries) ListarAreasTecnico(ctx context.Context, tenantID int64) ([]ListarAreasTecnicoRow, error) {
+	rows, err := q.db.Query(ctx, listarAreasTecnico, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListarAreasTecnicoRow
+	for rows.Next() {
+		var i ListarAreasTecnicoRow
+		if err := rows.Scan(&i.ID, &i.Nome); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const obterAreaTecnicoPorNome = `-- name: ObterAreaTecnicoPorNome :one
 SELECT id FROM area_tecnico
 WHERE tenant_id = $1 AND nome = $2
