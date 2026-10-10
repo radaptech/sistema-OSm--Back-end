@@ -215,7 +215,7 @@ OS é da solicitação, não de um lugar.
   As quatro são NULL em estado legítimo: `horas_*` só existem em OS encerrada
   (`vw_os_horas` é INNER em `os_encerramento`), `horas_parada` some também quando
   `afeta_producao` é falsa (o front exibe "Não se aplica", que **não** é zero), e
-  `custo_hora_tecnico` é nulo por regra em reparo e terceiros (`ck_custo_por_tipo`).
+  `custo_hora_tecnico` é nulo por regra em reparo (`ck_custo_por_tipo`). Em terceiros, desde a `000016`, ele é a mão de obra da EMPRESA e `custo_manutencao` o valor das peças — a tela troca os rótulos ("Valor Peças"/"Valor Mão de Obra").
 - ⚠️ **O override de `numeric` no `sqlc.yaml` nunca casou nada** — o `db_type` correto é
   `pg_catalog.numeric`, não `numeric`. É por isso que `shopspring/decimal` não está no
   `go.mod` e `models.go` seguia com `pgtype.Numeric`. Nunca doeu porque nenhuma query

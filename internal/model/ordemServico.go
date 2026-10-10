@@ -37,9 +37,10 @@ type EncerramentoOrdemServico struct {
 // CustoOrdemServico espelha CustoOrdemServico do front.
 //
 // CustoHoraTecnico é ponteiro e sem `omitempty` (front: `number | null`, sem
-// `?`): ck_custo_por_tipo proíbe hora técnica fora de 'maquinario' -- em
-// 'terceiros' quem trabalhou foi a empresa e em 'reparo' o serviço não cobra
-// hora. `null` ali é a regra de negócio aparecendo, não dado faltando.
+// `?`): ck_custo_por_tipo proíbe mão de obra em 'reparo', onde o serviço não
+// cobra hora. Em 'terceiros' (000016) a coluna é a mão de obra da EMPRESA, e
+// a tela troca o rótulo. `null` ali é a regra de negócio aparecendo, não dado
+// faltando (ou OS de terceiros anterior à 000016).
 //
 // TemNotaFiscal é a declaração do Técnico no encerramento: houve compra (peça,
 // material, fatura da empresa) ou foi só mão de obra? É ela que decide se a
@@ -154,8 +155,8 @@ type EncerramentoOrdemServicoPayload struct {
 // como campo vazio. Mesma armadilha que os custos escalares já evitavam.
 //
 // CustoHoraTecnico é ponteiro e opcional: uma tarefa pode ser só material (a
-// peça que o Técnico trocou sem cobrar hora). A regra "hora técnica só em
-// maquinário" NÃO cabe no binding: ela depende do tipo da OS, que só o service
+// peça que o Técnico trocou sem cobrar hora). A regra "reparo não tem mão de
+// obra" NÃO cabe no binding: ela depende do tipo da OS, que só o service
 // conhece -- é ele quem responde 400 nomeando o campo, antes de
 // ck_custo_item_hora_tecnico estourar como 422 genérico.
 type ItemCustoPayload struct {
