@@ -18,6 +18,7 @@ type LoginServiceInterface interface {
 	CadastrarUsuario(ctx context.Context, modelUser model.NovoUsuarioPayload, TenantID int64) (model.Usuario, error)
 	Login(ctx context.Context, loginModel model.Login, tenantId int64) (string, model.SessaoUsuario, error)
 	ObterSessao(ctx context.Context, userId, tenantId int64) (model.SessaoUsuario, error)
+	EncerrarSessao(ctx context.Context, segredo string) error
 	ListarUsuarios(ctx context.Context, tenantId int64, pagina int32, perfil, busca *string, lojaId *int64) (model.RespostaPaginada[model.Usuario], error)
 	ListarTecnicos(ctx context.Context, tenantId, usuarioId int64, perfil string, lojaId *int64) ([]model.Tecnico, error)
 	ObterUsuario(ctx context.Context, id, tenantId int64) (model.Usuario, error)
@@ -34,21 +35,6 @@ func NewLoginController(service LoginServiceInterface) *LoginController {
 	return &LoginController{
 		service: service,
 	}
-}
-
-// cookieSessao escreve o cookie que middleware.AutenticacaoJwt lê. Login e
-// logout passam por aqui de propósito: o browser só apaga um cookie se o
-// Set-Cookie de remoção casar com o de criação, e um Set-Cookie sem Secure
-// vindo de origem insegura nem sobrescreve um cookie Secure.
-//
-// SameSite Lax: front e API ficam sob o mesmo domínio registrável
-// (*.radaptech.com.br, localhost em dev), então o cookie viaja. Só vira
-// SameSiteNone (que obriga Secure) se o front sair pra outro domínio.
-// maxAge 86400 (24h) é maior que o exp do JWT (8h, auth.GerarJwt): passado o
-// exp o middleware rejeita e o 401 do /sessao apaga o cookie. -1 apaga.
-func cookieSessao(ctx *gin.Context, token string, maxAge int) {
-	ctx.SetSameSite(http.SameSiteLaxMode)
-	ctx.SetCookie("token", token, maxAge, "/", "", true, true)
 }
 
 func (l *LoginController) Registrar() gin.HandlerFunc {
@@ -117,7 +103,7 @@ func (l *LoginController) Login() gin.HandlerFunc {
 			return
 		}
 
-		token, user, err := l.service.Login(ctx.Request.Context(), input, tenantId)
+		segredo, user, err := l.service.Login(ctx.Request.Context(), input, tenantId)
 		if err != nil {
 
 			switch {
@@ -130,7 +116,7 @@ func (l *LoginController) Login() gin.HandlerFunc {
 			return
 		}
 
-		cookieSessao(ctx, token, 86400)
+		middleware.GravarCookieSessao(ctx, segredo, middleware.DuracaoCookieSessao)
 
 		ctx.JSON(http.StatusOK, user)
 	}
@@ -140,7 +126,18 @@ func (l *LoginController) Logout() gin.HandlerFunc {
 
 	return func(ctx *gin.Context) {
 
-		cookieSessao(ctx, "", -1)
+		// Apaga a sessão no servidor, não só o cookie: uma cópia do cookie
+		// deixa de valer junto. Rota sem o middleware de autenticação de
+		// propósito -- sair com a sessão já vencida também tem que funcionar.
+		if segredo := middleware.SegredoSessao(ctx); segredo != "" {
+			if err := l.service.EncerrarSessao(ctx.Request.Context(), segredo); err != nil {
+				slog.ErrorContext(ctx.Request.Context(), "encerrar sessão", "err", err)
+				ctx.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao sair"})
+				return
+			}
+		}
+
+		middleware.GravarCookieSessao(ctx, "", -1)
 
 		ctx.JSON(http.StatusOK, gin.H{"message": "Logout realizado com sucesso"})
 	}
@@ -148,7 +145,7 @@ func (l *LoginController) Logout() gin.HandlerFunc {
 
 // Sessao é GET /autenticacao/sessao: o front chama no boot pra saber quem
 // está logado sem guardar nada em localStorage. Roda atrás de
-// AutenticacaoJwt, então usuário e tenant vêm do token.
+// middleware.Autenticacao, então usuário e tenant vêm da sessão.
 func (l *LoginController) Sessao() gin.HandlerFunc {
 
 	return func(ctx *gin.Context) {
@@ -167,7 +164,7 @@ func (l *LoginController) Sessao() gin.HandlerFunc {
 			// Token assinado mas o dono sumiu/foi desativado: sessão morta.
 			// 401 aqui é o que faz o front deslogar sozinho.
 			case errors.Is(err, helper.ErrSessaoExpirada):
-				cookieSessao(ctx, "", -1)
+				middleware.GravarCookieSessao(ctx, "", -1)
 				ctx.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
 			default:
 				slog.ErrorContext(ctx.Request.Context(), "obter sessao", "usuario", userId, "tenant", tenantId, "err", err)

@@ -29,6 +29,14 @@ type Querier interface {
 	// ErrConflitoIntegridade via TraduzErroPostgres, mesmo caminho de
 	// CriarOrdemServicoDeSolicitacao com tecnico_id inexistente.
 	AcionarTerceiro(ctx context.Context, arg AcionarTerceiroParams) (OrdemServico, error)
+	// Logout: derruba só a sessão deste aparelho.
+	ApagarSessao(ctx context.Context, tokenHash []byte) error
+	// Todas as sessões de um usuário, em todos os aparelhos: desativação e troca
+	// de senha (a de recuperação e a que o Administrador faz na edição).
+	ApagarSessoesDoUsuario(ctx context.Context, arg ApagarSessoesDoUsuarioParams) error
+	// Limpeza das que passaram de um dos dois prazos, chamada no login (de
+	// qualquer usuário: a tabela é pequena e sem isso ela só cresceria).
+	ApagarSessoesVencidas(ctx context.Context, arg ApagarSessoesVencidasParams) error
 	// POST /ordens-servico/:id/custo -- a correção prometida no comentário de
 	// CriarCusto acima. lancado_por_id passa a ser o Administrador que corrige,
 	// não mais o Técnico do encerramento; lancado_em anda junto (é "a última vez
@@ -409,6 +417,9 @@ type Querier interface {
 	// no schema para a migration não falhar com dado dentro, mas o service exige
 	// o campo -- preventiva sem técnico não tem para quem abrir OS.
 	CriarPreventiva(ctx context.Context, arg CriarPreventivaParams) (Preventiva, error)
+	// Uma linha por login. token_hash é o SHA-256 do segredo que vai no cookie
+	// (ver a migration 000022): o segredo em si nunca chega ao banco.
+	CriarSessao(ctx context.Context, arg CriarSessaoParams) error
 	// Setor pertence a uma loja. Exclusão é soft delete (ativo = false) -- ver
 	// "Soft delete" em docs/modelagem-banco-dados.md: máquina, solicitação e o
 	// escopo de acesso apontam pro setor.
@@ -572,7 +583,7 @@ type Querier interface {
 	// de verdade. Já desativado conta 1 mesmo assim: o UPDATE casa a linha.
 	DesativarUsuario(ctx context.Context, arg DesativarUsuarioParams) (int64, error)
 	// Usado por ObterSessao: desativar uma empresa precisa derrubar as sessões
-	// abertas dela, senão um token emitido antes continua valendo até expirar (8h).
+	// abertas dela (o middleware também confere, em ValidarSessao).
 	// Query própria em vez de JOIN em ObterUsuarioPorID porque aquela devolve
 	// repository.Usuario, que montarSessao consome inteiro -- virar Row ali
 	// espalharia a mudança por todo o caminho da sessão.
@@ -1265,7 +1276,8 @@ type Querier interface {
 	// (ListarPreventivasVencidas filtra m.ativa).
 	ReativarMaquina(ctx context.Context, arg ReativarMaquinaParams) (int64, error)
 	// Troca a senha e queima o token no mesmo UPDATE: dois cliques no mesmo link não passam os dois.
-	// 0 linhas = token inexistente, expirado, de outro tenant ou de usuário desativado -- o cliente não distingue.
+	// Sem linha (pgx.ErrNoRows) = token inexistente, expirado, de outro tenant ou de usuário
+	// desativado -- o cliente não distingue. Devolve o id para o service derrubar as sessões dele.
 	RedefinirSenhaPorToken(ctx context.Context, arg RedefinirSenhaPorTokenParams) (int64, error)
 	RegistrarUltimoAcesso(ctx context.Context, arg RegistrarUltimoAcessoParams) error
 	// ck_rejeicao exige os três juntos (motivo, autor, instante) -- por isso
@@ -1317,6 +1329,20 @@ type Querier interface {
 	// escopo por loja, sempre acesso_total_setores (ver o topo do arquivo), então
 	// basta a linha da loja.
 	TecnicoAtendeLoja(ctx context.Context, arg TecnicoAtendeLojaParams) (bool, error)
+	// Estica a sessão: é o ultimo_uso_em que conta os 14 dias. O service só chama
+	// quando o último toque já tem mais de um minuto -- sem isso cada request
+	// viraria um UPDATE.
+	TocarSessao(ctx context.Context, id int64) error
+	// O que o middleware de autenticação roda a cada request. Devolve quem é o
+	// dono só se a sessão ainda vale: usada nos últimos 14 dias, criada nos
+	// últimos 60 (os dois limites vêm do service, já calculados), usuário ativo e
+	// empresa ativa. O perfil sai da linha do usuário, então trocar o perfil de
+	// alguém vale no próximo request, não no próximo login.
+	//
+	// Sem filtro de tenant por parâmetro, e não é esquecimento: o tenant
+	// autoritativo é o DA SESSÃO (é ele que o middleware põe no contexto), como
+	// antes era o do JWT. O segredo de 256 bits é que identifica a linha.
+	ValidarSessao(ctx context.Context, arg ValidarSessaoParams) (ValidarSessaoRow, error)
 }
 
 var _ Querier = (*Queries)(nil)

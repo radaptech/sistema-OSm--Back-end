@@ -37,7 +37,7 @@ func (h handlerComRequestID) WithGroup(nome string) slog.Handler {
 
 // LogRequest substitui o logger texto do gin.Default: uma linha JSON por request.
 // O X-Request-ID volta na resposta para o suporte achar o request pelo que o
-// cliente viu. Tenant e usuário só existem depois do JWT, por isso são lidos no fim.
+// cliente viu. Tenant e usuário só existem depois da sessão, por isso são lidos no fim.
 func LogRequest() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		inicio := time.Now()

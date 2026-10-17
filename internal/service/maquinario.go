@@ -314,8 +314,8 @@ func (m *MaquinarioService) ExcluirMaquinaDefinitivo(ctx context.Context, tenant
 		return nil, nil, helper.TraduzErroPostgres(err)
 	}
 
-	// !Ativo: o JWT não consulta o banco, então um administrador desativado
-	// segue com token válido até expirar -- aqui o custo disso seria apagar dados.
+	// !Ativo: a sessão já cai com o usuário desativado (middleware), mas aqui o
+	// custo de um furo seria apagar dados -- a confirmação confere de novo.
 	if ok, err := auth.HashCompare([]byte(usuario.SenhaHash), payload.Senha); err != nil || !ok || !usuario.Ativo {
 		return nil, nil, helper.ErrSenhaIncorreta
 	}

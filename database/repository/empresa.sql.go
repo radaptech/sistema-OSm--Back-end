@@ -15,7 +15,7 @@ WHERE id = $1
 `
 
 // Usado por ObterSessao: desativar uma empresa precisa derrubar as sessões
-// abertas dela, senão um token emitido antes continua valendo até expirar (8h).
+// abertas dela (o middleware também confere, em ValidarSessao).
 // Query própria em vez de JOIN em ObterUsuarioPorID porque aquela devolve
 // repository.Usuario, que montarSessao consome inteiro -- virar Row ali
 // espalharia a mudança por todo o caminho da sessão.

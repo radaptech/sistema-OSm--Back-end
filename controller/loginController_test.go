@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -20,6 +21,7 @@ type serviceFake struct {
 	recebido   *filtrosRecebidos  // opcional: só ListarUsuarios grava aqui
 	desativado *[2]int64          // opcional: {id alvo, ator} de DesativarUsuario
 	tecnicos   *tecnicosRecebidos // opcional: só ListarTecnicos grava aqui
+	encerrado  *string            // opcional: o segredo que o logout mandou apagar
 }
 
 // ListarTecnicos filtra por loja E pelo escopo de quem chama -- os dois vêm de
@@ -31,7 +33,7 @@ type tecnicosRecebidos struct {
 	perfil    string
 }
 
-const tokenFake = "jwt.de.mentira"
+const segredoFake = "segredo-de-mentira"
 
 func (s serviceFake) CadastrarUsuario(context.Context, model.NovoUsuarioPayload, int64) (model.Usuario, error) {
 	return model.Usuario{Id: 1}, s.err
@@ -41,7 +43,14 @@ func (s serviceFake) Login(context.Context, model.Login, int64) (string, model.S
 	if s.err != nil {
 		return "", model.SessaoUsuario{}, s.err
 	}
-	return tokenFake, model.SessaoUsuario{Id: 1, Nome: "Davi"}, nil
+	return segredoFake, model.SessaoUsuario{Id: 1, Nome: "Davi"}, nil
+}
+
+func (s serviceFake) EncerrarSessao(_ context.Context, segredo string) error {
+	if s.encerrado != nil {
+		*s.encerrado = segredo
+	}
+	return s.err
 }
 
 func (s serviceFake) ObterSessao(context.Context, int64, int64) (model.SessaoUsuario, error) {
@@ -170,11 +179,12 @@ func TestLogin(t *testing.T) {
 
 			cookie := w.Header().Get("Set-Cookie")
 			if c.temCookie {
-				// O nome tem que bater com o que AutenticacaoJwt lê.
-				if !strings.HasPrefix(cookie, "token="+tokenFake) {
+				// O nome tem que bater com o que middleware.Autenticacao lê.
+				if !strings.HasPrefix(cookie, "token="+segredoFake) {
 					t.Fatalf("cookie de sessão ausente ou com nome errado: %q", cookie)
 				}
-				for _, flag := range []string{"HttpOnly", "Secure", "Max-Age=86400"} {
+				// 60 dias: o teto da sessão. Quem decide se ela ainda vale é o banco.
+				for _, flag := range []string{"HttpOnly", "Secure", "Max-Age=5184000"} {
 					if !strings.Contains(cookie, flag) {
 						t.Errorf("cookie sem %s: %q", flag, cookie)
 					}
@@ -227,7 +237,7 @@ func TestSessao(t *testing.T) {
 	}
 }
 
-// Sem os claims no contexto (AutenticacaoJwt não rodou) a sessão não pode ser
+// Sem o ator no contexto (middleware.Autenticacao não rodou) a sessão não pode ser
 // montada com id zero.
 func TestSessaoSemClaims(t *testing.T) {
 
@@ -272,7 +282,39 @@ func TestLogoutApagaCookieCompativelComOLogin(t *testing.T) {
 	}
 }
 
-// Sem tenant no contexto (AutenticacaoJwt não rodou) o handler não pode
+// Logout apaga a sessão NO SERVIDOR (uma cópia do cookie deixa de valer), não
+// só o cookie; e se o banco falhar, diz que falhou em vez de fingir que saiu.
+func TestLogoutEncerraASessaoNoServidor(t *testing.T) {
+
+	gin.SetMode(gin.TestMode)
+
+	sair := func(fake serviceFake, cookie string) *httptest.ResponseRecorder {
+		w := httptest.NewRecorder()
+		ctx, _ := gin.CreateTestContext(w)
+		ctx.Request = httptest.NewRequest(http.MethodPost, "/autenticacao/logout", nil)
+		if cookie != "" {
+			ctx.Request.AddCookie(&http.Cookie{Name: "token", Value: cookie})
+		}
+		NewLoginController(fake).Logout()(ctx)
+		return w
+	}
+
+	var encerrado string
+	if w := sair(serviceFake{encerrado: &encerrado}, "segredo-do-aparelho"); w.Code != http.StatusOK || encerrado != "segredo-do-aparelho" {
+		t.Errorf("status %d, sessão encerrada %q, esperado 200 e o segredo do cookie", w.Code, encerrado)
+	}
+
+	encerrado = ""
+	if w := sair(serviceFake{encerrado: &encerrado}, ""); w.Code != http.StatusOK || encerrado != "" {
+		t.Errorf("sem cookie: status %d, encerrado %q, esperado 200 sem chamar o service", w.Code, encerrado)
+	}
+
+	if w := sair(serviceFake{err: errors.New("banco fora")}, "segredo"); w.Code != http.StatusInternalServerError {
+		t.Errorf("banco fora: status %d, esperado 500", w.Code)
+	}
+}
+
+// Sem tenant no contexto (middleware.Autenticacao não rodou) o handler não pode
 // escrever no banco com tenant zero.
 func TestRegistrarSemTenantNaoChamaService(t *testing.T) {
 

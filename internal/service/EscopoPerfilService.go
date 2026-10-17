@@ -115,8 +115,8 @@ func validarEscopo(p model.NovoUsuarioPayload) error {
 	return nil
 }
 
-// montarSessao resolve fresco no banco tudo que o JWT não carrega de
-// propósito (escopo, área, ativo) -- é o mesmo corpo de GET
+// montarSessao resolve fresco no banco tudo que a sessão não carrega de
+// propósito (escopo, área) -- é o mesmo corpo de GET
 // /autenticacao/sessao, por isso está separado do Login.
 func (s *UsuarioService) montarSessao(ctx context.Context, repo *repository.Queries, user repository.Usuario, tenantId int64) (model.SessaoUsuario, error) {
 

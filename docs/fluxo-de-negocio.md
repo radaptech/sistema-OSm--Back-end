@@ -591,8 +591,7 @@ curto para ninguém mais ler a notificação de solicitação de verdade.
 - **Configurar o Cron Job no Railway** (o que falta): mesmo repo, **Dockerfile Path
   `dockerfile`** (produção, não o `.dev`), **Custom Start Command `./main
   preventivas-vencidas`** — o comando inteiro, mesma armadilha do Cron-BACKUP (ver "Backup
-  do banco"). Variáveis: as `DB_*` + `DB_SSLMODE`; **não precisa das `R2_*` nem da
-  `JWT_SECRET`**. **Mais `VAPID_PUBLIC_KEY`/`_PRIVATE_KEY`/`_SUBJECT`, as mesmas da API**, se quiser que o aviso
+  do banco"). Variáveis: as `DB_*` + `DB_SSLMODE`; **não precisa das `R2_*`**. **Mais `VAPID_PUBLIC_KEY`/`_PRIVATE_KEY`/`_SUBJECT`, as mesmas da API**, se quiser que o aviso
   chegue também como push no celular: sem elas o job grava a notificação (o sininho) e só não manda o push.
   ⚠️ O job é um processo à parte da API e **monta o próprio notificador**
   (`NewNotificacaoDoAmbiente`, também usado pelo router) e espera os avisos terminarem

@@ -89,17 +89,13 @@ func (s *UsuarioService) CadastrarUsuario(ctx context.Context, modelUser model.N
 	}, nil
 }
 
-// ObterSessao remonta a sessão do dono do token a cada request de
-// GET /autenticacao/sessao. É aqui que mora tudo que o JWT não carrega de
-// propósito (escopo, área, ativo): editar o escopo de um gestor ou desativar
-// um usuário vale na próxima chamada, não só quando o token expirar.
+// ObterSessao remonta a sessão do dono dela a cada request de
+// GET /autenticacao/sessao: o corpo que o front consome (escopo, área...).
 //
-// Usuário sumido ou desativado devolve ErrSessaoExpirada -- token válido para
-// alguém que não existe mais é sessão morta, não erro de servidor
-// (ObterUsuarioPorID não filtra `ativo`, diferente de ObterUsuarioPorEmail).
-// A empresa desativada cai no mesmo lugar: sem esse cheque, desativar um
-// tenant só barrava login novo (ObterEmpresaPorSubdominio filtra `ativa`) e
-// quem já estava dentro seguia trabalhando até o exp.
+// Usuário sumido ou desativado e empresa desativada devolvem
+// ErrSessaoExpirada. O middleware (ValidarSessao) já barra os três antes de
+// chegar aqui; o cheque fica como segunda linha, barata, e porque este
+// service também é chamado direto pelos testes.
 func (s *UsuarioService) ObterSessao(ctx context.Context, userId, tenantId int64) (model.SessaoUsuario, error) {
 
 	repo := repository.New(s.Pool)
@@ -136,11 +132,11 @@ func (s *UsuarioService) ObterSessao(ctx context.Context, userId, tenantId int64
 }
 
 // Login autentica no tenant vindo do header X-tenant-ID (o único momento em
-// que ele manda -- depois disso o tenant autoritativo é o do token) e devolve
-// o JWT já assinado + a sessão que o front consome.
+// que ele manda -- depois disso o tenant autoritativo é o da sessão) e devolve
+// o segredo da sessão nova (vai no cookie) + a sessão que o front consome.
 //
-// Sem transação de propósito: são leituras + um UPDATE de ultimo_acesso que
-// não precisam ser atômicos entre si.
+// Sem transação de propósito: leituras, a sessão nova e um UPDATE de
+// ultimo_acesso que não precisam ser atômicos entre si.
 func (s *UsuarioService) Login(ctx context.Context, loginModel model.Login, tenantId int64) (string, model.SessaoUsuario, error) {
 
 	repo := repository.New(s.Pool)
@@ -164,17 +160,17 @@ func (s *UsuarioService) Login(ctx context.Context, loginModel model.Login, tena
 	}
 
 	// Sem cheque de perfil: ele saiu do corpo do login (ver model.Login). O
-	// perfil autoritativo é o da linha do banco, e é ele que vai para o token e
-	// para a sessão logo abaixo -- comparar com um palpite do cliente só
-	// transformava "escolhi a aba errada" em "credenciais inválidas".
+	// perfil autoritativo é o da linha do banco, e é ele que a sessão usa a
+	// cada request -- comparar com um palpite do cliente só transformava
+	// "escolhi a aba errada" em "credenciais inválidas".
 	sessao, err := s.montarSessao(ctx, repo, user, tenantId)
 	if err != nil {
 		return "", model.SessaoUsuario{}, err
 	}
 
-	token, err := auth.GerarJwt(user.ID, tenantId, string(user.Perfil))
+	segredo, err := criarSessao(ctx, repo, tenantId, user.ID)
 	if err != nil {
-		return "", model.SessaoUsuario{}, fmt.Errorf("erro ao gerar token jwt: %w", err)
+		return "", model.SessaoUsuario{}, fmt.Errorf("erro ao criar sessão: %w", err)
 	}
 
 	err = repo.RegistrarUltimoAcesso(ctx, repository.RegistrarUltimoAcessoParams{
@@ -185,7 +181,23 @@ func (s *UsuarioService) Login(ctx context.Context, loginModel model.Login, tena
 		return "", model.SessaoUsuario{}, helper.TraduzErroPostgres(err)
 	}
 
-	return token, sessao, nil
+	return segredo, sessao, nil
+}
+
+// EncerrarSessao é o logout: apaga a sessão deste aparelho (as outras do
+// usuário seguem). Segredo malformado ou sessão que já não existe não é erro
+// -- o resultado pedido, não estar logado com este cookie, já vale.
+func (s *UsuarioService) EncerrarSessao(ctx context.Context, segredo string) error {
+
+	hash, ok := hashSegredoSessao(segredo)
+	if !ok {
+		return nil
+	}
+
+	if err := repository.New(s.Pool).ApagarSessao(ctx, hash); err != nil {
+		return helper.TraduzErroPostgres(err)
+	}
+	return nil
 }
 
 // TamanhoPaginaUsuarios é o tamanho de página de GET /usuarios -- o front
@@ -370,6 +382,11 @@ func (s *UsuarioService) AtualizarUsuario(ctx context.Context, id int64, payload
 		}); err != nil {
 			return model.Usuario{}, helper.TraduzErroPostgres(err)
 		}
+		// Senha nova derruba as sessões abertas com a velha, em todo aparelho:
+		// é o que se espera de "troquei a senha porque alguém sabia dela".
+		if err := apagarSessoesDoUsuario(ctx, repo, tenantId, id); err != nil {
+			return model.Usuario{}, err
+		}
 	}
 
 	if err := repo.DeletarSetoresDosEscoposPorUsuario(ctx, id); err != nil {
@@ -426,7 +443,13 @@ func (s *UsuarioService) DesativarUsuario(ctx context.Context, id, tenantId, ato
 		return fmt.Errorf("%w: um usuário não pode desativar a si mesmo", helper.ErrValidacao)
 	}
 
-	repo := repository.New(s.Pool)
+	tx, err := s.Pool.Begin(ctx)
+	if err != nil {
+		return helper.TraduzErroPostgres(err)
+	}
+	defer tx.Rollback(ctx)
+
+	repo := repository.New(tx)
 
 	linhas, err := repo.DesativarUsuario(ctx, repository.DesativarUsuarioParams{
 		ID:       id,
@@ -442,6 +465,16 @@ func (s *UsuarioService) DesativarUsuario(ctx context.Context, id, tenantId, ato
 		return helper.ErrNaoEncontrado
 	}
 
+	// O middleware já recusa a sessão de usuário inativo (ValidarSessao filtra
+	// u.ativo); apagar aqui é para não sobrar linha de quem não entra mais --
+	// e para uma reativação futura não ressuscitar sessões antigas.
+	if err := apagarSessoesDoUsuario(ctx, repo, tenantId, id); err != nil {
+		return err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return helper.TraduzErroPostgres(err)
+	}
 	return nil
 }
 

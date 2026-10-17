@@ -8,8 +8,8 @@ Leia quando algo não subir, a porta não conectar ou o teste de integração pu
 
 ## Ambiente local
 - `.env` na raiz (modelo em `.env-example`): `DB_SERVER`, `DB_USER`, `DB_PORT`, `DATABASE`,
-  `DB_PASSWORD` (`DB_SSLMODE` opcional, default `disable`) e `JWT_SECRET` — os únicos
-  obrigatórios. Opcionais, e sem eles só o recurso correspondente falha: `R2_*` (upload e
+  `DB_PASSWORD` (`DB_SSLMODE` opcional, default `disable`) — os únicos obrigatórios
+  (`JWT_SECRET` não é mais lida desde a sessão no banco, migration `000022`). Opcionais, e sem eles só o recurso correspondente falha: `R2_*` (upload e
   foto), `VAPID_*` (Web Push — `make chaves-vapid` imprime um par), `RESEND_API_KEY` + `URL_FRONTEND_FORMATO` (e-mail de
   recuperação de senha; sem a chave o pedido responde 200 e o envio falha no log). `TRUSTED_PROXIES` **não**
   fica no `.env`: vem do `environment` do compose em dev (é endereço de infra, muda com

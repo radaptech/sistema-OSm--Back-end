@@ -76,19 +76,35 @@ func (s *RecuperacaoSenhaService) RedefinirSenha(ctx context.Context, tenantId i
 		return fmt.Errorf("erro ao gerar hash da senha: %w", err)
 	}
 
-	linhas, err := repository.New(s.Pool).RedefinirSenhaPorToken(ctx, repository.RedefinirSenhaPorTokenParams{
+	tx, err := s.Pool.Begin(ctx)
+	if err != nil {
+		return helper.TraduzErroPostgres(err)
+	}
+	defer tx.Rollback(ctx)
+
+	repo := repository.New(tx)
+
+	usuarioId, err := repo.RedefinirSenhaPorToken(ctx, repository.RedefinirSenhaPorTokenParams{
 		SenhaHash: string(senhaHash),
 		TenantID:  tenantId,
 		TokenHash: hashTokenRecuperacao(token),
 	})
 	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return helper.ErrTokenRecuperacaoInvalido
+		}
 		return helper.TraduzErroPostgres(err)
 	}
 
-	if linhas == 0 {
-		return helper.ErrTokenRecuperacaoInvalido
+	// Quem pede recuperação pode estar fugindo de alguém que sabia a senha
+	// velha: as sessões abertas com ela caem em todo aparelho.
+	if err := apagarSessoesDoUsuario(ctx, repo, tenantId, usuarioId); err != nil {
+		return err
 	}
 
+	if err := tx.Commit(ctx); err != nil {
+		return helper.TraduzErroPostgres(err)
+	}
 	return nil
 }
 

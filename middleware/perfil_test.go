@@ -15,7 +15,7 @@ func TestPermitir(t *testing.T) {
 	casos := []struct {
 		nome   string
 		perfis []string
-		atual  string // "" = AutenticacaoJwt não rodou
+		atual  string // "" = Autenticacao não rodou
 		passa  bool
 	}{
 		{"perfil unico bate", []string{"administrador"}, "administrador", true},

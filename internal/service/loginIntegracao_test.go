@@ -121,8 +121,6 @@ func tecnicoParaPreventiva(t *testing.T, ctx context.Context, pool *pgxpool.Pool
 }
 
 func TestLogin(t *testing.T) {
-	t.Setenv("JWT_SECRET", "segredo-de-teste-nao-usar-em-producao")
-
 	ctx := context.Background()
 	pool := bancoDeTeste(t)
 	svc := NewRepoUsuario(pool)
@@ -486,9 +484,7 @@ func TestListarUsuarios(t *testing.T) {
 // sem banco de verdade.
 func TestAtualizarEDesativarUsuario(t *testing.T) {
 
-	// Os casos de senha conferem o resultado via Login, que assina um JWT.
-	t.Setenv("JWT_SECRET", "segredo-de-teste-nao-usar-em-producao")
-
+	// Os casos de senha conferem o resultado via Login.
 	ctx := context.Background()
 	pool := bancoDeTeste(t)
 	svc := NewRepoUsuario(pool)
@@ -830,10 +826,8 @@ func TestObterUsuario(t *testing.T) {
 }
 
 // Desativar um tenant precisa derrubar quem já está dentro. Antes disto o
-// AND ativa só existia no login: token emitido antes seguia valendo até o exp.
+// AND ativa só existia no login: quem já estava dentro seguia trabalhando.
 func TestSessaoMorreComTenantDesativado(t *testing.T) {
-
-	t.Setenv("JWT_SECRET", "segredo-de-teste-nao-usar-em-producao")
 
 	ctx := context.Background()
 	pool := bancoDeTeste(t)

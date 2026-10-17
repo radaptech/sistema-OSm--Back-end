@@ -191,8 +191,7 @@ suspeitosamente rápido (provavelmente é `t.Skip` por falta de Postgres).
   arquivo estiver fora de formato), `go vet`, `go test -race ./...`.
 - **O job sobe um service container de Postgres 16 e exporta `TEST_DB_DSN`** apontando
   pra `localhost:5432`. Sem ele o `loginIntegracao_test.go` daria `t.Skip` e o CI
-  passaria verde tendo rodado só os unitários — pior que não ter CI. `JWT_SECRET`
-  também vai no env do job: `AutenticacaoJwt` dá `panic` sem ela.
+  passaria verde tendo rodado só os unitários — pior que não ter CI.
 - **Não há job de deploy de propósito**: o Railway redeploya sozinho no push do branch
   conectado. Um job aqui seria uma segunda fonte da verdade + um `RAILWAY_TOKEN` pra
   guardar. Migrations rodam no boot (`main.go`), então também não precisam de passo.

@@ -213,7 +213,7 @@ func (o ordemServicoFake) CorrigirCusto(_ context.Context, _, atorId, ordemServi
 	}, nil
 }
 
-// contextoOS monta a requisição já autenticada, como o AutenticacaoJwt
+// contextoOS monta a requisição já autenticada, como o middleware.Autenticacao
 // deixaria: tenant, id e perfil no contexto do Gin.
 //
 // Recebe url.Values e não uma string crua de propósito: é o que o front manda
@@ -378,7 +378,7 @@ func TestOrdemServicoAtorVemDoToken(t *testing.T) {
 	}
 }
 
-// Claim ausente é 500 (bug de wiring da rota -- o AutenticacaoJwt já devia ter
+// Claim ausente é 500 (bug de wiring da rota -- o middleware.Autenticacao já devia ter
 // garantido), nunca 401: 401 fora de /login desloga o usuário no front.
 func TestOrdemServicoSemClaimDaSessao(t *testing.T) {
 
@@ -540,7 +540,7 @@ func TestIndicadoresCorpoSemHistorico(t *testing.T) {
 }
 
 // contextoOSAcao monta a requisição de uma transição do ciclo de vida
-// (POST /ordens-servico/:id/<ação>), como o AutenticacaoJwt deixaria: id na
+// (POST /ordens-servico/:id/<ação>), como o middleware.Autenticacao deixaria: id na
 // rota, tenant/ator/perfil no contexto. Perfil fixo "tecnico" -- é o único
 // que o RBAC da rota libera pra estas ações.
 func contextoOSAcao(id, corpo string) (*gin.Context, *httptest.ResponseRecorder) {

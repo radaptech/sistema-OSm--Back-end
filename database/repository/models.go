@@ -746,6 +746,15 @@ type Preventiva struct {
 	TecnicoID     *int64
 }
 
+type Sessao struct {
+	ID          int64
+	TenantID    int64
+	UsuarioID   int64
+	TokenHash   []byte
+	CriadaEm    pgtype.Timestamptz
+	UltimoUsoEm pgtype.Timestamptz
+}
+
 type Setor struct {
 	ID        int64
 	TenantID  int64

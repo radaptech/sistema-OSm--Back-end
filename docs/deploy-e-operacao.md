@@ -162,8 +162,8 @@ bloqueio: (1) configurar o Cron Job no Railway apontando pra esse `dockerfile` (
 
 1. Variáveis no serviço da API: `DB_*` (host do **Session Pooler** do Supabase, porta
    `5432`, usuário `postgres.<project-ref>`),
-   `DB_SSLMODE`, **`JWT_SECRET` novo** (`openssl rand -base64 64` — não reaproveitar o do
-   `.env` local, que já circulou), `TRUSTED_PROXIES` com o endereço do proxy do Railway, e
+   `DB_SSLMODE` (a `JWT_SECRET` deixou de existir com a sessão no banco, migration
+   `000022` — pode ser removida do serviço), `TRUSTED_PROXIES` com o endereço do proxy do Railway, e
    os `R2_*` (sem eles o CRUD funciona e só o upload de foto responde 500 — a
    guarda de nil em `bucketR2` evita o panic). Opcional, só desliga o próprio
    envio: **`VAPID_PUBLIC_KEY` + `VAPID_PRIVATE_KEY` + `VAPID_SUBJECT`** (Web Push — gere um

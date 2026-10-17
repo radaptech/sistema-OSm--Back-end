@@ -48,7 +48,7 @@ func idDaRota(ctx *gin.Context) (int64, bool) {
 // tenant A escrever no tenant B só trocando o header; o único endpoint que lê
 // o header é o login, antes de existir token.
 //
-// Falta da claim é 500, não 401: o AutenticacaoJwt já devia tê-la garantido,
+// Falta da claim é 500, não 401: o middleware.Autenticacao já devia tê-la garantido,
 // então chegar sem ela é erro de wiring da rota, não sessão inválida.
 func tenantDaRota(ctx *gin.Context) (int64, bool) {
 	tenantId, ok := middleware.GetTenantIDToken(ctx)
@@ -65,7 +65,7 @@ func tenantDaRota(ctx *gin.Context) (int64, bool) {
 //
 // Vem do token e não da rota/corpo pelo mesmo motivo do tenantDaRota: aceitar
 // do cliente deixaria um solicitante listar a loja inteira mandando outro id.
-// Claim ausente é 500, não 401 -- o AutenticacaoJwt já devia tê-la garantido.
+// Claim ausente é 500, não 401 -- o middleware.Autenticacao já devia tê-la garantido.
 func atorDaRota(ctx *gin.Context) (int64, string, bool) {
 
 	usuarioId, okId := middleware.GetUserID(ctx)

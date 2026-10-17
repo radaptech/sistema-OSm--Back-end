@@ -533,7 +533,7 @@ func (q *Queries) ObterUsuarioPorID(ctx context.Context, arg ObterUsuarioPorIDPa
 	return i, err
 }
 
-const redefinirSenhaPorToken = `-- name: RedefinirSenhaPorToken :execrows
+const redefinirSenhaPorToken = `-- name: RedefinirSenhaPorToken :one
 UPDATE usuario
 SET senha_hash = $1,
     token_recuperacao_hash = NULL,
@@ -542,6 +542,7 @@ WHERE tenant_id = $2
   AND token_recuperacao_hash = $3::text
   AND token_recuperacao_expira_em > now()
   AND ativo
+RETURNING id
 `
 
 type RedefinirSenhaPorTokenParams struct {
@@ -551,13 +552,13 @@ type RedefinirSenhaPorTokenParams struct {
 }
 
 // Troca a senha e queima o token no mesmo UPDATE: dois cliques no mesmo link não passam os dois.
-// 0 linhas = token inexistente, expirado, de outro tenant ou de usuário desativado -- o cliente não distingue.
+// Sem linha (pgx.ErrNoRows) = token inexistente, expirado, de outro tenant ou de usuário
+// desativado -- o cliente não distingue. Devolve o id para o service derrubar as sessões dele.
 func (q *Queries) RedefinirSenhaPorToken(ctx context.Context, arg RedefinirSenhaPorTokenParams) (int64, error) {
-	result, err := q.db.Exec(ctx, redefinirSenhaPorToken, arg.SenhaHash, arg.TenantID, arg.TokenHash)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected(), nil
+	row := q.db.QueryRow(ctx, redefinirSenhaPorToken, arg.SenhaHash, arg.TenantID, arg.TokenHash)
+	var id int64
+	err := row.Scan(&id)
+	return id, err
 }
 
 const registrarUltimoAcesso = `-- name: RegistrarUltimoAcesso :exec

@@ -93,9 +93,10 @@ SET token_recuperacao_hash = sqlc.arg(token_hash)::text,
 WHERE tenant_id = sqlc.arg(tenant_id) AND email = sqlc.arg(email) AND ativo
 RETURNING email;
 
--- name: RedefinirSenhaPorToken :execrows
+-- name: RedefinirSenhaPorToken :one
 -- Troca a senha e queima o token no mesmo UPDATE: dois cliques no mesmo link não passam os dois.
--- 0 linhas = token inexistente, expirado, de outro tenant ou de usuário desativado -- o cliente não distingue.
+-- Sem linha (pgx.ErrNoRows) = token inexistente, expirado, de outro tenant ou de usuário
+-- desativado -- o cliente não distingue. Devolve o id para o service derrubar as sessões dele.
 UPDATE usuario
 SET senha_hash = sqlc.arg(senha_hash),
     token_recuperacao_hash = NULL,
@@ -103,7 +104,8 @@ SET senha_hash = sqlc.arg(senha_hash),
 WHERE tenant_id = sqlc.arg(tenant_id)
   AND token_recuperacao_hash = sqlc.arg(token_hash)::text
   AND token_recuperacao_expira_em > now()
-  AND ativo;
+  AND ativo
+RETURNING id;
 
 -- name: RegistrarUltimoAcesso :exec
 UPDATE usuario

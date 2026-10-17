@@ -23,7 +23,7 @@ func executarChavesVapid(_ []string) {
 		log.Fatalf("erro ao gerar chaves VAPID: %v", err)
 	}
 
-	fmt.Println("# Web Push (VAPID) -- a privada é segredo, como o JWT_SECRET.")
+	fmt.Println("# Web Push (VAPID) -- a privada é segredo, como a senha do banco.")
 	fmt.Printf("VAPID_PUBLIC_KEY=%s\n", publica)
 	fmt.Printf("VAPID_PRIVATE_KEY=%s\n", privada)
 	fmt.Println("VAPID_SUBJECT=contato@radaptech.com.br")

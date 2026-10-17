@@ -6,30 +6,43 @@ Leia antes de registrar rota nova, mexer em middleware ou montar corpo de respos
 
 ---
 
-## Autenticação (JWT)
-- `auth.GerarJwt(id, tenantId int64, perfil string)` assina um HS256 com `JWT_SECRET`
-  (`.env` — gere com `openssl rand -base64 64`, mínimo 256 bits, nunca commitado) e
-  claims mínimas: `sub` (usuario.id), `tenantId` (empresa.id), `perfil`, `exp` (8h),
-  `iat`. **De propósito sem** `nome`/`escoposGestor`/`lojaId`/`setorId`/`tecnicoId`/
-  `ativo` — isso é resolvido fresco no banco a cada request (`ObterSessao`), senão
-  editar o escopo de um Gestor ou desativar um usuário só valeria depois do token
-  expirar.
-- **Depois do login, `tenant_id` autoritativo é o do token, não o header
+## Autenticação (sessão no banco)
+- **A sessão mora na tabela `sessao`** (migration `000022`, 17/10/2026 — substituiu o JWT
+  de 8h). O login gera um segredo de 256 bits (`criarSessao`), que vai no cookie HttpOnly
+  `token`; o banco guarda só o SHA-256 dele. **Prazos** (`service/sessaoService.go`): estica
+  com o uso, cai com **14 dias sem uso** e **60 dias depois do login** mesmo usada todo dia.
+  **Cai na hora:** `POST /autenticacao/logout` (só aquele aparelho — `EncerrarSessao`),
+  desativar o usuário, trocar a senha dele (edição do Administrador ou recuperação) — os
+  três apagam todas as sessões do usuário (`apagarSessoesDoUsuario`) — e desativar a
+  empresa. O JWT não dava nada disso: "Sair" só apagava o cookie daquele navegador (uma
+  cópia seguia valendo até o `exp`), usuário desativado seguia usando as rotas e o perfil
+  gravado no token só mudava no próximo login. `JWT_SECRET` não é mais lida.
+- Cada request roda `ValidarSessao` (uma query com JOIN em `usuario` e `empresa`: ativo,
+  ativa e o **perfil atual**), e o `ultimo_uso_em` só é regravado quando o último toque tem
+  mais de 1 minuto. Para ~20 usuários é custo desprezível — mesma premissa de não ter
+  cache. `nome`/`escoposGestor`/`lojaId`/`setorId`/`tecnicoId` continuam resolvidos no
+  `ObterSessao` (`GET /autenticacao/sessao`).
+- **Depois do login, `tenant_id` autoritativo é o da sessão, não o header
   `X-tenant-ID`** — o header só importa em `POST /autenticacao/login`, antes de existir
-  token, pra saber contra qual `empresa` autenticar. Trocar o header depois de logado
+  sessão, pra saber contra qual `empresa` autenticar. Trocar o header depois de logado
   não pode mudar de tenant. Na prática: **`Login` é o único handler que chama
   `middleware.GetTenantID` (header); todo o resto chama `GetTenantIDToken`.** Usar o do
   header numa rota autenticada deixa um administrador do tenant A escrever no tenant B
   só trocando o `X-tenant-ID` — o banco aceita calado, é só um `int64`. Já foi bug uma
   vez.
-- `middleware.AutenticacaoJwt()` lê o token do cookie `token` (produção) ou do header
-  `Authorization: Bearer <token>` (Postman/Insomnia, sem cookie) e injeta no contexto:
-  `userId`, `user_perfil`, `user_TenantId` (todos `int64`/`string`). Aborta com 401 se
-  qualquer claim obrigatória faltar — não deixa o handler seguir com contexto
-  incompleto.
-- `service.UsuarioService.Login(ctx, model.Login, tenantId)` devolve `(token, sessão,
-  erro)` — o service já assina o JWT, o controller só precisa pôr no cookie. Sem
-  transação de propósito: são leituras + o `UPDATE` de `ultimo_acesso`.
+- `middleware.Autenticacao(validador)` lê o segredo do cookie `token` (produção) ou do
+  header `Authorization: Bearer <segredo>` (Postman/Insomnia, sem cookie), confere no
+  banco (`service.SessaoService`) e injeta no contexto: `userId`, `user_perfil`,
+  `user_TenantId`. **Três respostas, e o front depende delas:** sem segredo → 401 sem
+  código; sessão que existia e não vale mais → 401 com `"codigo": "sessao_expirada"` e o
+  cookie apagado (a tela de login diz "sua sessão expirou"); falha do banco → **500, não
+  401** (um 401 deslogaria todo mundo por um soluço do Postgres). O nome do cookie
+  continua `token` de propósito: o JWT de quem estava logado no deploy cai como sessão
+  expirada e ganha o aviso, em vez de um 401 mudo.
+- `service.UsuarioService.Login(ctx, model.Login, tenantId)` devolve `(segredo, sessão,
+  erro)` — o service já criou a linha em `sessao` (e apagou as vencidas de todo mundo),
+  o controller só põe no cookie (`middleware.GravarCookieSessao`, 60 dias). Sem transação
+  de propósito: são leituras, a sessão nova e o `UPDATE` de `ultimo_acesso`.
 - **E-mail inexistente, senha errada e usuário inativo devolvem todos
   `helper.ErrCredenciaisInvalidas`**, a mesma mensagem — senão o login vira um oráculo
   de quais e-mails existem no tenant. (`ObterUsuarioPorEmail` já filtra `AND ativo`, então

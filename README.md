@@ -12,7 +12,7 @@ front em React ([`sistema-OSm--Front-end`](../sistema-OSm--Front-end)).
 
 ## Stack
 
-Go + Gin · Postgres (pgx, sqlc, golang-migrate) · JWT em cookie HttpOnly · senha em
+Go + Gin · Postgres (pgx, sqlc, golang-migrate) · sessão no banco em cookie HttpOnly · senha em
 argon2id · Cloudflare R2 para fotos/vídeos e backup · Resend (e-mail, opcional). Produção: Railway + Supabase.
 
 ## Rodando local
@@ -21,7 +21,7 @@ O ambiente sobe pelo `docker-compose.yml` **um nível acima** deste repositório
 API com hot-reload, Postgres, pgAdmin e Traefik):
 
 ```sh
-cp .env-example .env          # troque o JWT_SECRET: openssl rand -base64 64
+cp .env-example .env
 cd .. && docker compose up -d
 ```
 
@@ -60,7 +60,7 @@ internal/service       regras de negócio
 internal/model         payloads e respostas
 database/migrate       migrations SQL
 database/queries       SQL de origem do sqlc → database/repository (gerado)
-middleware/, auth/     JWT, tenant, rate limit, hash de senha
+middleware/, auth/     sessão, tenant, rate limit, hash de senha
 config/, bucketR2/     conexão com o banco, formatos, upload no R2
 ```
 

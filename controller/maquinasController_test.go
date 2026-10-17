@@ -130,7 +130,7 @@ func requisicaoMaquina(metodo, id, query, dados string, comFoto bool) (*httptest
 		ctx.Params = gin.Params{{Key: "id", Value: id}}
 	}
 	ctx.Set(middleware.UserTenantId, int64(7))
-	// Ator autenticado por padrão: toda rota daqui roda atrás do AutenticacaoJwt.
+	// Ator autenticado por padrão: toda rota daqui roda atrás do middleware.Autenticacao.
 	// Quem testa a ausência das claims monta o contexto na mão.
 	ctx.Set(middleware.UserId, int64(1))
 	ctx.Set(middleware.UserPerfil, "administrador")

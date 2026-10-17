@@ -16,17 +16,20 @@ import (
 
 type Container struct {
 	queries *repository.Queries
-	Login   *controller.LoginController
-	Loja    *controller.LojaController
-	Setor   *controller.SetorController
-	Maquina *controller.MaquinaController
-	Prevent *controller.PreventivaController
-	Terceir *controller.EmpresaTerceirizadaController
-	Solicit *controller.SolicitacaoController
-	OrdemOS *controller.OrdemServicoController
-	Recuper *controller.RecuperacaoSenhaController
-	Notific *controller.NotificacaoController
-	Push    *controller.PushController
+	// O middleware de autenticação de toda rota protegida: confere a sessão
+	// no banco (service.SessaoService) a cada request.
+	autenticacao gin.HandlerFunc
+	Login        *controller.LoginController
+	Loja         *controller.LojaController
+	Setor        *controller.SetorController
+	Maquina      *controller.MaquinaController
+	Prevent      *controller.PreventivaController
+	Terceir      *controller.EmpresaTerceirizadaController
+	Solicit      *controller.SolicitacaoController
+	OrdemOS      *controller.OrdemServicoController
+	Recuper      *controller.RecuperacaoSenhaController
+	Notific      *controller.NotificacaoController
+	Push         *controller.PushController
 }
 
 func NewContainer(db *pgxpool.Pool) *Container {
@@ -70,18 +73,19 @@ func NewContainer(db *pgxpool.Pool) *Container {
 	bucketTerceirizadas := os.Getenv("R2_BUCKET_NAME_IMG_TERCERIZADOS")
 
 	return &Container{
-		Login:   controller.NewLoginController(serviceLogin),
-		Loja:    controller.NewLojaController(serviceLoja, bucketLojas),
-		Setor:   controller.NewSetorController(serviceSetor, bucketSetores),
-		Maquina: controller.NewMaquinaController(serviceMaquina, bucketMaquinas, bucketOsServico),
-		Prevent: controller.NewPreventivaController(servicePreventiva, bucketMaquinas),
-		Terceir: controller.NewEmpresaTerceirizadaController(serviceTerceirizada, bucketTerceirizadas),
-		Solicit: controller.NewSolicitacaoController(serviceSolicitacao, bucketOsServico, bucketPequenosReparos, bucketMaquinas),
-		OrdemOS: controller.NewOrdemServicoController(serviceOrdemServico, bucketTerceirizadas),
-		Recuper: controller.NewRecuperacaoSenhaController(serviceRecuperacao),
-		Notific: controller.NewNotificacaoController(serviceNotificacao),
-		Push:    controller.NewPushController(serviceNotificacao),
-		queries: repository.New(db),
+		Login:        controller.NewLoginController(serviceLogin),
+		Loja:         controller.NewLojaController(serviceLoja, bucketLojas),
+		Setor:        controller.NewSetorController(serviceSetor, bucketSetores),
+		Maquina:      controller.NewMaquinaController(serviceMaquina, bucketMaquinas, bucketOsServico),
+		Prevent:      controller.NewPreventivaController(servicePreventiva, bucketMaquinas),
+		Terceir:      controller.NewEmpresaTerceirizadaController(serviceTerceirizada, bucketTerceirizadas),
+		Solicit:      controller.NewSolicitacaoController(serviceSolicitacao, bucketOsServico, bucketPequenosReparos, bucketMaquinas),
+		OrdemOS:      controller.NewOrdemServicoController(serviceOrdemServico, bucketTerceirizadas),
+		Recuper:      controller.NewRecuperacaoSenhaController(serviceRecuperacao),
+		Notific:      controller.NewNotificacaoController(serviceNotificacao),
+		Push:         controller.NewPushController(serviceNotificacao),
+		queries:      repository.New(db),
+		autenticacao: middleware.Autenticacao(service.NewSessaoService(db)),
 	}
 }
 
@@ -103,12 +107,12 @@ func ConfigurarRotas(r *gin.Engine, c *Container) {
 	// ObterEmpresaPorSubdominio (ida ao banco) por tentativa.
 	autenticacao.POST("/login", middleware.LimitarPorIP(rate.Every(12*time.Second), 5), middleware.TenantMiddleware(c.queries), c.Login.Login())
 	autenticacao.POST("/logout", c.Login.Logout())
-	autenticacao.GET("/sessao", middleware.AutenticacaoJwt(), c.Login.Sessao())
+	autenticacao.GET("/sessao", c.autenticacao, c.Login.Sessao())
 	// Mais apertado que o login: cada pedido aceito dispara um e-mail real para a caixa de alguém.
 	autenticacao.POST("/esqueci-senha", middleware.LimitarPorIP(rate.Every(time.Minute), 3), middleware.TenantMiddleware(c.queries), c.Recuper.EsqueciSenha())
 	autenticacao.POST("/redefinir-senha", middleware.LimitarPorIP(rate.Every(12*time.Second), 5), middleware.TenantMiddleware(c.queries), c.Recuper.RedefinirSenha())
 
-	usuarios := api.Group("/usuarios", middleware.AutenticacaoJwt())
+	usuarios := api.Group("/usuarios", c.autenticacao)
 	usuarios.POST("", middleware.Permitir("administrador"), c.Login.Registrar())
 	usuarios.GET("", middleware.Permitir("administrador"), c.Login.ListarUsuarios())
 	usuarios.GET("/:id", middleware.Permitir("administrador"), c.Login.Obter())
@@ -118,15 +122,15 @@ func ConfigurarRotas(r *gin.Engine, c *Container) {
 	// Empresa não tem CRUD (o tenant nasce pela CLI de provisionamento): esta
 	// rota existe só para o select de Empresa no cadastro de loja, e por isso
 	// mora no controller de loja.
-	api.GET("/empresas", middleware.AutenticacaoJwt(), middleware.Permitir("administrador"), c.Loja.ListarEmpresas())
+	api.GET("/empresas", c.autenticacao, middleware.Permitir("administrador"), c.Loja.ListarEmpresas())
 
 	// Projeção somente-leitura sobre `usuario` -- por isso mora no LoginController,
 	// como GET /empresas mora no de loja. Gestor porque é ele quem escolhe o
 	// Técnico Responsável ao abrir a OS; administrador para a tela de cadastro.
 	// Técnico e solicitante não têm o que fazer com a lista.
-	api.GET("/tecnicos", middleware.AutenticacaoJwt(), middleware.Permitir("gestor", "administrador"), c.Login.ListarTecnicos())
+	api.GET("/tecnicos", c.autenticacao, middleware.Permitir("gestor", "administrador"), c.Login.ListarTecnicos())
 
-	lojas := api.Group("/lojas", middleware.AutenticacaoJwt())
+	lojas := api.Group("/lojas", c.autenticacao)
 	// Listar fica sem Permitir de propósito: o gestor precisa da lista para
 	// montar os blocos por loja do painel, e o solicitante/técnico veem o nome
 	// da loja nas telas deles. Escrever é só do administrador.
@@ -136,7 +140,7 @@ func ConfigurarRotas(r *gin.Engine, c *Container) {
 	lojas.PUT("/:id", middleware.Permitir("administrador"), c.Loja.Atualizar())
 	lojas.DELETE("/:id", middleware.Permitir("administrador"), c.Loja.Desativar())
 
-	setores := api.Group("/setores", middleware.AutenticacaoJwt())
+	setores := api.Group("/setores", c.autenticacao)
 	// Listar sem Permitir pelo mesmo motivo de /lojas: o painel do gestor nomeia
 	// os blocos por setor e o cadastro de máquina/usuário usa o select em
 	// cascata. Escrever é só do administrador.
@@ -146,7 +150,7 @@ func ConfigurarRotas(r *gin.Engine, c *Container) {
 	setores.PUT("/:id", middleware.Permitir("administrador"), c.Setor.Atualizar())
 	setores.DELETE("/:id", middleware.Permitir("administrador"), c.Setor.Desativar())
 
-	maquinas := api.Group("/maquinas", middleware.AutenticacaoJwt())
+	maquinas := api.Group("/maquinas", c.autenticacao)
 	// Listar sem Permitir pelo mesmo motivo de /lojas e /setores: o solicitante
 	// escolhe a máquina do próprio setor em Nova Solicitação e o gestor lista as
 	// dele no painel de indicadores -- o recorte por loja/setor é o WHERE da
@@ -164,7 +168,7 @@ func ConfigurarRotas(r *gin.Engine, c *Container) {
 	// administrador vazado vira um oráculo de força bruta da própria senha.
 	maquinas.POST("/:id/excluir", middleware.LimitarPorIP(rate.Every(12*time.Second), 5), middleware.Permitir("administrador"), c.Maquina.ExcluirDefinitivo())
 
-	preventivas := api.Group("/preventivas", middleware.AutenticacaoJwt())
+	preventivas := api.Group("/preventivas", c.autenticacao)
 	// Listar sem Permitir: a aba "Manutenção Prev." do painel do gestor vive
 	// dela, e o escopo do gestor é o WHERE da query, não o RBAC. Escrever é só
 	// do administrador -- o cadastro de preventiva é dele, junto com o da
@@ -180,7 +184,7 @@ func ConfigurarRotas(r *gin.Engine, c *Container) {
 	preventivas.PUT("/:id", middleware.Permitir("administrador"), c.Prevent.Atualizar())
 	preventivas.DELETE("/:id", middleware.Permitir("administrador"), c.Prevent.Desativar())
 
-	terceirizadas := api.Group("/empresas-terceirizadas", middleware.AutenticacaoJwt())
+	terceirizadas := api.Group("/empresas-terceirizadas", c.autenticacao)
 	// Listar é do TÉCNICO e do administrador: é o Técnico quem escolhe a empresa
 	// no ModalAcionarTerceiro -- terceirizar é decisão dele, não do Gestor
 	// (front-end/CLAUDE.md item 9). Sem escopo no WHERE: a entidade não pende de
@@ -191,7 +195,7 @@ func ConfigurarRotas(r *gin.Engine, c *Container) {
 	terceirizadas.PUT("/:id", middleware.Permitir("administrador"), c.Terceir.Atualizar())
 	terceirizadas.DELETE("/:id", middleware.Permitir("administrador"), c.Terceir.Desativar())
 
-	solicitacoes := api.Group("/solicitacoes", middleware.AutenticacaoJwt())
+	solicitacoes := api.Group("/solicitacoes", c.autenticacao)
 	// As duas criações são só do Solicitante -- é quem preenche NovaSolicitacao
 	// no front (front-end/CLAUDE.md), a única tela que chama estas rotas.
 	solicitacoes.POST("/maquinario", middleware.Permitir("solicitante"), c.Solicit.CriarMaquinario())
@@ -234,23 +238,23 @@ func ConfigurarRotas(r *gin.Engine, c *Container) {
 	// de vida dela (iniciar/pausar/retomar/acionar-terceiro/encerrar), sim,
 	// é POST em sub-recurso, logo abaixo -- nunca PATCH de um campo `status`
 	// genérico, mesmo critério do resto da API.
-	api.GET("/ordens-servico", middleware.AutenticacaoJwt(), middleware.Permitir("gestor", "administrador", "tecnico"), c.OrdemOS.Listar())
+	api.GET("/ordens-servico", c.autenticacao, middleware.Permitir("gestor", "administrador", "tecnico"), c.OrdemOS.Listar())
 
 	// Resumo por loja/setor (cards da navegação do Gestor, que lista OS
 	// finalizadas paginadas no servidor) e OS por id (link de notificação). Mesmo
 	// RBAC e mesmo recorte da listagem; fora do escopo é 404.
-	api.GET("/ordens-servico/resumo", middleware.AutenticacaoJwt(), middleware.Permitir("gestor", "administrador", "tecnico"), c.OrdemOS.Resumo())
-	api.GET("/ordens-servico/:id", middleware.AutenticacaoJwt(), middleware.Permitir("gestor", "administrador", "tecnico"), c.OrdemOS.Obter())
+	api.GET("/ordens-servico/resumo", c.autenticacao, middleware.Permitir("gestor", "administrador", "tecnico"), c.OrdemOS.Resumo())
+	api.GET("/ordens-servico/:id", c.autenticacao, middleware.Permitir("gestor", "administrador", "tecnico"), c.OrdemOS.Obter())
 
 	// Linha do tempo da OS (quem fez cada passo, quando, e o custo a cada
 	// lançamento). Os três perfis da listagem; o recorte é o escopo da query no
 	// service (gestor pelo setor, técnico pela OS dele), não este Permitir.
-	api.GET("/ordens-servico/:id/historico", middleware.AutenticacaoJwt(), middleware.Permitir("gestor", "administrador", "tecnico"), c.OrdemOS.Historico())
+	api.GET("/ordens-servico/:id/historico", c.autenticacao, middleware.Permitir("gestor", "administrador", "tecnico"), c.OrdemOS.Historico())
 
 	// Ciclo de vida da OS -- só o Técnico DONO (checagem no service, não
 	// aqui: OS de outro técnico é 404, não 403 -- ver a nota em
 	// ObterOrdemServicoPorID).
-	acoesOS := api.Group("/ordens-servico/:id", middleware.AutenticacaoJwt(), middleware.Permitir("tecnico"))
+	acoesOS := api.Group("/ordens-servico/:id", c.autenticacao, middleware.Permitir("tecnico"))
 	acoesOS.POST("/iniciar", c.OrdemOS.Iniciar())
 	acoesOS.POST("/pausar", c.OrdemOS.Pausar())
 	acoesOS.POST("/retomar", c.OrdemOS.Retomar())
@@ -261,7 +265,7 @@ func ConfigurarRotas(r *gin.Engine, c *Container) {
 	// (AdministradorCustosPendentes), por isso fora do grupo acoesOS acima,
 	// que é Permitir("tecnico"). Sem dono pra checar (diferente do resto do
 	// ciclo de vida): o RBAC da rota já é toda a restrição.
-	api.POST("/ordens-servico/:id/custo", middleware.AutenticacaoJwt(), middleware.Permitir("administrador"), c.OrdemOS.Custo())
+	api.POST("/ordens-servico/:id/custo", c.autenticacao, middleware.Permitir("administrador"), c.OrdemOS.Custo())
 
 	// GET /indicadores/maquinas/:id -- o Painel de Indicadores (DashboardGestor,
 	// a ação rápida "Indicadores" do Painel do Gestor). O `:id` é de MÁQUINA;
@@ -275,27 +279,27 @@ func ConfigurarRotas(r *gin.Engine, c *Container) {
 	//
 	// /indicadores em vez de /maquinas/:id/indicadores porque é a URL que o
 	// front já chama (servicos/servicoIndicadores.ts), e o contrato manda.
-	api.GET("/indicadores/maquinas/:id", middleware.AutenticacaoJwt(), middleware.Permitir("gestor", "administrador"), c.OrdemOS.Indicadores())
+	api.GET("/indicadores/maquinas/:id", c.autenticacao, middleware.Permitir("gestor", "administrador"), c.OrdemOS.Indicadores())
 
 	// GET /indicadores/lojas/:id -- a tela da loja no mesmo painel: total,
 	// setores e máquinas da loja numa ida só. Mesmo RBAC e mesmo recorte da rota
 	// de máquina; aqui o EXISTS de escopo recorta os setores da loja.
-	api.GET("/indicadores/lojas/:id", middleware.AutenticacaoJwt(), middleware.Permitir("gestor", "administrador"), c.OrdemOS.IndicadoresLoja())
+	api.GET("/indicadores/lojas/:id", c.autenticacao, middleware.Permitir("gestor", "administrador"), c.OrdemOS.IndicadoresLoja())
 	// A lista por trás de um card de custo desse painel -- maquinário ou pequenos reparos
 	// (?grupo=), paginada, com os recortes de setor, máquina e mês que a tela mostra. Mesmo
 	// RBAC e mesmo escopo.
-	api.GET("/indicadores/lojas/:id/ordens", middleware.AutenticacaoJwt(), middleware.Permitir("gestor", "administrador"), c.OrdemOS.OrdensDoPainelDaLoja())
+	api.GET("/indicadores/lojas/:id/ordens", c.autenticacao, middleware.Permitir("gestor", "administrador"), c.OrdemOS.OrdensDoPainelDaLoja())
 
 	// Central de notificações (o sininho): qualquer perfil logado, sempre só
 	// as do próprio usuário -- o id vem do token, nunca da URL.
-	notificacoes := api.Group("/notificacoes", middleware.AutenticacaoJwt())
+	notificacoes := api.Group("/notificacoes", c.autenticacao)
 	notificacoes.GET("", c.Notific.Listar())
 	notificacoes.GET("/nao-lidas", c.Notific.NaoLidas())
 	notificacoes.POST("/lidas", c.Notific.MarcarTodasLidas())
 	notificacoes.POST("/:id/lida", c.Notific.MarcarLida())
 
 	// Web Push: inscrição do aparelho do próprio usuário (o do token).
-	push := api.Group("/push", middleware.AutenticacaoJwt())
+	push := api.Group("/push", c.autenticacao)
 	push.GET("/chave-publica", c.Push.ChavePublica())
 	push.POST("/inscricoes", c.Push.Inscrever())
 	push.POST("/inscricoes/remover", c.Push.Remover())
