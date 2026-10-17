@@ -146,6 +146,18 @@ func filtrosDeQuery(ctx *gin.Context) (service.FiltrosOrdemServico, bool) {
 		return service.FiltrosOrdemServico{}, false
 	}
 
+	// Nível de máquina: a máquina da solicitação ou, com ?reparo=true, os
+	// pequenos reparos (sem máquina). Os dois juntos nunca casam nada.
+	maquinaId, ok := idDeQuery(ctx, "maquinaId")
+	if !ok {
+		return service.FiltrosOrdemServico{}, false
+	}
+
+	reparo, ok := boolDeQuery(ctx, "reparo")
+	if !ok {
+		return service.FiltrosOrdemServico{}, false
+	}
+
 	tecnicoId, ok := idDeQuery(ctx, "tecnicoId")
 	if !ok {
 		return service.FiltrosOrdemServico{}, false
@@ -193,6 +205,8 @@ func filtrosDeQuery(ctx *gin.Context) (service.FiltrosOrdemServico, bool) {
 		Revisado:    revisado,
 		LojaId:      lojaId,
 		SetorId:     setorId,
+		MaquinaId:   maquinaId,
+		Reparo:      reparo,
 		TecnicoId:   tecnicoId,
 		Busca:       busca,
 		Maquina:     maquina,
@@ -499,8 +513,9 @@ func (o *OrdemServicoController) IndicadoresLoja() gin.HandlerFunc {
 }
 
 // OrdensDoPainelDaLoja é GET /indicadores/lojas/:id/ordens -- a lista por trás de um card de custo
-// do painel da loja, paginada (12). `?grupo=maquinario|reparos` escolhe o card (obrigatório):
-// maquinário é o "Custo Maquinário", reparos é o "Pequenos Reparos", que fica separado dele.
+// do painel da loja, paginada (12). `?grupo=maquinario|reparos|preventivas` escolhe o card
+// (obrigatório): maquinário é o "Custo Maquinário"; reparos e preventivas são as faixas "Pequenos
+// Reparos" e "Manutenção Preventiva", que ficam separadas dele.
 // Aceita os recortes que a tela mostra: `?setorId=`, `?maquinaId=` (só maquinário: reparo não
 // tem máquina) e `?mes=MM/AAAA` (o rótulo do gráfico mensal, convertido aqui para o YYYY-MM
 // que a query compara). Loja fora do escopo é 404, como o painel.
@@ -525,8 +540,8 @@ func (o *OrdemServicoController) OrdensDoPainelDaLoja() gin.HandlerFunc {
 
 		// Sem grupo não há o que listar: erro de cliente, não "a loja inteira".
 		grupo := ctx.Query("grupo")
-		if grupo != model.GrupoMaquinario && grupo != model.GrupoReparos {
-			ctx.JSON(http.StatusBadRequest, gin.H{"error": "grupo inválido (use maquinario ou reparos)"})
+		if grupo != model.GrupoMaquinario && grupo != model.GrupoReparos && grupo != model.GrupoPreventivas {
+			ctx.JSON(http.StatusBadRequest, gin.H{"error": "grupo inválido (use maquinario, reparos ou preventivas)"})
 			return
 		}
 

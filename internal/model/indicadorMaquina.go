@@ -42,6 +42,13 @@ type ResumoIndicadores struct {
 	// ficam zerados.
 	QuantidadeReparos int     `json:"quantidadeReparos"`
 	CustoReparos      float64 `json:"custoReparos"`
+	// Manutenções preventivas, SEPARADAS do maquinário do mesmo jeito que os reparos:
+	// a OS aberta pelo job de preventiva soma só aqui, nunca em quantidadeOs/custoTotal/
+	// horas/rosca/MTBF/MTTR. O maquinário fica sendo o que quebrou (corretiva), e o
+	// Gestor vê ao lado quanto custou a revisão programada. Diferente do reparo, a
+	// preventiva tem máquina: vem preenchido também na máquina.
+	QuantidadePreventivas int     `json:"quantidadePreventivas"`
+	CustoPreventivas      float64 `json:"custoPreventivas"`
 }
 
 type IndicadorMensal struct {
@@ -96,8 +103,8 @@ type linhaHistorico struct {
 	maquinaId int64
 	abertaEm  pgtype.Timestamptz
 	// preventiva marca a OS aberta pelo job de preventiva: revisão programada, não
-	// falha. Fica FORA do MTBF e do MTTR (ver mtbf e resumir), mas continua nas horas,
-	// no custo e na contagem.
+	// falha. Conta só em quantidadePreventivas e custoPreventivas, à parte do
+	// maquinário como o reparo (ver resumir).
 	preventiva bool
 	// reparo marca o pequeno reparo (sem máquina): conta só em quantidadeReparos e
 	// custoReparos, nunca no custo das máquinas, nas horas, no MTBF nem no MTTR.
@@ -288,16 +295,22 @@ func resumir(historico []linhaHistorico) ResumoIndicadores {
 
 	horasPorDefeito := make(map[string]float64, len(tiposDefeito))
 
-	var horasParadaTotal, custoTotal, somaTrabalhadas, custoReparos float64
-	var comHorasTrabalhadas, quantidadeReparos int
+	var horasParadaTotal, custoTotal, somaTrabalhadas, custoReparos, custoPreventivas float64
+	var comHorasTrabalhadas, quantidadeReparos, quantidadePreventivas int
 	// Só o maquinário alimenta os cards de falha e de custo das máquinas; o reparo
-	// (sem máquina) fica à parte, nos campos próprios.
+	// (sem máquina) e a preventiva (revisão programada) ficam à parte, nos campos
+	// próprios.
 	var maquinario []linhaHistorico
 
 	for _, os := range historico {
 		if os.reparo {
 			quantidadeReparos++
 			custoReparos += zeroSeNulo(os.custoHoraTecnico) + zeroSeNulo(os.custoManutencao)
+			continue
+		}
+		if os.preventiva {
+			quantidadePreventivas++
+			custoPreventivas += zeroSeNulo(os.custoHoraTecnico) + zeroSeNulo(os.custoManutencao)
 			continue
 		}
 		maquinario = append(maquinario, os)
@@ -308,9 +321,9 @@ func resumir(historico []linhaHistorico) ResumoIndicadores {
 
 		// MTTR é a média do reparo, e OS sem horas trabalhadas não teve reparo
 		// medido -- entra como zero ela puxaria a média para baixo inventando
-		// um conserto instantâneo. Preventiva também fica de fora: revisão
-		// programada não é conserto, e uma revisão curta puxaria a média para baixo.
-		if os.horasTrabalhadas.Valid && !os.preventiva {
+		// um conserto instantâneo. (A preventiva já saiu acima: revisão
+		// programada não é conserto.)
+		if os.horasTrabalhadas.Valid {
 			somaTrabalhadas += os.horasTrabalhadas.Float64
 			comHorasTrabalhadas++
 		}
@@ -319,13 +332,15 @@ func resumir(historico []linhaHistorico) ResumoIndicadores {
 	}
 
 	resumo := ResumoIndicadores{
-		QuantidadeOs:      len(maquinario),
-		HorasParadaTotal:  arredondar(horasParadaTotal),
-		CustoTotal:        arredondar(custoTotal),
-		MtbfHoras:         mtbf(maquinario),
-		PorTipoDefeito:    make([]IndicadorPorDefeito, 0, len(tiposDefeito)),
-		QuantidadeReparos: quantidadeReparos,
-		CustoReparos:      arredondar(custoReparos),
+		QuantidadeOs:          len(maquinario),
+		HorasParadaTotal:      arredondar(horasParadaTotal),
+		CustoTotal:            arredondar(custoTotal),
+		MtbfHoras:             mtbf(maquinario),
+		PorTipoDefeito:        make([]IndicadorPorDefeito, 0, len(tiposDefeito)),
+		QuantidadeReparos:     quantidadeReparos,
+		CustoReparos:          arredondar(custoReparos),
+		QuantidadePreventivas: quantidadePreventivas,
+		CustoPreventivas:      arredondar(custoPreventivas),
 	}
 
 	if comHorasTrabalhadas > 0 {

@@ -700,7 +700,8 @@ type Querier interface {
 	// programada -- nem quebra nem reparo. Entrando, o MTBF encolhe a cada revisão
 	// (a máquina "falha" mais) e o MTTR é puxado pelo tempo de uma revisão curta:
 	// o indicador puniria quem faz a manutenção em dia. Ver `preventiva` em
-	// resumir/mtbf (model/indicadorMaquina.go). Custo e horas continuam contando.
+	// resumir/mtbf (model/indicadorMaquina.go). Custo e quantidade da preventiva saem
+	// à parte do maquinário (quantidadePreventivas/custoPreventivas), como os reparos.
 	// Ascendente porque MTBF é a média do intervalo entre aberturas consecutivas:
 	// ordenado aqui, o Go só percorre. Trocar para DESC quebra o indicador calado.
 	ListarHistoricoOsDaMaquina(ctx context.Context, arg ListarHistoricoOsDaMaquinaParams) ([]ListarHistoricoOsDaMaquinaRow, error)
@@ -763,13 +764,16 @@ type Querier interface {
 	ListarNotificacoesDoUsuario(ctx context.Context, arg ListarNotificacoesDoUsuarioParams) ([]ListarNotificacoesDoUsuarioRow, error)
 	// A LISTA por trás do card "Custo Maquinário" do Painel de Indicadores (e do card da
 	// máquina): cada OS de máquina encerrada que compõe quantidadeOs/custoTotal. Irmã de
-	// ListarReparosEncerradosDaLoja, que cobre o outro grupo.
+	// ListarReparosEncerradosDaLoja, que cobre os reparos. Serve também à faixa de
+	// manutenções preventivas: `preventiva` separa os dois grupos pela origem da solicitação,
+	// o mesmo critério de `preventiva` em resumir (model/indicadorMaquina.go) -- false é o
+	// card do maquinário, true é a faixa das preventivas.
 	//
 	// ⚠️ O WHERE (e os JOINs que filtram: máquina, setor, encerramento, vw_os_horas) tem que ser o
 	// MESMO de ListarHistoricoOsDaLoja -- é dela que sai o número do card, e a soma dos itens
 	// desta lista é esse número. Mesma regra: só máquina ativa, setor ATUAL da máquina (uma máquina
-	// transferida leva o histórico), escopo no WHERE. Entram TODAS as OS de máquina, inclusive as
-	// de preventiva (origem) e as terceirizadas -- o custo delas está no card, e a lista explica.
+	// transferida leva o histórico), escopo no WHERE. Entram as terceirizadas também -- o custo delas
+	// está no card, e a lista explica.
 	// Filtros opcionais: o setor, a máquina e o mês de ENCERRAMENTO que a tela está mostrando.
 	// Mais novo primeiro, paginada.
 	// ⚠️ custo_* CRUAS, sem ::float8 -- mesma nota de ListarHistoricoOsDaMaquina.
@@ -1294,6 +1298,10 @@ type Querier interface {
 	// `afeta_producao` conta as que pararam a máquina (selo vermelho do card);
 	// finalizadas não usam, mas a query serve às abas em andamento no dia em que
 	// elas também paginarem.
+	//
+	// Uma linha por MÁQUINA dentro do setor (o front soma por setor e por loja):
+	// é o que monta o terceiro nível da navegação. Os pequenos reparos do setor
+	// (s.maquina_id NULL) caem juntos numa linha só, com maquina_* nulos.
 	ResumoOrdensServicoPorSetor(ctx context.Context, arg ResumoOrdensServicoPorSetorParams) ([]ResumoOrdensServicoPorSetorRow, error)
 	// POST /ordens-servico/:id/retomar -- Pausada -> status_anterior da pausa
 	// que acabou de fechar ('Aberta' ou 'Em Andamento', nunca um valor fixo

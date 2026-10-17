@@ -5,11 +5,13 @@ import (
 	"github.com/radaptech/sistema-OSm--Back-end/database/repository"
 )
 
-// GrupoOrdensDoPainel são os dois grupos de custo do Painel de Indicadores da loja: o
-// maquinário e os pequenos reparos (que não têm máquina e ficam SEPARADOS dele).
+// GrupoOrdensDoPainel são os três grupos de custo do Painel de Indicadores da loja: o
+// maquinário (o que quebrou), os pequenos reparos (que não têm máquina) e as manutenções
+// preventivas (revisão programada) -- os dois últimos SEPARADOS do primeiro.
 const (
-	GrupoMaquinario = "maquinario"
-	GrupoReparos    = "reparos"
+	GrupoMaquinario  = "maquinario"
+	GrupoReparos     = "reparos"
+	GrupoPreventivas = "preventivas"
 )
 
 // OrdemDoPainel é uma linha da lista por trás de um card de custo do Painel de Indicadores
@@ -62,7 +64,8 @@ func MontarReparosEncerrados(linhas []repository.ListarReparosEncerradosDaLojaRo
 	return ordens
 }
 
-// MontarOrdensMaquinarioEncerradas, idem para o maquinário.
+// MontarOrdensMaquinarioEncerradas, idem para o maquinário e para as preventivas (a mesma query,
+// separadas pela origem).
 func MontarOrdensMaquinarioEncerradas(linhas []repository.ListarOrdensMaquinarioEncerradasDaLojaRow) []OrdemDoPainel {
 
 	ordens := make([]OrdemDoPainel, 0, len(linhas))

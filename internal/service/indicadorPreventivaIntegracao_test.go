@@ -9,10 +9,11 @@ import (
 
 // TestIndicadoresIgnoramPreventivaNoMtbfEMttr tranca, contra o banco, que a OS
 // aberta pelo job de preventiva (origem 'preventiva') fica fora do MTBF e do MTTR
-// e dentro do custo e da contagem. Revisão programada não é falha nem conserto:
-// contada, o MTBF encolheria a cada revisão e o indicador puniria quem faz a
-// manutenção em dia. O teste de model cobre a conta; este cobre que a query
-// devolve a origem (`s.origem`) e que as duas pontas conversam.
+// e sai à parte do maquinário, na faixa das preventivas (custo e contagem
+// próprios, como os pequenos reparos). Revisão programada não é falha nem
+// conserto: contada, o MTBF encolheria a cada revisão e o indicador puniria quem
+// faz a manutenção em dia. O teste de model cobre a conta; este cobre que a query
+// devolve a origem (`s.origem`) e que as duas pontas -- e as duas listas -- conversam.
 func TestIndicadoresIgnoramPreventivaNoMtbfEMttr(t *testing.T) {
 
 	ctx := context.Background()
@@ -113,8 +114,11 @@ func TestIndicadoresIgnoramPreventivaNoMtbfEMttr(t *testing.T) {
 	if ind.MttrHoras != 5 {
 		t.Errorf("mttrHoras = %v, esperado 5 ((4h + 6h) / 2; com a revisão de 1h daria 3.67)", ind.MttrHoras)
 	}
-	if ind.CustoTotal != 330 || ind.QuantidadeOs != 3 {
-		t.Errorf("custo = %v em %d OS, esperado 330 em 3 -- a revisão conta no custo e na contagem", ind.CustoTotal, ind.QuantidadeOs)
+	if ind.CustoTotal != 300 || ind.QuantidadeOs != 2 {
+		t.Errorf("maquinário = %v em %d OS, esperado 300 em 2 -- a revisão sai à parte", ind.CustoTotal, ind.QuantidadeOs)
+	}
+	if ind.CustoPreventivas != 30 || ind.QuantidadePreventivas != 1 {
+		t.Errorf("preventivas = %v em %d, esperado 30 em 1", ind.CustoPreventivas, ind.QuantidadePreventivas)
 	}
 
 	// O painel da loja usa a mesma conta (mesmo `resumir`).
@@ -122,13 +126,13 @@ func TestIndicadoresIgnoramPreventivaNoMtbfEMttr(t *testing.T) {
 	if err != nil {
 		t.Fatalf("erro ao obter indicadores da loja: %v", err)
 	}
-	if loja.MtbfHoras != 1440 || loja.MttrHoras != 5 || loja.CustoTotal != 330 {
-		t.Errorf("loja: mtbf %v, mttr %v, custo %v, esperado 1440, 5 e 330", loja.MtbfHoras, loja.MttrHoras, loja.CustoTotal)
+	if loja.MtbfHoras != 1440 || loja.MttrHoras != 5 || loja.CustoTotal != 300 || loja.CustoPreventivas != 30 {
+		t.Errorf("loja: mtbf %v, mttr %v, custo %v, preventivas %v, esperado 1440, 5, 300 e 30", loja.MtbfHoras, loja.MttrHoras, loja.CustoTotal, loja.CustoPreventivas)
 	}
 
 	// A lista por trás do card "Custo Maquinário": a soma dos itens é o número do card, e a
-	// preventiva está nela (o custo dela conta), marcada pela origem.
-	t.Run("a lista do maquinário bate com o card, preventiva inclusa", func(t *testing.T) {
+	// preventiva NÃO está nela (tem a faixa e a lista dela).
+	t.Run("a lista do maquinário bate com o card, sem a preventiva", func(t *testing.T) {
 		lista, err := svc.ListarOrdensDoPainelDaLoja(ctx, tenantID, lojaID, admin.Id, "administrador", model.GrupoMaquinario, FiltrosOrdensDoPainel{}, 1)
 		if err != nil {
 			t.Fatalf("erro ao listar: %v", err)
@@ -150,8 +154,8 @@ func TestIndicadoresIgnoramPreventivaNoMtbfEMttr(t *testing.T) {
 		if soma != loja.CustoTotal {
 			t.Errorf("a soma dos itens é R$ %v, o card diz R$ %v", soma, loja.CustoTotal)
 		}
-		if preventivas != 1 {
-			t.Errorf("%d OS de preventiva na lista, esperado 1", preventivas)
+		if preventivas != 0 {
+			t.Errorf("%d OS de preventiva na lista do maquinário, esperado 0", preventivas)
 		}
 		// Mais novo primeiro: a quebra de março encerrou por último.
 		if lista.Dados[0].Id != q2.Id {
@@ -169,8 +173,8 @@ func TestIndicadoresIgnoramPreventivaNoMtbfEMttr(t *testing.T) {
 			return l.Total
 		}
 		janeiro, marco, outraMaquina, outroSetor := "2026-01", "2026-03", maquinaID+1000, setorID+1000
-		if n := no(FiltrosOrdensDoPainel{MaquinaId: &maquinaID}); n != 3 {
-			t.Errorf("da máquina: %d, esperado 3", n)
+		if n := no(FiltrosOrdensDoPainel{MaquinaId: &maquinaID}); n != 2 {
+			t.Errorf("da máquina: %d, esperado 2", n)
 		}
 		if n := no(FiltrosOrdensDoPainel{MaquinaId: &outraMaquina}); n != 0 {
 			t.Errorf("de outra máquina: %d, esperado 0", n)
@@ -178,12 +182,40 @@ func TestIndicadoresIgnoramPreventivaNoMtbfEMttr(t *testing.T) {
 		if n := no(FiltrosOrdensDoPainel{SetorId: &outroSetor}); n != 0 {
 			t.Errorf("de outro setor: %d, esperado 0", n)
 		}
-		// Mês de ENCERRAMENTO: janeiro tem a primeira quebra e a revisão; março, a segunda quebra.
-		if n := no(FiltrosOrdensDoPainel{Mes: &janeiro}); n != 2 {
-			t.Errorf("janeiro: %d, esperado 2", n)
+		// Mês de ENCERRAMENTO: janeiro tem a primeira quebra (a revisão é da outra lista);
+		// março, a segunda quebra.
+		if n := no(FiltrosOrdensDoPainel{Mes: &janeiro}); n != 1 {
+			t.Errorf("janeiro: %d, esperado 1", n)
 		}
 		if n := no(FiltrosOrdensDoPainel{Mes: &marco}); n != 1 {
 			t.Errorf("março: %d, esperado 1", n)
+		}
+	})
+
+	// A faixa das preventivas tem a lista dela, com os mesmos recortes (inclusive a máquina,
+	// que o reparo não tem): a soma dos itens é o número da faixa.
+	t.Run("a lista das preventivas bate com a faixa e filtra como a do maquinário", func(t *testing.T) {
+		listar := func(f FiltrosOrdensDoPainel) model.RespostaPaginada[model.OrdemDoPainel] {
+			t.Helper()
+			l, err := svc.ListarOrdensDoPainelDaLoja(ctx, tenantID, lojaID, admin.Id, "administrador", model.GrupoPreventivas, f, 1)
+			if err != nil {
+				t.Fatalf("erro ao listar: %v", err)
+			}
+			return l
+		}
+		lista := listar(FiltrosOrdensDoPainel{})
+		if lista.Total != int64(loja.QuantidadePreventivas) || len(lista.Dados) != 1 || lista.Dados[0].Id != osPrev {
+			t.Fatalf("lista = %+v, esperado só a OS de preventiva %d", lista.Dados, osPrev)
+		}
+		if lista.Dados[0].CustoTotal != loja.CustoPreventivas || lista.Dados[0].Origem != "preventiva" {
+			t.Errorf("item = %+v, a faixa diz R$ %v", lista.Dados[0], loja.CustoPreventivas)
+		}
+		janeiro, marco := "2026-01", "2026-03"
+		if n := listar(FiltrosOrdensDoPainel{MaquinaId: &maquinaID, Mes: &janeiro}).Total; n != 1 {
+			t.Errorf("máquina em janeiro: %d, esperado 1", n)
+		}
+		if n := listar(FiltrosOrdensDoPainel{Mes: &marco}).Total; n != 0 {
+			t.Errorf("março: %d, esperado 0", n)
 		}
 	})
 }

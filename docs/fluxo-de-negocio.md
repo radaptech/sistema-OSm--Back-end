@@ -293,8 +293,8 @@ card, zerado quando não tem OS). Os dois recortes usam o MESMO `resumir`
 - ⚠️ **A OS de preventiva fica FORA do MTBF e do MTTR** (`origem = 'preventiva'`, corrigido em 15/10/2026).
   Os dois medem falha e conserto, e a revisão programada não é nenhum dos dois: contada, o MTBF encolhia a
   cada revisão (a máquina "falhava" mais só por receber manutenção em dia) e o MTTR era puxado pelo tempo de
-  uma revisão curta -- o indicador punia quem fazia a manutenção em dia. **Horas, custo e a contagem
-  (`quantidadeOs`) continuam contando a preventiva**: o dinheiro gasto na revisão é real. O corte está em
+  uma revisão curta -- o indicador punia quem fazia a manutenção em dia. **Desde 17/10/2026 ela sai também
+  das horas, da rosca, do custo e da contagem do maquinário** -- vai para a faixa própria (próximo item). O corte está em
   `resumir`/`mtbf` (`model/indicadorMaquina.go`), alimentado por `s.origem` nas duas queries de histórico;
   vale no total, no recorte por mês, por setor e por loja (mesmo `resumir`). A OS direta continua entrando:
   é o Gestor abrindo conserto sem fila. Pequeno reparo (sem máquina) segue fora dos indicadores de máquina.
@@ -308,15 +308,21 @@ card, zerado quando não tem OS). Os dois recortes usam o MESMO `resumir`
   reparo; o setor é o da solicitação; o escopo do Gestor vale (EXISTS sobre o setor). Um setor que só teve
   reparo (sem máquina cadastrada) ganha card, para explicar o custo que está no total. Nas máquinas os dois
   campos vêm zerados. Testes: `indicadorMaquina_test.go` e `indicadorReparosIntegracao_test.go`.
-  **A lista por trás de cada card:** `GET /indicadores/lojas/:id/ordens?grupo=maquinario|reparos`
+- **Manutenções preventivas têm custo próprio, SEPARADO do maquinário, igual aos reparos** (17/10/2026, pedido
+  do Gestor). A OS de preventiva (`origem = 'preventiva'`) soma só em `quantidadePreventivas`/`custoPreventivas`,
+  no total da loja, em cada setor, em cada mês **e na máquina** (diferente do reparo, ela tem máquina; vem também
+  em `GET /indicadores/maquinas/:id`). `custoTotal`, `quantidadeOs`, horas paradas e a rosca passam a ser só do
+  que quebrou. O corte é o mesmo `continue` do reparo em `resumir`. Testes: `indicadorMaquina_test.go`
+  (`TestIndicadoresLojaPreventivasSaemSeparadas`) e `indicadorPreventivaIntegracao_test.go`.
+  **A lista por trás de cada card:** `GET /indicadores/lojas/:id/ordens?grupo=maquinario|reparos|preventivas`
   (`ListarOrdensMaquinarioEncerradasDaLoja` / `ListarReparosEncerradosDaLoja`) devolve as OS encerradas que
   compõem o número, paginadas (12), mais novas primeiro, com item (a máquina ou o que o Solicitante digitou),
-  patrimônio, origem, setor, técnico, data de encerramento e custo. O **maquinário inclui a preventiva** (o custo
-  dela está no card; a lista a marca pela origem) e aceita `?maquinaId=` (a tela da máquina individual usa); o
-  filtro de máquina é recusado em reparos (400). Os dois aceitam `?setorId=` e `?mes=MM/AAAA` (o rótulo do
+  patrimônio, origem, setor, técnico, data de encerramento e custo. **Maquinário e preventivas saem da mesma
+  query**, separados por `preventiva` (a origem): o maquinário NÃO traz mais a preventiva. Os dois aceitam
+  `?maquinaId=` (a tela da máquina individual usa); o filtro de máquina é recusado em reparos (400). Os dois aceitam `?setorId=` e `?mes=MM/AAAA` (o rótulo do
   gráfico; o **mês de encerramento**, em São Paulo — não o da abertura, senão a lista e a barra discordariam).
   Mesma definição e mesmo escopo do painel (loja fora do escopo é 404; só máquina ativa; setor ATUAL da máquina),
-  então **a soma dos itens é o `custoTotal` / `custoReparos` do card** (há teste dos dois). É endpoint próprio e
+  então **a soma dos itens é o `custoTotal` / `custoPreventivas` / `custoReparos` do card** (há teste dos três). É endpoint próprio e
   não `GET /ordens-servico` porque o reparo terceirizado vira `tipo = 'terceiros'` e ficaria de fora, e porque
   aquela listagem filtra o mês pela abertura e define "finalizada" (encerrada **e com custo lançado**) de outro
   jeito que o painel (encerrada). A aba **OS Finalizadas** do Gestor continua sendo a ferramenta operacional

@@ -117,9 +117,10 @@ func TestResumoEFiltrosAvancados(t *testing.T) {
 		if err != nil {
 			t.Fatalf("erro no resumo: %v", err)
 		}
+		// A linha é por máquina: o setor é a soma das linhas dele.
 		porSetor := map[int64]int64{}
 		for _, l := range linhas {
-			porSetor[l.SetorId] = l.Quantidade
+			porSetor[l.SetorId] += l.Quantidade
 		}
 		return porSetor
 	}
@@ -231,6 +232,91 @@ func TestResumoEFiltrosAvancados(t *testing.T) {
 			if !c.ok && !errors.Is(err, helper.ErrNaoEncontrado) {
 				t.Errorf("%s: erro = %v, esperado ErrNaoEncontrado", c.nome, err)
 			}
+		}
+	})
+
+	// Por último: o reparo entra no Açougue e mudaria as contagens dos casos acima.
+	t.Run("nível de máquina: uma linha por máquina, reparos juntos, e a lista bate com cada uma", func(t *testing.T) {
+		sReparo, err := svcSolicitacao.CadastrarSolicitacaoReparo(ctx, tenantID, solB.Id, model.NovaSolicitacaoReparoPayload{
+			Item: "Lâmpada", Descricao: "Queimou", FotoChave: "tenant/1/foto.jpg", FotoMime: "image/jpeg", FotoTamanho: 1,
+		})
+		if err != nil {
+			t.Fatalf("erro ao criar reparo: %v", err)
+		}
+		osReparo, err := svcSolicitacao.AbrirOS(ctx, tenantID, admin.Id, "administrador", sReparo.Id, model.AberturaOrdemServicoPayload{Urgencia: "Baixa", TecnicoId: tecnico.Id})
+		if err != nil {
+			t.Fatalf("erro ao abrir OS do reparo: %v", err)
+		}
+		if _, err := svcOS.Iniciar(ctx, tenantID, tecnico.Id, osReparo.Id); err != nil {
+			t.Fatalf("erro ao iniciar: %v", err)
+		}
+		if _, err := svcOS.Encerrar(ctx, tenantID, tecnico.Id, osReparo.Id, model.EncerramentoOrdemServicoPayload{
+			TipoDefeito: "Predial", DefeitoConstatado: "x", CausaRaiz: "y", Solucao: "z", Itens: itensSemHoraTecnica(30),
+		}); err != nil {
+			t.Fatalf("erro ao encerrar: %v", err)
+		}
+
+		f := finalizadas
+		f.SetorId = &setorB
+		linhas, err := svcOS.ResumoOrdensServicoPorSetor(ctx, tenantID, admin.Id, "administrador", f)
+		if err != nil {
+			t.Fatalf("erro no resumo: %v", err)
+		}
+		if len(linhas) != 2 {
+			t.Fatalf("resumo do Açougue = %+v, esperado 2 linhas (PAT-B1 e reparos)", linhas)
+		}
+		var maquinaB1 *int64
+		reparos := 0
+		for _, l := range linhas {
+			switch {
+			case l.MaquinaId == nil:
+				reparos++
+				if l.MaquinaNome != nil || l.Quantidade != 1 {
+					t.Errorf("linha de reparos = %+v, esperado sem máquina e 1 OS", l)
+				}
+			case l.MaquinaCodigo != nil && *l.MaquinaCodigo == "PAT-B1":
+				maquinaB1 = l.MaquinaId
+			}
+		}
+		if reparos != 1 || maquinaB1 == nil {
+			t.Fatalf("resumo do Açougue = %+v, esperado PAT-B1 e uma linha de reparos", linhas)
+		}
+
+		total := func(f FiltrosOrdemServico) (int64, []model.OrdemServico) {
+			t.Helper()
+			p, err := svcOS.ListarOrdensServicoPaginada(ctx, tenantID, admin.Id, "administrador", f, 1)
+			if err != nil {
+				t.Fatalf("erro ao listar: %v", err)
+			}
+			return p.Total, p.Dados
+		}
+
+		porMaquina := f
+		porMaquina.MaquinaId = maquinaB1
+		if n, dados := total(porMaquina); n != 1 || dados[0].Id != osB1 {
+			t.Errorf("máquina PAT-B1: %d OS, esperado só a %d", n, osB1)
+		}
+
+		soReparos := f
+		soReparos.Reparo = &sim
+		if n, dados := total(soReparos); n != 1 || dados[0].Id != osReparo.Id {
+			t.Errorf("reparos do Açougue: %d OS, esperado só a %d", n, osReparo.Id)
+		}
+
+		nao := false
+		soMaquinario := finalizadas
+		soMaquinario.Reparo = &nao
+		if n, _ := total(soMaquinario); n != 3 {
+			t.Errorf("reparo=false: %d OS, esperado as 3 de maquinário", n)
+		}
+
+		// Filtro estreita, nunca amplia: a máquina do Açougue pedida pela gestora da Padaria.
+		escopo, err := svcOS.ListarOrdensServicoPaginada(ctx, tenantID, gestorA.Id, "gestor", porMaquina, 1)
+		if err != nil {
+			t.Fatalf("erro ao listar: %v", err)
+		}
+		if escopo.Total != 0 {
+			t.Errorf("gestora da Padaria viu %d OS de uma máquina do Açougue", escopo.Total)
 		}
 	})
 }

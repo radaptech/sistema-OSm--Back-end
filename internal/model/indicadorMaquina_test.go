@@ -244,17 +244,18 @@ func TestIndicadoresPreventivaNaoEntraNoMtbfNemNoMttr(t *testing.T) {
 	if ind.MttrHoras != 5 {
 		t.Errorf("mttrHoras = %v, esperado 5 (a revisão fora do divisor)", ind.MttrHoras)
 	}
-	// O dinheiro gasto na revisão é real e continua no custo, e a OS continua
-	// contando: só MTBF e MTTR a ignoram.
-	if ind.CustoTotal != 330 {
-		t.Errorf("custoTotal = %v, esperado 330 (a revisão conta no custo)", ind.CustoTotal)
+	// O dinheiro gasto na revisão é real, mas sai à parte do maquinário, como o dos
+	// reparos: o custo das máquinas fica sendo o das quebras.
+	if ind.CustoTotal != 300 || ind.QuantidadeOs != 2 {
+		t.Errorf("maquinário = R$ %v em %d OS, esperado R$ 300 em 2 (a revisão fora)", ind.CustoTotal, ind.QuantidadeOs)
 	}
-	if ind.QuantidadeOs != 3 {
-		t.Errorf("quantidadeOs = %d, esperado 3", ind.QuantidadeOs)
+	if ind.CustoPreventivas != 30 || ind.QuantidadePreventivas != 1 {
+		t.Errorf("preventivas = R$ %v em %d, esperado R$ 30 em 1", ind.CustoPreventivas, ind.QuantidadePreventivas)
 	}
 }
 
-// Só preventiva no histórico: sem falha não há MTBF nem MTTR, e o custo aparece.
+// Só preventiva no histórico: sem falha não há MTBF nem MTTR, e o custo aparece na
+// faixa das preventivas, com o maquinário zerado.
 func TestIndicadoresSoPreventivaNaoTemMtbfNemMttr(t *testing.T) {
 
 	ind := MontarIndicadoresMaquina(1, []repository.ListarHistoricoOsDaMaquinaRow{
@@ -265,8 +266,11 @@ func TestIndicadoresSoPreventivaNaoTemMtbfNemMttr(t *testing.T) {
 	if ind.MtbfHoras != 0 || ind.MttrHoras != 0 {
 		t.Errorf("mtbf = %v, mttr = %v, esperado 0 e 0 (nenhuma falha)", ind.MtbfHoras, ind.MttrHoras)
 	}
-	if ind.CustoTotal != 80 || ind.QuantidadeOs != 2 {
-		t.Errorf("custo = %v em %d OS, esperado 80 em 2", ind.CustoTotal, ind.QuantidadeOs)
+	if ind.CustoTotal != 0 || ind.QuantidadeOs != 0 {
+		t.Errorf("maquinário = R$ %v em %d OS, esperado zerado", ind.CustoTotal, ind.QuantidadeOs)
+	}
+	if ind.CustoPreventivas != 80 || ind.QuantidadePreventivas != 2 {
+		t.Errorf("preventivas = R$ %v em %d, esperado R$ 80 em 2", ind.CustoPreventivas, ind.QuantidadePreventivas)
 	}
 }
 
@@ -336,6 +340,40 @@ func TestIndicadoresLojaReparosSaemSeparados(t *testing.T) {
 	}
 	if fev.Mes != "02/2026" || fev.CustoTotal != 0 || fev.QuantidadeOs != 0 || fev.CustoReparos != 20 {
 		t.Errorf("fevereiro = %+v, esperado só reparo (20), maquinário zerado", fev.ResumoIndicadores)
+	}
+}
+
+// A preventiva sai à parte como o reparo, mas tem máquina: chega no card da máquina
+// também, e fica fora das horas e da rosca (revisão programada não é parada por falha).
+func TestIndicadoresLojaPreventivasSaemSeparadas(t *testing.T) {
+
+	maquinas := []repository.ListarMaquinasRow{{ID: 1, SetorID: 10, SetorNome: "Padaria"}}
+	preventiva := osDaLoja(1, 10, 5, "2026-02", f8(3), f8(2), f8(40))
+	preventiva.Origem = repository.OrigemSolicitacaoPreventiva
+	ind := MontarIndicadoresLoja(7, maquinas, []repository.ListarHistoricoOsDaLojaRow{
+		osDaLoja(1, 10, 0, "2026-01", f8(2), f8(1), f8(100)),
+		preventiva,
+	}, []repository.ListarHistoricoReparosDaLojaRow{
+		reparoDaLoja(10, "Padaria", 3, "2026-01", f8(30)),
+	})
+
+	for nome, r := range map[string]ResumoIndicadores{
+		"loja": ind.ResumoIndicadores, "setor": ind.PorSetor[0].ResumoIndicadores, "máquina": ind.PorMaquina[0].ResumoIndicadores,
+	} {
+		if r.CustoTotal != 100 || r.QuantidadeOs != 1 || r.HorasParadaTotal != 2 || r.PorTipoDefeito[1].HorasParada != 2 {
+			t.Errorf("%s: maquinário contaminado pela preventiva: %+v", nome, r)
+		}
+		if r.CustoPreventivas != 40 || r.QuantidadePreventivas != 1 {
+			t.Errorf("%s: preventivas = R$ %v em %d, esperado R$ 40 em 1", nome, r.CustoPreventivas, r.QuantidadePreventivas)
+		}
+	}
+	if ind.CustoReparos != 30 || ind.PorMaquina[0].CustoReparos != 0 {
+		t.Errorf("reparos misturados: loja %v, máquina %v", ind.CustoReparos, ind.PorMaquina[0].CustoReparos)
+	}
+	// Fevereiro só teve a preventiva: o mês existe, com o maquinário zerado.
+	fev := ind.PorMes[1]
+	if fev.Mes != "02/2026" || fev.CustoTotal != 0 || fev.CustoPreventivas != 40 {
+		t.Errorf("fevereiro = %+v, esperado só a preventiva (40)", fev.ResumoIndicadores)
 	}
 }
 
